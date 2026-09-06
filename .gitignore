@@ -1,0 +1,31 @@
+# Node.js dependencies
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+
+# Build output and local tooling
+dist/
+backend/dist/
+frontend/dist/
+.vite/
+frontend/.vite/
+*.tsbuildinfo
+
+# Secrets and local environment configuration
+.env
+.env.*
+!.env.example
+
+# Logs and operating-system files
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Local product notes and private creative references
+ARCHITECTURE.md
+PRODUCT_FLOW.md
+DEVELOPMENT_PLAN.md
+lizi.txt
