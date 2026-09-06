@@ -1,54 +1,84 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useMemo, useState } from 'react'
 import {
   ArrowLeft,
   ArrowRight,
   BookOpen,
   Check,
-  ChevronRight,
+  CircleAlert,
   CircleDot,
+  Clock3,
+  FileText,
+  Flame,
   GitBranch,
   Lightbulb,
+  Map,
   PenLine,
   Plus,
   RefreshCcw,
   Sparkles,
   Target,
   Undo2,
-  WandSparkles,
+  X,
+  type LucideIcon,
 } from 'lucide-react'
 
-type StepId = 'foundation' | 'anchors' | 'spine' | 'pressure' | 'structure' | 'branches'
 type Act = '起' | '承' | '转' | '合'
+type ValidationTone = 'pass' | 'warn' | 'pending'
 
-interface Concept {
+interface StoryDirection {
   id: string
   title: string
-  label: string
+  genre: string
   logline: string
   protagonist: string
   goal: string
   obstacle: string
   stakes: string
   urgency: string
+  icon: LucideIcon
+}
+
+interface Choice {
+  id: string
+  strategy: string
+  title: string
+  action: string
+  gain: string
+  risk: string
+  consequence: string
+  clue: string
+}
+
+interface StoryStage {
+  id: string
+  act: Act
+  label: string
+  title: string
+  scene: string
+  question: string
+  pressure: number
+  marker?: string
+  choices: Choice[]
 }
 
 interface StoryNode {
   id: string
-  title: string
-  summary: string
   act: Act
+  title: string
+  action: string
+  summary: string
+  risk: string
+  clue: string
   pressure: number
-  marker?: '意外' | '虚假胜利' | '低点'
+  marker?: string
 }
 
-const steps: Array<{ id: StepId; number: string; title: string; subtitle: string }> = [
-  { id: 'foundation', number: '01', title: '故事内核', subtitle: '五大要素' },
-  { id: 'anchors', number: '02', title: '先定头尾', subtitle: '激励与高潮' },
-  { id: 'spine', number: '03', title: '情境发散', subtitle: '故事脊椎' },
-  { id: 'pressure', number: '04', title: '冲突升级', subtitle: '压力曲线' },
-  { id: 'structure', number: '05', title: '起承转合', subtitle: '四幕结构' },
-  { id: 'branches', number: '06', title: '分支细化', subtitle: '选择与后果' },
-]
+interface ValidationItem {
+  label: string
+  value: string
+  detail: string
+  tone: ValidationTone
+}
 
 const examples = [
   '一个失忆侦探收到三天后的自己寄来的信。',
@@ -56,285 +86,397 @@ const examples = [
   '毕业前夜，三位朋友收到一张十年前写给未来的地图。',
 ]
 
-const conceptSets: Concept[][] = [
-  [
-    {
-      id: 'letter',
-      title: '雨夜来信',
-      label: '悬疑 / 选择相信未来',
-      logline: '失忆侦探必须在一封未来来信与眼前证据之间，决定该相信哪个版本的自己。',
-      protagonist: '陆沉，失忆的私家侦探',
-      goal: '找回丢失的三天记忆',
-      obstacle: '信件指向他可能犯下的罪',
-      stakes: '若信是真的，他会亲手害死委托人',
-      urgency: '午夜前，信中预告的命案将发生',
-    },
-    {
-      id: 'witness',
-      title: '第七位目击者',
-      label: '悬疑 / 追寻真相',
-      logline: '唯一能证明侦探清白的目击者，只存在于他正在消失的记忆里。',
-      protagonist: '陆沉，失忆的私家侦探',
-      goal: '找到不存在档案中的第七位目击者',
-      obstacle: '每靠近真相，记忆就被人为篡改',
-      stakes: '他会成为谋杀案的唯一嫌疑人',
-      urgency: '警方将在天亮时正式逮捕他',
-    },
-    {
-      id: 'loop',
-      title: '倒计时的证词',
-      label: '科幻悬疑 / 逆转命运',
-      logline: '侦探每读完一封未来来信，就会失去一段更重要的过去。',
-      protagonist: '陆沉，能看见未来片段的侦探',
-      goal: '阻止信中描述的死亡',
-      obstacle: '未来信息以牺牲记忆为代价',
-      stakes: '救下别人，或彻底遗忘所爱之人',
-      urgency: '下一封信将在死亡发生前十分钟送达',
-    },
-  ],
-  [
-    {
-      id: 'station',
-      title: '末班车座位',
-      label: '都市奇幻 / 守住承诺',
-      logline: '末班车上空着的一张座位，只会为一位不该出现的乘客保留。',
-      protagonist: '周予，夜班公交调度员',
-      goal: '送迷路女孩回家',
-      obstacle: '女孩的住址十年前已被拆除',
-      stakes: '错过终点站，女孩将永远留在车上',
-      urgency: '车辆将在零点被强制回库',
-    },
-    {
-      id: 'contract',
-      title: '借来的明天',
-      label: '情感奇幻 / 重新选择',
-      logline: '一个普通人用明天换来一次改写今天的机会，却发现代价正落在家人身上。',
-      protagonist: '林晓，濒临离职的插画师',
-      goal: '挽回一场已经失去的关系',
-      obstacle: '每次改写都会抹去身边人的共同记忆',
-      stakes: '她会成为最爱的人眼中的陌生人',
-      urgency: '交易只剩最后一次使用机会',
-    },
-    {
-      id: 'room',
-      title: '凌晨四点的门',
-      label: '温情悬疑 / 直面告别',
-      logline: '一扇只在凌晨四点打开的门，让失去母亲的女孩得到七次告别机会。',
-      protagonist: '许葵，拒绝告别的录音师',
-      goal: '录下母亲最后想说的话',
-      obstacle: '每次进门，现实中的一件东西会消失',
-      stakes: '她可能失去与母亲有关的一切',
-      urgency: '门只剩七次开启机会',
-    },
-  ],
-]
-
-const incitingOptions = [
+const directions: StoryDirection[] = [
   {
-    id: 'missing-file',
-    title: '一封没有寄件人的信',
-    description: '雨夜，陆沉在办公室门缝里发现一封写着“别相信今晚的你”的信。',
+    id: 'truth',
+    title: '倒计时的证词',
+    genre: '悬疑 / 自证清白',
+    logline: '主角必须在一条会反噬自己的线索里，找出谁在提前安排结局。',
+    protagonist: '陆沉，一名遗失关键记忆的调查者',
+    goal: '赶在真相被销毁前找到证词',
+    obstacle: '每靠近答案，证据都会将他推成嫌疑人',
+    stakes: '他可能害死唯一愿意相信自己的人',
+    urgency: '天亮前，最后一位知情人将消失',
+    icon: FileText,
   },
   {
-    id: 'client-call',
-    title: '来自委托人的求救电话',
-    description: '失联的委托人只说出一句“你已经来过一次了”，电话随即中断。',
+    id: 'promise',
+    title: '没有终点的末班车',
+    genre: '都市奇幻 / 守住承诺',
+    logline: '主角发现一趟列车只为未能告别的人停留，却必须决定谁能下车。',
+    protagonist: '周予，夜班调度员',
+    goal: '把迷路女孩送回她本该抵达的地方',
+    obstacle: '女孩的地址与整座旧街区都已从现实中消失',
+    stakes: '错过终点，女孩会永远留在车上',
+    urgency: '列车将在零点被强制回库',
+    icon: Clock3,
   },
   {
-    id: 'evidence',
-    title: '案发现场的旧照片',
-    description: '警察在命案现场找到一张三天前拍下的照片，画面中的陆沉正站在死者身后。',
+    id: 'memory',
+    title: '借来的明天',
+    genre: '情感奇幻 / 重新选择',
+    logline: '主角能用未来换一次改写今天的机会，却发现代价正在落到最亲近的人身上。',
+    protagonist: '林晓，一名陷入停滞的插画师',
+    goal: '挽回一段正在失去的关系',
+    obstacle: '每次改写，都会抹掉共同拥有的一段记忆',
+    stakes: '她会成为最爱的人眼中的陌生人',
+    urgency: '交易只剩最后一次使用机会',
+    icon: Sparkles,
   },
 ]
 
-const climaxOptions = [
+const stages: StoryStage[] = [
   {
-    id: 'burn-letter',
-    title: '烧掉最后一封信',
-    description: '陆沉拒绝再被未来操控，带着残缺记忆亲自走进凶手布下的终局。',
-  },
-  {
-    id: 'choose-memory',
-    title: '用记忆换回真相',
-    description: '他选择读完最后一封信，代价是永远忘记自己为何开始调查这起案件。',
-  },
-  {
-    id: 'be-witness',
-    title: '成为自己的目击者',
-    description: '他重返三天前的现场，证明未来的自己曾为救人而主动背下嫌疑。',
-  },
-]
-
-const storyNodes: StoryNode[] = [
-  { id: 'n1', title: '雨夜来信', summary: '信中预告了一桩尚未发生的命案。', act: '起', pressure: 1 },
-  { id: 'n2', title: '照片里的自己', summary: '现场照片将他推向第一嫌疑人的位置。', act: '起', pressure: 1 },
-  { id: 'n3', title: '失效的地址', summary: '信件指向的地址早已废弃，却留下新的血迹。', act: '承', pressure: 2 },
-  { id: 'n4', title: '看似闭合的证据', summary: '他找到凶器并暂时洗清嫌疑。', act: '承', pressure: 2, marker: '虚假胜利' },
-  { id: 'n5', title: '另一份笔迹', summary: '凶器上的指纹证明，三天前的他曾来过这里。', act: '转', pressure: 3, marker: '意外' },
-  { id: 'n6', title: '被抹去的约定', summary: '委托人原来是他遗忘的旧友，警方封锁所有出口。', act: '转', pressure: 4 },
-  { id: 'n7', title: '最后一封信', summary: '他必须在救人和保住记忆之间作出选择。', act: '转', pressure: 5, marker: '低点' },
-  { id: 'n8', title: '成为目击者', summary: '陆沉主动重返现场，把真相从自己的过去里带回来。', act: '合', pressure: 5 },
-]
-
-const branchGroups = [
-  {
-    id: 'trust',
-    title: '岔路一 · 信件可信吗？',
-    node: '看似闭合的证据之后',
+    id: 'trace',
+    act: '起',
+    label: '第一次判断',
+    title: '线索开始反咬',
+    scene: '刚刚出现的痕迹，比预想中更熟悉，也更像一场为主角准备的陷阱。',
+    question: '此刻，他要先保住安全，还是先追住答案？',
+    pressure: 2,
+    marker: '意外',
     choices: [
-      { id: 'trust-letter', title: '相信信件', effect: '提前转移委托人，但触发更早的追捕。' },
-      { id: 'trust-evidence', title: '相信证据', effect: '留在现场查验凶器，却错过关键人物。' },
-      { id: 'trust-custom', title: '写下自己的选择', effect: '为这一刻定义新的行动。' },
+      {
+        id: 'secure',
+        strategy: '保守',
+        title: '先收起线索，给自己留一条退路',
+        action: '先收起线索，给自己留一条退路',
+        gain: '暂时避开了立即到来的怀疑。',
+        risk: '现场会被别人先一步清理。',
+        consequence: '他保住了行动空间，却发现最直接的痕迹已经被擦去。',
+        clue: '一枚没有留下姓名的钥匙',
+      },
+      {
+        id: 'pursue',
+        strategy: '冒险',
+        title: '沿着异常痕迹追到现场深处',
+        action: '沿着异常痕迹追到现场深处',
+        gain: '拿到了比原计划更接近真相的证物。',
+        risk: '自己的行踪也被人完整记录。',
+        consequence: '他追到了封闭现场，并在里面看见一件本不该属于自己的东西。',
+        clue: '一张拍下主角背影的旧照片',
+      },
+      {
+        id: 'contact',
+        strategy: '承担',
+        title: '主动联系唯一的知情人',
+        action: '主动联系唯一的知情人',
+        gain: '让沉默的人给出了一句关键提示。',
+        risk: '也让对方知道主角已经入局。',
+        consequence: '电话那头只留下一个地点，但有人已经在那里等着他。',
+        clue: '一句被刻意省略的地址',
+      },
     ],
   },
   {
     id: 'cost',
-    title: '岔路二 · 最后要失去什么？',
-    node: '最后一封信之前',
+    act: '承',
+    label: '代价浮现',
+    title: '每个答案都要付费',
+    scene: '新线索没有解除困境，反而把主角与最重要的人绑在同一个风险里。',
+    question: '他要把代价留给自己，还是把风险转嫁出去？',
+    pressure: 3,
     choices: [
-      { id: 'cost-memory', title: '交出记忆', effect: '得知真相，却忘记旧友的名字。' },
-      { id: 'cost-risk', title: '冒险不读', effect: '保住自我，却只能用现在的判断救人。' },
-      { id: 'cost-custom', title: '写下自己的代价', effect: '选择一种新的结局代价。' },
+      {
+        id: 'hide',
+        strategy: '保守',
+        title: '隐去最危险的一部分，独自继续调查',
+        action: '隐去最危险的一部分，独自继续调查',
+        gain: '暂时保护了身边的人。',
+        risk: '他失去了可以互相印证的证词。',
+        consequence: '他独自背着证据前进，却发现对手早已知道他的下一步。',
+        clue: '一段被剪掉开头的录音',
+      },
+      {
+        id: 'trade',
+        strategy: '冒险',
+        title: '拿一条线索交换另一条线索',
+        action: '拿一条线索交换另一条线索',
+        gain: '换回了一个能证明时间顺序的细节。',
+        risk: '主动交出了自己的软肋。',
+        consequence: '交换完成后，他知道了谁在撒谎，也让对方知道了自己最怕失去什么。',
+        clue: '一份被改过日期的记录',
+      },
+      {
+        id: 'confess',
+        strategy: '承担',
+        title: '把危险告诉应该知道的人',
+        action: '把危险告诉应该知道的人',
+        gain: '得到了一个愿意同行的见证者。',
+        risk: '两个人都无法再退回原来的生活。',
+        consequence: '有人选择相信他，但这份相信也把对方推到了对手视线里。',
+        clue: '一段只有两人听过的旧承诺',
+      },
+    ],
+  },
+  {
+    id: 'reversal',
+    act: '转',
+    label: '局势翻面',
+    title: '看似闭合的证据',
+    scene: '所有碎片短暂拼成了一个合理答案，主角终于有机会离开这场风暴。',
+    question: '面对一份刚好足够的答案，他要停下，还是亲手撕开它？',
+    pressure: 4,
+    marker: '虚假胜利',
+    choices: [
+      {
+        id: 'accept',
+        strategy: '保守',
+        title: '接受这份足以脱身的答案',
+        action: '接受这份足以脱身的答案',
+        gain: '暂时洗清了自己的嫌疑。',
+        risk: '真正被牺牲的人将再也无法开口。',
+        consequence: '他走到门口时，才发现这份答案替另一个人盖上了罪名。',
+        clue: '一个与答案不相符的时间空白',
+      },
+      {
+        id: 'break',
+        strategy: '冒险',
+        title: '当众指出证据里的裂缝',
+        action: '当众指出证据里的裂缝',
+        gain: '逼出了对手最想藏起的反应。',
+        risk: '主角重新成为所有人目光的焦点。',
+        consequence: '证据在众目睽睽下崩开，主角也被迫交出自己无法解释的过去。',
+        clue: '一处被伪造的签名',
+      },
+      {
+        id: 'protect',
+        strategy: '承担',
+        title: '先救下被答案牺牲的人',
+        action: '先救下被答案牺牲的人',
+        gain: '留住了唯一还能说出真相的人。',
+        risk: '主角放弃了最容易自证的机会。',
+        consequence: '他把人带离现场，也主动背下了本可以推开的嫌疑。',
+        clue: '一段尚未说完的证词',
+      },
+    ],
+  },
+  {
+    id: 'climax',
+    act: '合',
+    label: '主动完成',
+    title: '没有人能替他决定',
+    scene: '退路已经消失，所有未说出口的代价在这一刻同时到场。',
+    question: '最后，他愿意为了什么主动承担后果？',
+    pressure: 5,
+    marker: '低点',
+    choices: [
+      {
+        id: 'self',
+        strategy: '保守',
+        title: '保住自己，再等待下一次机会',
+        action: '保住自己，再等待下一次机会',
+        gain: '留下了继续追查的可能。',
+        risk: '眼前的人和事可能无法被挽回。',
+        consequence: '他选择活着带走证据，却必须承认有些失去已经无法倒转。',
+        clue: '一份等待日后公开的完整档案',
+      },
+      {
+        id: 'truth',
+        strategy: '冒险',
+        title: '用最重要的东西换回真相',
+        action: '用最重要的东西换回真相',
+        gain: '终于让真相被所有人看见。',
+        risk: '他会永久失去自己最珍视的一部分。',
+        consequence: '他把代价留给自己，让那句被掩埋的证词重新回到光里。',
+        clue: '被完整保留下来的最后一句话',
+      },
+      {
+        id: 'rescue',
+        strategy: '承担',
+        title: '先救人，再面对自己的嫌疑',
+        action: '先救人，再面对自己的嫌疑',
+        gain: '守住了比清白更重要的选择。',
+        risk: '他会主动走进最难证明自己的处境。',
+        consequence: '他没有等任何人替自己辩护，而是先把人从危险中带了出来。',
+        clue: '被救下的人亲眼看见的真相',
+      },
     ],
   },
 ]
 
-const stepTitles: Record<StepId, { eyebrow: string; title: string; description: string }> = {
-  foundation: {
-    eyebrow: '第 1 层 · 先让故事有一颗心',
-    title: '从三个方向里，挑一个最想追下去的困境。',
-    description: '每个方向都已把主角、目标、阻碍、代价和时间压力放进同一条线里。',
-  },
-  anchors: {
-    eyebrow: '第 2 层 · 给故事两端钉住坐标',
-    title: '先确定为什么现在开始，以及最后要抵达哪里。',
-    description: '头尾一旦选定，中间的每一个情境都会有可追溯的方向。',
-  },
-  spine: {
-    eyebrow: '第 3 层 · 铺开中间发生的事',
-    title: '这条路径从谜面出发，逐步把人推向终局。',
-    description: '你可以保留、替换或加入自己的情境。每一格都应把故事向前推进。',
-  },
-  pressure: {
-    eyebrow: '第 4 层 · 让困难变得更难',
-    title: '冲突不是重复出现，而是不断提高失去的代价。',
-    description: '系统标出了意外、虚假胜利与低点，方便判断故事的压力是否持续上升。',
-  },
-  structure: {
-    eyebrow: '第 5 层 · 看见故事的骨架',
-    title: '同一串事件，被放进起、承、转、合之后才有了节奏。',
-    description: '关键问题留给主角亲自解决，转折要改变局势，结局要回应开头。',
-  },
-  branches: {
-    eyebrow: '第 6 层 · 把选择变成后果',
-    title: '在真正改变故事的地方，留下你的判断。',
-    description: '每个选择都会改变下一段的风险、线索或结局代价。',
-  },
-}
-
 function App() {
   const [idea, setIdea] = useState('')
   const [exampleIndex, setExampleIndex] = useState(0)
+  const [selectedDirectionId, setSelectedDirectionId] = useState(directions[0].id)
   const [started, setStarted] = useState(false)
-  const [activeIndex, setActiveIndex] = useState(0)
-  const [variationIndex, setVariationIndex] = useState(0)
-  const [selectedConceptId, setSelectedConceptId] = useState<string | null>(null)
-  const [customConcept, setCustomConcept] = useState('')
-  const [showCustomConcept, setShowCustomConcept] = useState(false)
-  const [selectedInciting, setSelectedInciting] = useState<string | null>(null)
-  const [selectedClimax, setSelectedClimax] = useState<string | null>(null)
-  const [showCustomAnchors, setShowCustomAnchors] = useState(false)
-  const [customInciting, setCustomInciting] = useState('')
-  const [customClimax, setCustomClimax] = useState('')
-  const [addedNode, setAddedNode] = useState('')
-  const [selectedBranches, setSelectedBranches] = useState<Record<string, string>>({})
-  const [customBranches, setCustomBranches] = useState<Record<string, string>>({})
-  const [showCustomBranch, setShowCustomBranch] = useState<Record<string, boolean>>({})
+  const [directionPickerOpen, setDirectionPickerOpen] = useState(false)
   const [completed, setCompleted] = useState(false)
+  const [stageIndex, setStageIndex] = useState(0)
+  const [nodes, setNodes] = useState<StoryNode[]>([])
+  const [customChoiceOpen, setCustomChoiceOpen] = useState(false)
+  const [customAction, setCustomAction] = useState('')
+  const [mapOpen, setMapOpen] = useState(false)
+  const [inspectorOpen, setInspectorOpen] = useState(false)
 
-  const activeStep = steps[activeIndex]
-  const concepts = conceptSets[variationIndex]
-  const selectedConcept = useMemo(
-    () => concepts.find((concept) => concept.id === selectedConceptId) ?? conceptSets[0][0],
-    [concepts, selectedConceptId],
+  const direction = useMemo(
+    () => directions.find((item) => item.id === selectedDirectionId) ?? directions[0],
+    [selectedDirectionId],
   )
+  const activeStage = stages[stageIndex]
+  const currentNode = nodes[nodes.length - 1]
+  const completedChoices = Math.max(nodes.length - 1, 0)
+  const progress = Math.round((completedChoices / stages.length) * 100)
+  const canUndo = nodes.length > 1
+  const cleanIdea = idea.trim()
 
-  const resolvedInciting = useMemo(() => {
-    if (showCustomAnchors && customInciting.trim()) return customInciting.trim()
-    return incitingOptions.find((item) => item.id === selectedInciting)?.title ?? '尚未确定'
-  }, [customInciting, selectedInciting, showCustomAnchors])
+  const validationItems = useMemo<ValidationItem[]>(() => {
+    const pressure = currentNode?.pressure ?? 1
+    return [
+      {
+        label: '五大要素',
+        value: '已具备',
+        detail: '主角、目标、阻碍、代价和时间压力已写入开端。',
+        tone: 'pass',
+      },
+      {
+        label: '因果链',
+        value: completedChoices ? `${completedChoices} 次已写入` : '等待选择',
+        detail: completedChoices ? '每次选择都已变成一个节点和新的风险。' : '第一次选择会决定故事如何离开开端。',
+        tone: completedChoices ? 'pass' : 'pending',
+      },
+      {
+        label: '冲突递进',
+        value: `压力 ${pressure} / 5`,
+        detail: pressure >= 3 ? '代价已经进入可见阶段。' : '下一步需要让失去的代价变得具体。',
+        tone: pressure >= 3 ? 'pass' : 'pending',
+      },
+      {
+        label: '高潮主动性',
+        value: completed ? '主角已行动' : stageIndex === stages.length - 1 ? '等待最终决定' : '将在高潮验证',
+        detail: completed ? '结局由主角的最后一个行动推动。' : '重要的事必须留给主角亲自完成。',
+        tone: completed ? 'pass' : 'pending',
+      },
+      {
+        label: '线索回收',
+        value: completed ? '建议补强' : '1 条待回收',
+        detail: completed ? '可在结局前补回最早出现的一条线索，让回响更有力量。' : '记录当前线索，结局时将检查它是否被回答。',
+        tone: 'warn',
+      },
+    ]
+  }, [completed, completedChoices, currentNode?.pressure, stageIndex])
 
-  const resolvedClimax = useMemo(() => {
-    if (showCustomAnchors && customClimax.trim()) return customClimax.trim()
-    return climaxOptions.find((item) => item.id === selectedClimax)?.title ?? '尚未确定'
-  }, [customClimax, selectedClimax, showCustomAnchors])
+  const beginStory = () => {
+    if (!cleanIdea) return
 
-  const selectedConceptTitle = selectedConceptId === 'custom' ? customConcept || '你的故事方向' : selectedConcept.title
-  const isCustomConceptValid = selectedConceptId === 'custom' && customConcept.trim().length > 0
-  const hasFoundation = Boolean(selectedConceptId && (selectedConceptId !== 'custom' || isCustomConceptValid))
-  const hasAnchors = showCustomAnchors
-    ? Boolean(customInciting.trim() && customClimax.trim())
-    : Boolean(selectedInciting && selectedClimax)
-  const hasBranches = branchGroups.every((group) => {
-    const choice = selectedBranches[group.id]
-    return Boolean(choice && (choice !== `${group.id}-custom` || customBranches[group.id]?.trim()))
-  })
-
-  const canAdvance = [hasFoundation, hasAnchors, true, true, true, hasBranches][activeIndex]
-
-  const handleBegin = () => {
-    if (idea.trim()) {
-      setStarted(true)
-    }
+    setNodes([
+      {
+        id: 'opening',
+        act: '起',
+        title: '激励事件',
+        action: '被最初的念头推入困境',
+        summary: `“${cleanIdea}”让${direction.protagonist}不得不在${direction.urgency}前${direction.goal}。`,
+        risk: direction.stakes,
+        clue: '最初出现、尚未被解释的异常',
+        pressure: 1,
+        marker: '开始',
+      },
+    ])
+    setStageIndex(0)
+    setCustomChoiceOpen(false)
+    setCustomAction('')
+    setCompleted(false)
+    setDirectionPickerOpen(false)
+    setStarted(true)
   }
 
-  const handleExample = () => {
+  const openDirectionPicker = () => {
+    if (cleanIdea) setDirectionPickerOpen(true)
+  }
+
+  const choose = (choice: Choice) => {
+    const stage = stages[stageIndex]
+    setNodes((current) => [
+      ...current,
+      {
+        id: `${stage.id}-${current.length}-${choice.id}`,
+        act: stage.act,
+        title: choice.title,
+        action: choice.action,
+        summary: choice.consequence,
+        risk: choice.risk,
+        clue: choice.clue,
+        pressure: stage.pressure,
+        marker: stage.marker,
+      },
+    ])
+    setCustomChoiceOpen(false)
+    setCustomAction('')
+    setMapOpen(false)
+    setInspectorOpen(false)
+
+    if (stageIndex === stages.length - 1) {
+      setCompleted(true)
+      return
+    }
+
+    setStageIndex((current) => current + 1)
+  }
+
+  const submitCustomChoice = () => {
+    const action = customAction.trim()
+    if (!action) return
+
+    choose({
+      id: `custom-${stageIndex}`,
+      strategy: '自定义',
+      title: action,
+      action: `选择${action}`,
+      gain: '把故事带向了你亲自定义的方向。',
+      risk: '这个行动会暴露新的代价，等待下一幕回应。',
+      consequence: `他没有沿着既定路线行动，而是决定${action}。局面因此发生偏移，也留下一个必须被回答的新问题。`,
+      clue: '由这次行动留下的新线索',
+    })
+  }
+
+  const undo = () => {
+    if (!canUndo) return
+
+    if (completed) {
+      setCompleted(false)
+      setStageIndex(stages.length - 1)
+    } else {
+      setStageIndex((current) => Math.max(0, current - 1))
+    }
+
+    setNodes((current) => current.slice(0, -1))
+    setCustomChoiceOpen(false)
+    setCustomAction('')
+  }
+
+  const restart = () => {
+    setIdea('')
+    setExampleIndex(0)
+    setSelectedDirectionId(directions[0].id)
+    setStarted(false)
+    setDirectionPickerOpen(false)
+    setCompleted(false)
+    setStageIndex(0)
+    setNodes([])
+    setCustomChoiceOpen(false)
+    setCustomAction('')
+    setMapOpen(false)
+    setInspectorOpen(false)
+  }
+
+  const useExample = () => {
     const next = (exampleIndex + 1) % examples.length
     setExampleIndex(next)
     setIdea(examples[next])
   }
 
-  const moveNext = () => {
-    if (!canAdvance) return
-    if (activeIndex === steps.length - 1) {
-      setCompleted(true)
-      return
-    }
-    setActiveIndex((index) => index + 1)
-  }
-
-  const reset = () => {
-    setIdea('')
-    setStarted(false)
-    setActiveIndex(0)
-    setVariationIndex(0)
-    setSelectedConceptId(null)
-    setCustomConcept('')
-    setShowCustomConcept(false)
-    setSelectedInciting(null)
-    setSelectedClimax(null)
-    setShowCustomAnchors(false)
-    setCustomInciting('')
-    setCustomClimax('')
-    setAddedNode('')
-    setSelectedBranches({})
-    setCustomBranches({})
-    setShowCustomBranch({})
-    setCompleted(false)
-  }
-
-  if (!started) {
+  if (!started && !directionPickerOpen) {
     return (
       <main className="app-shell opening-shell">
         <div className="opening-image" aria-hidden="true" />
         <div className="opening-shade" aria-hidden="true" />
         <header className="opening-header">
           <Brand />
-          <div className="prototype-status"><span className="status-dot" /> 可点击原型</div>
+          <span className="prototype-label"><span className="status-dot" /> 可点击原型</span>
         </header>
         <section className="opening-content">
-          <div className="opening-kicker"><Sparkles size={15} /> 从一个念头开始</div>
-          <h1>把还说不清的想法，<br />一步步写成故事。</h1>
+          <p className="opening-kicker"><Sparkles size={15} /> 从一个念头开始</p>
+          <h1>时光川行<br />青柠创作平台</h1>
           <p>先写下一个画面、一句设定，或一个你总忘不掉的瞬间。</p>
           <label className="idea-field">
             <span>此刻浮现的想法</span>
@@ -344,196 +486,210 @@ function App() {
               placeholder="例如：一个失忆侦探收到三天后的自己寄来的信。"
               maxLength={240}
             />
-            <div className="field-footer">
-              <button className="quiet-action" type="button" onClick={handleExample}><RefreshCcw size={15} /> 换个示例</button>
-              <span>{idea.length}/240</span>
-            </div>
+            <span className="field-footer">
+              <button className="text-action" type="button" onClick={useExample}><RefreshCcw size={15} /> 换个示例</button>
+              <small>{idea.length} / 240</small>
+            </span>
           </label>
-          <button className="primary-action opening-action" type="button" onClick={handleBegin} disabled={!idea.trim()}>
+          <button className="primary-action opening-action" type="button" onClick={openDirectionPicker} disabled={!cleanIdea}>
             开始展开 <ArrowRight size={18} />
           </button>
         </section>
         <footer className="opening-footer">
-          <span>01 - 06</span>
-          <span>故事内核 / 头尾 / 脊椎 / 冲突 / 结构 / 分支</span>
+          <span>01 - 04</span>
+          <span>困境 / 选择 / 后果 / 验证</span>
         </footer>
+      </main>
+    )
+  }
+
+  if (!started) {
+    return (
+      <main className="app-shell setup-shell direction-shell">
+        <header className="setup-header">
+          <Brand />
+          <button className="opening-back" type="button" onClick={() => setDirectionPickerOpen(false)}><ArrowLeft size={16} /> 返回想法</button>
+        </header>
+
+        <section className="setup-layout direction-layout">
+          <div className="setup-main">
+            <p className="eyebrow"><Sparkles size={15} /> 故事取向</p>
+            <h1>为这个念头，选一条会不断加压的路。</h1>
+            <p className="setup-lead">“{cleanIdea}”会成为第一幕的激励事件，接下来由你决定故事如何向前。</p>
+
+            <div className="direction-header">
+              <div>
+                <p>三个不同方向</p>
+                <strong>选择一个最想继续追问的困境</strong>
+              </div>
+              <span>每个方向都包含主角、目标、阻碍、代价和时间压力</span>
+            </div>
+
+            <div className="direction-list" aria-label="故事方向">
+              {directions.map((item, index) => {
+                const Icon = item.icon
+                const selected = item.id === selectedDirectionId
+                return (
+                  <button
+                    key={item.id}
+                    className={`direction-option ${selected ? 'is-selected' : ''}`}
+                    type="button"
+                    onClick={() => setSelectedDirectionId(item.id)}
+                  >
+                    <span className="direction-index">0{index + 1}</span>
+                    <span className="direction-icon"><Icon size={18} /></span>
+                    <span className="direction-copy">
+                      <span className="direction-topline"><em>{item.genre}</em><strong>{item.title}</strong></span>
+                      <span>从“{cleanIdea}”出发，{item.logline}</span>
+                    </span>
+                    <span className="choice-indicator" aria-hidden="true">{selected ? <Check size={15} /> : <CircleDot size={15} />}</span>
+                  </button>
+                )
+              })}
+            </div>
+
+            <button className="primary-action setup-submit" type="button" onClick={beginStory}>
+              进入共同创作 <ArrowRight size={18} />
+            </button>
+          </div>
+
+          <aside className="setup-aside" aria-label="创作方式">
+            <span className="aside-icon"><GitBranch size={19} /></span>
+            <p className="eyebrow">共同创作</p>
+            <h2>让结构跟着选择生长。</h2>
+            <ol>
+              <li><span>01</span><p>先让主角进入一个必须行动的困境。</p></li>
+              <li><span>02</span><p>每次选择都会写入新的剧情、风险和线索。</p></li>
+              <li><span>03</span><p>最后检查因果、代价与主角是否主动完成高潮。</p></li>
+            </ol>
+            <div className="aside-principle"><Lightbulb size={16} /><span>重要的事，留给主角亲自完成。</span></div>
+          </aside>
+        </section>
       </main>
     )
   }
 
   if (completed) {
     return (
-      <main className="app-shell complete-shell">
-        <header className="topbar">
-          <Brand />
-          <button className="quiet-action" type="button" onClick={reset}><RefreshCcw size={15} /> 新建故事</button>
-        </header>
-        <section className="story-output">
-          <div className="story-output-heading">
-            <div className="completion-mark"><Check size={18} /></div>
-            <div>
-              <p className="eyebrow">剧情已生成 · 原型版本</p>
-              <h1>{selectedConceptTitle}</h1>
-            </div>
-            <button className="secondary-action" type="button" onClick={() => setCompleted(false)}><Undo2 size={16} /> 返回分支</button>
-          </div>
-          <div className="output-grid">
-            <article className="story-manuscript">
-              <p className="manuscript-label">完整剧情 · 选定路径</p>
-              <h2>最初的念头，终于有了可以抵达的结局。</h2>
-              <p>故事从“{idea}”开始。{selectedConceptTitle}让{selectedConcept.protagonist}不得不追赶一个越来越难以辨认的真相。</p>
-              <p>为了{selectedConcept.goal}，主角不断面对{selectedConcept.obstacle}。每一次看似接近答案，都会让{selectedConcept.stakes}变得更真实。</p>
-              <p>当{resolvedClimax}成为唯一出口时，主角没有再把决定交给别人，而是带着不完整的线索，主动走回最初的现场。</p>
-              <p>故事在那一刻完成了回响：{resolvedInciting}留下的问题，终于被主角用自己的选择回答。</p>
-            </article>
-            <aside className="verification-panel">
-              <p className="manuscript-label">结构验证</p>
-              <div className="verification-score"><strong>86</strong><span>/ 100</span></div>
-              <p className="score-caption">故事骨架可继续细化</p>
-              <VerificationRow label="人物目标一致" state="通过" />
-              <VerificationRow label="冲突递进" state="通过" />
-              <VerificationRow label="分支产生后果" state="通过" />
-              <VerificationRow label="线索闭合" state="提示" warning />
-              <div className="verification-note">建议在“最后一封信”之前补一处旧友与陆沉的共同记忆，使结局回收更有力量。</div>
-            </aside>
-          </div>
-        </section>
-      </main>
+      <CompletedStory
+        direction={direction}
+        idea={cleanIdea}
+        nodes={nodes}
+        validationItems={validationItems}
+        onUndo={undo}
+        onRestart={restart}
+      />
     )
   }
 
+  const lastActionCopy = completedChoices === 0
+    ? `“${cleanIdea}”不再只是一个念头。${direction.protagonist}想要${direction.goal}，但${direction.obstacle}。`
+    : `上一回合，${direction.protagonist}${currentNode.action}。${currentNode.summary}`
+
   return (
     <main className="app-shell workspace-shell">
-      <aside className="left-rail">
-        <div className="rail-top">
-          <Brand compact />
+      <header className="workspace-topbar">
+        <Brand compact />
+        <div className="draft-title">
+          <small>本地草稿</small>
+          <strong>{direction.title}</strong>
+          <span>{progress}% 已成形</span>
         </div>
-        <div className="draft-meta">
-          <p>本地草稿</p>
-          <strong>{idea.length > 18 ? `${idea.slice(0, 18)}...` : idea}</strong>
+        <div className="topbar-actions">
+          <button className="toolbar-action desktop-action" type="button" onClick={undo} disabled={!canUndo}><Undo2 size={16} /> 撤销</button>
+          <button className="toolbar-icon mobile-only" type="button" onClick={() => setMapOpen(true)} aria-label="打开故事地图" title="打开故事地图"><Map size={18} /></button>
+          <button className="toolbar-icon mobile-only" type="button" onClick={() => setInspectorOpen(true)} aria-label="打开故事检查" title="打开故事检查"><CircleAlert size={18} /></button>
+          <button className="toolbar-action restart-action" type="button" onClick={restart} aria-label="新建故事" title="新建故事"><RefreshCcw size={15} /> 新建故事</button>
         </div>
-        <nav className="step-nav" aria-label="创作步骤">
-          {steps.map((step, index) => {
-            const isActive = index === activeIndex
-            const isDone = index < activeIndex
-            const isAvailable = index <= activeIndex
-            return (
-              <button
-                key={step.id}
-                className={`step-link ${isActive ? 'is-active' : ''} ${isDone ? 'is-done' : ''}`}
-                type="button"
-                disabled={!isAvailable}
-                onClick={() => setActiveIndex(index)}
-              >
-                <span className="step-index">{isDone ? <Check size={13} /> : step.number}</span>
-                <span className="step-label"><strong>{step.title}</strong><small>{step.subtitle}</small></span>
-              </button>
-            )
-          })}
-        </nav>
-        <div className="rail-bottom">
-          <button className="quiet-action" type="button" onClick={reset}><RefreshCcw size={15} /> 重新开始</button>
-          <span>原型 · 本地运行</span>
-        </div>
-      </aside>
+      </header>
 
-      <section className="workspace-main">
-        <header className="workspace-header">
-          <div className="path-label"><span>故事创作</span><ChevronRight size={14} /><strong>{activeStep.title}</strong></div>
-          <div className="step-counter">第 {activeIndex + 1} / {steps.length} 步</div>
-        </header>
+      <div className="workspace-grid">
+        <StoryMapPanel
+          activeStage={activeStage}
+          nodes={nodes}
+          open={mapOpen}
+          progress={progress}
+          onClose={() => setMapOpen(false)}
+        />
 
-        <section className="workspace-content" key={activeStep.id}>
-          <div className="section-heading">
-            <p className="eyebrow">{stepTitles[activeStep.id].eyebrow}</p>
-            <h1>{stepTitles[activeStep.id].title}</h1>
-            <p>{stepTitles[activeStep.id].description}</p>
+        <section className="story-canvas" aria-labelledby="current-scene-title">
+          <header className="canvas-header">
+            <div className="canvas-path"><span>共同创作</span><ArrowRight size={13} /><strong>{activeStage.label}</strong></div>
+            <span className="canvas-counter">第 {stageIndex + 1} 次选择 / {stages.length}</span>
+          </header>
+
+          <div className="scene-copy" key={activeStage.id}>
+            <div className="scene-meta"><span>{activeStage.act}</span>{activeStage.marker && <em>{activeStage.marker}</em>}</div>
+            <p className="eyebrow">当前局面</p>
+            <h1 id="current-scene-title">{activeStage.title}</h1>
+            <p>{lastActionCopy}</p>
+            <p>{activeStage.scene} {direction.urgency}。</p>
           </div>
 
-          {activeStep.id === 'foundation' && (
-            <FoundationStep
-              concepts={concepts}
-              selectedConceptId={selectedConceptId}
-              showCustomConcept={showCustomConcept}
-              customConcept={customConcept}
-              onSelect={setSelectedConceptId}
-              onChangeSet={() => {
-                setVariationIndex((index) => (index + 1) % conceptSets.length)
-                setSelectedConceptId(null)
-                setShowCustomConcept(false)
-              }}
-              onShowCustom={() => {
-                setShowCustomConcept(true)
-                setSelectedConceptId('custom')
-              }}
-              onCustomChange={setCustomConcept}
-            />
-          )}
-          {activeStep.id === 'anchors' && (
-            <AnchorsStep
-              selectedInciting={selectedInciting}
-              selectedClimax={selectedClimax}
-              showCustom={showCustomAnchors}
-              customInciting={customInciting}
-              customClimax={customClimax}
-              onSelectInciting={setSelectedInciting}
-              onSelectClimax={setSelectedClimax}
-              onShowCustom={() => {
-                setShowCustomAnchors(true)
-                setSelectedInciting(null)
-                setSelectedClimax(null)
-              }}
-              onCustomIncitingChange={setCustomInciting}
-              onCustomClimaxChange={setCustomClimax}
-            />
-          )}
-          {activeStep.id === 'spine' && <SpineStep addedNode={addedNode} onAddedNodeChange={setAddedNode} />}
-          {activeStep.id === 'pressure' && <PressureStep />}
-          {activeStep.id === 'structure' && <StructureStep />}
-          {activeStep.id === 'branches' && (
-            <BranchesStep
-              selectedBranches={selectedBranches}
-              customBranches={customBranches}
-              showCustomBranch={showCustomBranch}
-              onSelect={(groupId, optionId) => setSelectedBranches((current) => ({ ...current, [groupId]: optionId }))}
-              onShowCustom={(groupId) => {
-                setShowCustomBranch((current) => ({ ...current, [groupId]: true }))
-                setSelectedBranches((current) => ({ ...current, [groupId]: `${groupId}-custom` }))
-              }}
-              onCustomChange={(groupId, value) => setCustomBranches((current) => ({ ...current, [groupId]: value }))}
-            />
-          )}
+          <section className="decision-section" aria-labelledby="decision-title">
+            <div className="decision-heading">
+              <div>
+                <p className="eyebrow">由这段剧情自然产生的问题</p>
+                <h2 id="decision-title">{activeStage.question}</h2>
+              </div>
+              <span className="pressure-badge"><Flame size={14} /> 压力 {activeStage.pressure} / 5</span>
+            </div>
+
+            <div className="choice-list">
+              {activeStage.choices.map((choice, index) => (
+                <button className="story-choice" type="button" key={choice.id} onClick={() => choose(choice)}>
+                  <span className="choice-number">0{index + 1}</span>
+                  <span className="choice-copy">
+                    <span className="choice-topline"><em>{choice.strategy}</em><strong>{choice.title}</strong></span>
+                    <span className="choice-impact"><b>得到</b>{choice.gain}</span>
+                    <span className="choice-impact is-risk"><b>风险</b>{choice.risk}</span>
+                  </span>
+                  <ArrowRight className="choice-arrow" size={18} />
+                </button>
+              ))}
+            </div>
+
+            <div className={`custom-choice ${customChoiceOpen ? 'is-open' : ''}`}>
+              {!customChoiceOpen ? (
+                <button className="text-action" type="button" onClick={() => setCustomChoiceOpen(true)}><PenLine size={15} /> 写下另一个行动</button>
+              ) : (
+                <div className="custom-choice-form">
+                  <label htmlFor="custom-action">主角要怎么做？</label>
+                  <div>
+                    <input
+                      id="custom-action"
+                      autoFocus
+                      value={customAction}
+                      onChange={(event) => setCustomAction(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') submitCustomChoice()
+                      }}
+                      placeholder="写下一个具体行动"
+                      maxLength={120}
+                    />
+                    <button className="submit-icon" type="button" onClick={submitCustomChoice} disabled={!customAction.trim()} aria-label="写入自定义行动" title="写入自定义行动"><ArrowRight size={17} /></button>
+                    <button className="cancel-icon" type="button" onClick={() => { setCustomChoiceOpen(false); setCustomAction('') }} aria-label="取消自定义行动" title="取消"><X size={16} /></button>
+                  </div>
+                  <small>这句话会成为新节点，并带来下一次需要回答的问题。</small>
+                </div>
+              )}
+            </div>
+          </section>
+
+          <footer className="canvas-footer">
+            <button className="text-action" type="button" onClick={undo} disabled={!canUndo}><ArrowLeft size={16} /> 撤销上一次选择</button>
+            <span>选择后会立即生成新的局面</span>
+          </footer>
         </section>
 
-        <footer className="workspace-footer">
-          <button className="back-action" type="button" onClick={() => setActiveIndex((index) => Math.max(index - 1, 0))} disabled={activeIndex === 0}>
-            <ArrowLeft size={17} /> 上一步
-          </button>
-          <div className="footer-progress"><span style={{ width: `${((activeIndex + 1) / steps.length) * 100}%` }} /></div>
-          <button className="primary-action" type="button" disabled={!canAdvance} onClick={moveNext}>
-            {activeIndex === steps.length - 1 ? '生成完整剧情' : '进入下一层'} <ArrowRight size={17} />
-          </button>
-        </footer>
-      </section>
-
-      <aside className="inspector">
-        <div className="inspector-heading">
-          <span className="inspector-icon"><GitBranch size={17} /></span>
-          <div><p>故事脊椎</p><strong>正在成形</strong></div>
-        </div>
-        <div className="idea-reference">
-          <span>最初想法</span>
-          <p>{idea}</p>
-        </div>
-        <div className="spine-list">
-          <SpineItem index="01" label="故事内核" value={hasFoundation ? selectedConceptTitle : '等待选择'} active={activeIndex === 0} complete={hasFoundation} />
-          <SpineItem index="02" label="激励事件" value={hasAnchors ? resolvedInciting : '等待确定'} active={activeIndex === 1} complete={hasAnchors} />
-          <SpineItem index="03" label="高潮结局" value={hasAnchors ? resolvedClimax : '等待确定'} active={activeIndex === 1} complete={hasAnchors} />
-          <SpineItem index="04" label="情境节点" value={`${storyNodes.length + (addedNode.trim() ? 1 : 0)} 个节点，向终局推进`} active={activeIndex === 2} complete={activeIndex > 2} />
-          <SpineItem index="05" label="关键分支" value={hasBranches ? '2 处选择已写入后果' : '等待你的判断'} active={activeIndex === 5} complete={hasBranches} />
-        </div>
-        <div className="principle-note"><Lightbulb size={16} /><p>重要的事，留给主角主动完成。</p></div>
-      </aside>
+        <InspectorPanel
+          direction={direction}
+          items={validationItems}
+          latestNode={currentNode!}
+          open={inspectorOpen}
+          onClose={() => setInspectorOpen(false)}
+        />
+      </div>
     </main>
   )
 }
@@ -541,216 +697,180 @@ function App() {
 function Brand({ compact = false }: { compact?: boolean }) {
   return (
     <div className={`brand ${compact ? 'brand-compact' : ''}`}>
-      <span className="brand-mark"><BookOpen size={compact ? 18 : 20} /></span>
-      <span><strong>Story Lens</strong><small>故事折光</small></span>
+      <span className="brand-mark"><BookOpen size={compact ? 17 : 20} /></span>
+      <span><strong>时光川行</strong><small>青柠创作平台</small></span>
     </div>
   )
 }
 
-function FoundationStep({
-  concepts,
-  selectedConceptId,
-  showCustomConcept,
-  customConcept,
-  onSelect,
-  onChangeSet,
-  onShowCustom,
-  onCustomChange,
+function StoryMapPanel({
+  activeStage,
+  nodes,
+  open,
+  progress,
+  onClose,
 }: {
-  concepts: Concept[]
-  selectedConceptId: string | null
-  showCustomConcept: boolean
-  customConcept: string
-  onSelect: (id: string) => void
-  onChangeSet: () => void
-  onShowCustom: () => void
-  onCustomChange: (value: string) => void
+  activeStage: StoryStage
+  nodes: StoryNode[]
+  open: boolean
+  progress: number
+  onClose: () => void
 }) {
   return (
-    <div className="foundation-step stage-enter">
-      <div className="choice-toolbar"><span>从 AI 提案里选，或从你的方向继续写。</span><button className="quiet-action" type="button" onClick={onChangeSet}><RefreshCcw size={15} /> 换一组方向</button></div>
-      <div className="concept-list">
-        {concepts.map((concept, index) => {
-          const selected = selectedConceptId === concept.id
-          return (
-            <button key={concept.id} type="button" className={`concept-option ${selected ? 'is-selected' : ''}`} onClick={() => onSelect(concept.id)}>
-              <span className="concept-number">0{index + 1}</span>
-              <span className="concept-content">
-                <span className="concept-topline"><em>{concept.label}</em><strong>{concept.title}</strong></span>
-                <span className="concept-logline">{concept.logline}</span>
-                <span className="element-line"><b>主角</b>{concept.protagonist}<b>目标</b>{concept.goal}<b>代价</b>{concept.stakes}</span>
-              </span>
-              <span className="choice-indicator">{selected ? <Check size={16} /> : <CircleDot size={16} />}</span>
-            </button>
-          )
-        })}
-      </div>
-      <div className={`custom-composer ${showCustomConcept ? 'is-open' : ''}`}>
-        <button type="button" className="custom-trigger" onClick={onShowCustom}><Plus size={18} /> 我有另一个方向</button>
-        {showCustomConcept && (
-          <textarea autoFocus value={customConcept} onChange={(event) => onCustomChange(event.target.value)} placeholder="写下你想继续追下去的故事困境..." maxLength={300} />
-        )}
-      </div>
-    </div>
+    <aside className={`story-map-panel ${open ? 'is-open' : ''}`} aria-label="故事地图">
+      <header className="panel-heading">
+        <div><span className="panel-icon"><Map size={17} /></span><div><p>故事地图</p><strong>选择正在留下轨迹</strong></div></div>
+        <button className="panel-close mobile-only" type="button" onClick={onClose} aria-label="关闭故事地图" title="关闭"><X size={18} /></button>
+      </header>
+
+      <div className="map-progress" aria-label={`故事完成度 ${progress}%`}><span style={{ width: `${progress}%` }} /></div>
+      <p className="map-progress-copy">{nodes.length} 个节点 · {progress}% 骨架已形成</p>
+
+      <ol className="node-timeline">
+        {nodes.map((node, index) => (
+          <li className="map-node" key={node.id}>
+            <span className="map-node-point">{String(index + 1).padStart(2, '0')}</span>
+            <div>
+              <div className="node-tags"><em>{node.act}</em>{node.marker && <span>{node.marker}</span>}</div>
+              <strong>{node.title}</strong>
+              <p>{node.summary}</p>
+              <small><Flame size={12} /> 风险 {node.pressure} / 5</small>
+            </div>
+          </li>
+        ))}
+        <li className="map-node is-pending">
+          <span className="map-node-point"><Plus size={13} /></span>
+          <div>
+            <div className="node-tags"><em>{activeStage.act}</em></div>
+            <strong>下一次选择</strong>
+            <p>{activeStage.question}</p>
+          </div>
+        </li>
+      </ol>
+
+      <div className="map-note"><GitBranch size={16} /><span>每个节点都由一次具体行动和它带来的后果组成。</span></div>
+    </aside>
   )
 }
 
-function AnchorsStep({
-  selectedInciting,
-  selectedClimax,
-  showCustom,
-  customInciting,
-  customClimax,
-  onSelectInciting,
-  onSelectClimax,
-  onShowCustom,
-  onCustomIncitingChange,
-  onCustomClimaxChange,
+function InspectorPanel({
+  direction,
+  items,
+  latestNode,
+  open,
+  onClose,
 }: {
-  selectedInciting: string | null
-  selectedClimax: string | null
-  showCustom: boolean
-  customInciting: string
-  customClimax: string
-  onSelectInciting: (id: string) => void
-  onSelectClimax: (id: string) => void
-  onShowCustom: () => void
-  onCustomIncitingChange: (value: string) => void
-  onCustomClimaxChange: (value: string) => void
+  direction: StoryDirection
+  items: ValidationItem[]
+  latestNode: StoryNode
+  open: boolean
+  onClose: () => void
 }) {
   return (
-    <div className="anchors-step stage-enter">
-      <AnchorColumn label="故事从这里被迫开始" title="激励事件" icon={<WandSparkles size={18} />} options={incitingOptions} selected={selectedInciting} onSelect={onSelectInciting} />
-      <div className="anchor-connector" aria-hidden="true"><span /><ArrowRight size={17} /><span /></div>
-      <AnchorColumn label="故事最终必须抵达这里" title="高潮结局" icon={<Target size={18} />} options={climaxOptions} selected={selectedClimax} onSelect={onSelectClimax} />
-      <div className="anchor-custom-area">
-        {!showCustom ? <button type="button" className="quiet-action" onClick={onShowCustom}><PenLine size={15} /> 自己填写头尾</button> : (
-          <div className="anchor-custom-fields">
-            <label><span>我的激励事件</span><input value={customInciting} onChange={(event) => onCustomIncitingChange(event.target.value)} placeholder="什么事迫使故事从此刻开始？" /></label>
-            <label><span>我的高潮结局</span><input value={customClimax} onChange={(event) => onCustomClimaxChange(event.target.value)} placeholder="主角最终必须完成什么？" /></label>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
+    <aside className={`inspector-panel ${open ? 'is-open' : ''}`} aria-label="故事检查">
+      <header className="panel-heading">
+        <div><span className="panel-icon"><CircleAlert size={17} /></span><div><p>故事检查</p><strong>可验证，而不是只给分数</strong></div></div>
+        <button className="panel-close mobile-only" type="button" onClick={onClose} aria-label="关闭故事检查" title="关闭"><X size={18} /></button>
+      </header>
 
-function AnchorColumn({ label, title, icon, options, selected, onSelect }: { label: string; title: string; icon: ReactNode; options: Array<{ id: string; title: string; description: string }>; selected: string | null; onSelect: (id: string) => void }) {
-  return (
-    <section className="anchor-column">
-      <div className="anchor-heading"><span>{icon}</span><div><p>{label}</p><h2>{title}</h2></div></div>
-      <div className="anchor-options">
-        {options.map((option) => (
-          <button type="button" key={option.id} className={`anchor-option ${selected === option.id ? 'is-selected' : ''}`} onClick={() => onSelect(option.id)}>
-            <span className="choice-indicator">{selected === option.id ? <Check size={15} /> : <CircleDot size={15} />}</span>
-            <span><strong>{option.title}</strong><small>{option.description}</small></span>
-          </button>
-        ))}
-      </div>
-    </section>
-  )
-}
+      <section className="element-section">
+        <p className="section-label">五大要素</p>
+        <dl className="element-list">
+          <div><dt>主角</dt><dd>{direction.protagonist}</dd></div>
+          <div><dt>目标</dt><dd>{direction.goal}</dd></div>
+          <div><dt>阻碍</dt><dd>{direction.obstacle}</dd></div>
+          <div><dt>代价</dt><dd>{direction.stakes}</dd></div>
+          <div><dt>现在</dt><dd>{direction.urgency}</dd></div>
+        </dl>
+      </section>
 
-function SpineStep({ addedNode, onAddedNodeChange }: { addedNode: string; onAddedNodeChange: (value: string) => void }) {
-  return (
-    <div className="spine-step stage-enter">
-      <div className="node-path">
-        {storyNodes.map((node, index) => (
-          <div className="story-node" key={node.id}>
-            <div className="node-rail"><span>{String(index + 1).padStart(2, '0')}</span><i /></div>
-            <div className="node-copy"><div><em>{node.act}</em>{node.marker && <mark>{node.marker}</mark>}</div><strong>{node.title}</strong><p>{node.summary}</p></div>
-          </div>
-        ))}
-        <div className="add-node">
-          <Plus size={17} />
-          <input value={addedNode} onChange={(event) => onAddedNodeChange(event.target.value)} placeholder="在这里加入你自己的情境节点" />
+      <section className="latest-state">
+        <p className="section-label">最新变化</p>
+        <strong>{latestNode.title}</strong>
+        <p>{latestNode.summary}</p>
+        <div><span>留下线索</span><b>{latestNode.clue}</b></div>
+      </section>
+
+      <section className="validation-section">
+        <p className="section-label">结构验证</p>
+        <div className="validation-list">
+          {items.map((item) => <ValidationRow item={item} key={item.label} />)}
         </div>
-      </div>
-    </div>
+      </section>
+    </aside>
   )
 }
 
-function PressureStep() {
+function ValidationRow({ item }: { item: ValidationItem }) {
+  const Icon = item.tone === 'pass' ? Check : item.tone === 'warn' ? CircleAlert : CircleDot
   return (
-    <div className="pressure-step stage-enter">
-      <div className="pressure-head"><span>冲突等级</span><span>从不安到无法回头</span></div>
-      <div className="pressure-chart" aria-label="冲突等级曲线">
-        {storyNodes.map((node, index) => (
-          <div className="pressure-column" key={node.id}>
-            <div className="pressure-value">{node.pressure}</div>
-            <div className="pressure-track"><span style={{ height: `${node.pressure * 18}%` }} /></div>
-            <div className="pressure-node"><small>{String(index + 1).padStart(2, '0')}</small><strong>{node.title}</strong>{node.marker && <em>{node.marker}</em>}</div>
-          </div>
-        ))}
-      </div>
-      <div className="pressure-legend"><span><i className="legend-line" />正常升级</span><span><i className="legend-marker" />节奏锚点</span><p>第 4 节点让人误以为已经安全，第 7 节点将主角推到最低处。</p></div>
+    <div className={`validation-row is-${item.tone}`}>
+      <div><span>{item.label}</span><small>{item.detail}</small></div>
+      <strong><Icon size={14} /> {item.value}</strong>
     </div>
   )
 }
 
-function StructureStep() {
-  const acts: Act[] = ['起', '承', '转', '合']
-  return (
-    <div className="structure-step stage-enter">
-      {acts.map((act) => (
-        <section className={`act-column act-${act}`} key={act}>
-          <header><span>{act}</span><p>{{ 起: '建立困境', 承: '扩大阻碍', 转: '改变局势', 合: '主动完成' }[act]}</p></header>
-          <div className="act-events">
-            {storyNodes.filter((node) => node.act === act).map((node) => (
-              <div className="act-event" key={node.id}><small>{node.marker ?? '推进'}</small><strong>{node.title}</strong><p>{node.summary}</p></div>
-            ))}
-          </div>
-        </section>
-      ))}
-    </div>
-  )
-}
-
-function BranchesStep({ selectedBranches, customBranches, showCustomBranch, onSelect, onShowCustom, onCustomChange }: {
-  selectedBranches: Record<string, string>
-  customBranches: Record<string, string>
-  showCustomBranch: Record<string, boolean>
-  onSelect: (groupId: string, optionId: string) => void
-  onShowCustom: (groupId: string) => void
-  onCustomChange: (groupId: string, value: string) => void
+function CompletedStory({
+  direction,
+  idea,
+  nodes,
+  validationItems,
+  onUndo,
+  onRestart,
+}: {
+  direction: StoryDirection
+  idea: string
+  nodes: StoryNode[]
+  validationItems: ValidationItem[]
+  onUndo: () => void
+  onRestart: () => void
 }) {
+  const finalNode = nodes[nodes.length - 1]
   return (
-    <div className="branches-step stage-enter">
-      {branchGroups.map((group, index) => (
-        <section className="branch-group" key={group.id}>
-          <header><span>0{index + 1}</span><div><p>{group.node}</p><h2>{group.title}</h2></div></header>
-          <div className="branch-options">
-            {group.choices.map((choice) => {
-              const selected = selectedBranches[group.id] === choice.id
-              const isCustom = choice.id === `${group.id}-custom`
-              return (
-                <div className={`branch-option ${selected ? 'is-selected' : ''}`} key={choice.id}>
-                  <button type="button" onClick={() => isCustom ? onShowCustom(group.id) : onSelect(group.id, choice.id)}>
-                    <span className="choice-indicator">{selected ? <Check size={15} /> : <CircleDot size={15} />}</span>
-                    <span><strong>{choice.title}</strong><small>{choice.effect}</small></span>
-                  </button>
-                  {isCustom && showCustomBranch[group.id] && <input autoFocus value={customBranches[group.id] ?? ''} onChange={(event) => onCustomChange(group.id, event.target.value)} placeholder="写下这个分支的选择与后果" />}
-                </div>
-              )
-            })}
-          </div>
-        </section>
-      ))}
-      <div className="branch-footnote"><GitBranch size={16} /><span>本原型保留 2 个关键分叉，后续分支会在终局前重新汇合，避免故事失控膨胀。</span></div>
-    </div>
-  )
-}
+    <main className="app-shell complete-shell">
+      <header className="workspace-topbar">
+        <Brand compact />
+        <div className="draft-title"><small>故事骨架</small><strong>{direction.title}</strong><span>已完成一条可追溯路径</span></div>
+        <div className="topbar-actions">
+          <button className="toolbar-action desktop-action" type="button" onClick={onUndo}><Undo2 size={16} /> 修改高潮</button>
+          <button className="toolbar-action restart-action" type="button" onClick={onRestart} aria-label="新建故事" title="新建故事"><RefreshCcw size={15} /> 新建故事</button>
+        </div>
+      </header>
 
-function SpineItem({ index, label, value, active, complete }: { index: string; label: string; value: string; active: boolean; complete: boolean }) {
-  return (
-    <div className={`spine-item ${active ? 'is-active' : ''} ${complete ? 'is-complete' : ''}`}>
-      <span>{complete ? <Check size={12} /> : index}</span><div><small>{label}</small><strong>{value}</strong></div>
-    </div>
-  )
-}
+      <section className="completed-content">
+        <header className="completed-heading">
+          <span className="complete-mark"><Check size={20} /></span>
+          <div><p className="eyebrow">选定路径已生成</p><h1>{direction.title}</h1></div>
+          <button className="text-action mobile-complete-edit" type="button" onClick={onUndo}><Undo2 size={15} /> 修改高潮</button>
+        </header>
 
-function VerificationRow({ label, state, warning = false }: { label: string; state: string; warning?: boolean }) {
-  return <div className={`verification-row ${warning ? 'is-warning' : ''}`}><span>{label}</span><strong>{warning ? <CircleDot size={14} /> : <Check size={14} />}{state}</strong></div>
+        <div className="completed-grid">
+          <article className="manuscript">
+            <p className="manuscript-label">故事梗概 · 当前路径</p>
+            <h2>最初的念头，终于抵达了一个由主角自己做出的结局。</h2>
+            <p>故事从“{idea}”开始。{direction.protagonist}必须在{direction.urgency}前{direction.goal}，而{direction.obstacle}让每条路都带着新的代价。</p>
+            {nodes.map((node, index) => (
+              <section className="manuscript-node" key={node.id}>
+                <span>{String(index + 1).padStart(2, '0')}</span>
+                <div><em>{node.act}{node.marker ? ` · ${node.marker}` : ''}</em><strong>{node.title}</strong><p>{node.summary}</p></div>
+              </section>
+            ))}
+            <p>最后，{direction.protagonist}{finalNode.action}。{finalNode.summary} 这个结局没有把决定交给别人，也让最初出现的问题获得了回应。</p>
+          </article>
+
+          <aside className="completion-checks">
+            <div className="completion-check-heading"><Target size={18} /><div><p>结构验证</p><strong>看见证据，再决定修改哪里</strong></div></div>
+            <div className="validation-list">
+              {validationItems.map((item) => <ValidationRow item={item} key={item.label} />)}
+            </div>
+            <div className="completion-note"><Lightbulb size={16} /><p>建议回到高潮前，将“{nodes[1]?.clue ?? '最早出现的线索'}”再出现一次，让开头和结局形成更强的回响。</p></div>
+            <button className="secondary-action" type="button" onClick={onUndo}><Undo2 size={16} /> 回到最后一次选择</button>
+          </aside>
+        </div>
+      </section>
+    </main>
+  )
 }
 
 export default App
