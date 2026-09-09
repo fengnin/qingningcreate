@@ -1,0 +1,563 @@
+import type {
+  ApiErrorResponse,
+  GeneratedStory,
+  StoryConflict,
+  StoryBeat,
+  StoryDirectionsRequest,
+  StoryDirectionsResponse,
+  StoryGenerationSessionRequest,
+  StoryGenerationResponse,
+  StoryHeadTailOption,
+  StoryHeadTailSessionRequest,
+  StoryHeadTailResponse,
+  StoryNode,
+  StoryPredicament,
+  StorySeed,
+  StoryReviewItem,
+  StoryTurn,
+  StoryTurnOption,
+  StoryTurnSessionRequest,
+  StoryTurnResponse,
+  StoryFact,
+  StoryAction,
+  StoryTransition,
+  StorySessionVersion,
+} from '../../../shared/story-contract.js'
+
+const INVALID_RESPONSE_MESSAGE = '故事服务返回的数据不完整，请重试。'
+const GENERATED_OPTION_COUNT = 3
+
+export class StoryApiError extends Error {
+  constructor(
+    message: string,
+    public readonly code?: string,
+  ) {
+    super(message)
+    this.name = 'StoryApiError'
+  }
+}
+
+export function requestStoryDirections(request: StoryDirectionsRequest): Promise<StoryDirectionsResponse> {
+  return postJson('/api/story-directions', request, parseDirectionsResponse)
+}
+
+export function requestHeadTailOptions(request: StoryHeadTailSessionRequest): Promise<StoryHeadTailResponse> {
+  return postJson('/api/story-head-tail', request, parseHeadTailResponse)
+}
+
+export function requestStoryTurn(request: StoryTurnSessionRequest): Promise<StoryTurnResponse> {
+  return postJson('/api/story-spine/turn', request, parseStoryTurnResponse)
+}
+
+export function requestFullStory(request: StoryGenerationSessionRequest): Promise<StoryGenerationResponse> {
+  return postJson('/api/stories/generate', request, parseStoryResponse)
+}
+
+async function postJson<T>(
+  path: string,
+  body: unknown,
+  parseResponse: (payload: unknown) => T,
+): Promise<T> {
+  let response: Response
+
+  try {
+    response = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  } catch {
+    throw new StoryApiError('暂时连不上故事服务，请确认后端已启动。', 'NETWORK_ERROR')
+  }
+
+  const payload = await readJson(response)
+  if (!response.ok) {
+    const error = parseApiErrorResponse(payload)
+    throw new StoryApiError(error?.error.message ?? '生成没有完成，请稍后重试。', error?.error.code)
+  }
+
+  return parseResponse(payload)
+}
+
+async function readJson(response: Response): Promise<unknown> {
+  try {
+    return await response.json()
+  } catch {
+    throw new StoryApiError('故事服务返回了无法读取的内容，请重试。', 'INVALID_RESPONSE')
+  }
+}
+
+function parseDirectionsResponse(payload: unknown): StoryDirectionsResponse {
+  const record = expectRecord(payload)
+
+  return {
+    ...parseStorySessionVersion(record),
+    seed: parseStorySeed(record.seed),
+    directions: parseGeneratedOptionTuple(record.directions, parseStoryPredicament),
+  }
+}
+
+function parseHeadTailResponse(payload: unknown): StoryHeadTailResponse {
+  const record = expectRecord(payload)
+
+  return {
+    ...parseStorySessionVersion(record),
+    options: parseGeneratedOptionTuple(record.options, parseHeadTailOption),
+  }
+}
+
+function parseStoryTurnResponse(payload: unknown): StoryTurnResponse {
+  const record = expectRecord(payload)
+  return {
+    ...parseStorySessionVersion(record),
+    history: parseTurnHistory(record.history),
+    turn: parseStoryTurn(record.turn),
+  }
+}
+
+
+function parseStoryResponse(payload: unknown): StoryGenerationResponse {
+  const record = expectRecord(payload)
+  return {
+    ...parseStorySessionVersion(record),
+    story: parseGeneratedStory(record.story),
+  }
+}
+
+function parseStorySessionVersion(record: Record<string, unknown>): StorySessionVersion {
+  return {
+    storyId: readIdentifier(record, 'storyId'),
+    revision: readNonNegativeInteger(record, 'revision'),
+  }
+}
+
+function parseStorySeed(value: unknown): StorySeed {
+  const record = expectRecord(value)
+  const lockedGoal = record.lockedGoal
+  if (lockedGoal !== null && (typeof lockedGoal !== 'string' || !lockedGoal.trim())) throwInvalidResponse()
+
+  const worldMode = record.worldMode
+  if (worldMode !== 'realistic-default' && worldMode !== 'user-specified') throwInvalidResponse()
+
+  const expansionScope = record.expansionScope
+  if (expansionScope !== 'keep-scale' && expansionScope !== 'grounded-obstacle' && expansionScope !== 'larger-story' && expansionScope !== 'genre-led') {
+    throwInvalidResponse()
+  }
+
+  return {
+    subject: readText(record, 'subject'),
+    activeSituation: readText(record, 'activeSituation'),
+    lockedGoal: typeof lockedGoal === 'string' ? lockedGoal.trim() : null,
+    lockedFacts: readTextList(record, 'lockedFacts', 1, 5),
+    worldMode,
+    expansionScope,
+    unknowns: readTextList(record, 'unknowns', 1, 6),
+  }
+}
+
+function parseStoryPredicament(value: unknown): StoryPredicament {
+  const record = expectRecord(value)
+
+  return {
+    id: readText(record, 'id'),
+    title: readText(record, 'title'),
+    variationAxis: readStoryVariationAxis(record.variationAxis),
+    preservedGoal: readText(record, 'preservedGoal'),
+    immediateSituation: readText(record, 'immediateSituation'),
+    obstacle: readText(record, 'obstacle'),
+    urgency: readText(record, 'urgency'),
+    choice: readText(record, 'choice'),
+    plausibleCost: readText(record, 'plausibleCost'),
+    facts: parseStoryFacts(record.facts),
+    actions: parseStoryActions(record.actions),
+  }
+}
+
+function parseHeadTailOption(value: unknown): StoryHeadTailOption {
+  const record = expectRecord(value)
+  return {
+    id: readText(record, 'id'),
+    opening: readText(record, 'opening'),
+    openingClue: readText(record, 'openingClue'),
+    climax: readText(record, 'climax'),
+    resolution: readText(record, 'resolution'),
+    cost: readText(record, 'cost'),
+    promise: readText(record, 'promise'),
+    climaxActionId: readIdentifier(record, 'climaxActionId'),
+    transition: parseStoryTransition(record.transition),
+  }
+}
+
+function parseStoryTurn(value: unknown): StoryTurn {
+  const record = expectRecord(value)
+  const node = parseStoryNode(record.node)
+  const conflict = parseStoryConflict(record.conflict)
+  const phase = readStoryTurnPhase(record.phase)
+  const isConclusion = record.isConclusion
+  const canConclude = record.canConclude
+  const question = record.question
+
+  if (typeof isConclusion !== 'boolean' || typeof canConclude !== 'boolean') throwInvalidResponse()
+  if (question !== null && (typeof question !== 'string' || !question.trim())) throwInvalidResponse()
+  if (!Array.isArray(record.options)) throwInvalidResponse()
+
+  const options = record.options.map(parseStoryTurnOption)
+  const turn: StoryTurn = {
+    id: readText(record, 'id'),
+    phase,
+    node,
+    conflict,
+    question: typeof question === 'string' ? question.trim() : null,
+    options,
+    ...parseStoryTurnConclusionPayload(record, isConclusion),
+    canConclude,
+    isConclusion,
+  }
+
+  validateStoryTurnShape(turn)
+  return turn
+}
+
+function parseStoryTurnConclusionPayload(
+  record: Record<string, unknown>,
+  isConclusion: boolean,
+): Pick<StoryTurn, 'narrativeAction' | 'transition'> {
+  if (!isConclusion) {
+    requireNull(record.narrativeAction)
+    requireNull(record.transition)
+    return { narrativeAction: null, transition: null }
+  }
+
+  return {
+    narrativeAction: parseStoryAction(record.narrativeAction),
+    transition: parseStoryTransition(record.transition),
+  }
+}
+
+function validateStoryTurnShape(turn: StoryTurn) {
+  if (turn.conflict.nodeId !== turn.node.id) throwInvalidResponse()
+
+  if (turn.isConclusion) {
+    validateConclusionTurnShape(turn)
+    return
+  }
+
+  validateOngoingTurnShape(turn)
+}
+
+function validateConclusionTurnShape(turn: StoryTurn) {
+  const hasInvalidShape = turn.phase !== 'resolution'
+    || turn.node.goalState !== 'resolved'
+    || turn.question !== null
+    || turn.options.length !== 0
+    || !turn.narrativeAction
+    || !turn.transition
+    || turn.canConclude
+
+  if (hasInvalidShape) throwInvalidResponse()
+}
+
+function validateOngoingTurnShape(turn: StoryTurn) {
+  const hasInvalidShape = turn.phase === 'resolution'
+    || turn.node.goalState === 'resolved'
+    || !turn.question
+    || turn.options.length !== GENERATED_OPTION_COUNT
+    || turn.narrativeAction !== null
+    || turn.transition !== null
+
+  if (hasInvalidShape) throwInvalidResponse()
+}
+
+function parseStoryNode(value: unknown): StoryNode {
+  const record = expectRecord(value)
+  return {
+    id: readText(record, 'id'),
+    title: readText(record, 'title'),
+    event: readText(record, 'event'),
+    purpose: readText(record, 'purpose'),
+    goalState: readStoryGoalState(record.goalState),
+  }
+}
+
+function parseStoryConflict(value: unknown): StoryConflict {
+  const record = expectRecord(value)
+  return {
+    nodeId: readText(record, 'nodeId'),
+    conflict: readText(record, 'conflict'),
+    action: readText(record, 'action'),
+    consequence: readText(record, 'consequence'),
+    intensity: readInteger(record, 'intensity', 1, 5),
+    anchor: readText(record, 'anchor'),
+  }
+}
+
+function parseStoryTurnOption(value: unknown): StoryTurnOption {
+  const record = expectRecord(value)
+  return {
+    id: readText(record, 'id'),
+    label: readText(record, 'label'),
+    action: readText(record, 'action'),
+    immediateConsequence: readText(record, 'immediateConsequence'),
+    laterEffect: readText(record, 'laterEffect'),
+    narrativeAction: parseStoryAction(record.narrativeAction),
+    transition: parseStoryTransition(record.transition),
+  }
+}
+
+function parseStoryAction(value: unknown): StoryAction {
+  const record = expectRecord(value)
+  const source = record.source
+  if (source !== 'user-choice' && source !== 'generated') throwInvalidResponse()
+
+  return parseActionFields(record, source)
+}
+
+function parseStoryFacts(value: unknown): StoryFact[] {
+  if (!Array.isArray(value) || value.length < 1) throwInvalidResponse()
+  return value.map((item) => parseFactRecord(item))
+}
+
+function parseStoryActions(value: unknown): StoryAction[] {
+  if (!Array.isArray(value) || value.length < 1) throwInvalidResponse()
+  return value.map((item) => {
+    const record = expectRecord(item)
+    const source = record.source
+    if (source !== 'user-choice' && source !== 'generated') throwInvalidResponse()
+    return parseActionFields(record, source)
+  })
+}
+
+function parseActionFields(
+  record: Record<string, unknown>,
+  source: StoryAction['source'],
+): StoryAction {
+  return {
+    id: readIdentifier(record, 'id'),
+    intent: readText(record, 'intent'),
+    preconditions: readIdentifierList(record, 'preconditions'),
+    effects: readIdentifierList(record, 'effects'),
+    source,
+  }
+}
+
+function parseStoryTransition(value: unknown): StoryTransition {
+  const record = expectRecord(value)
+  return {
+    actionId: readIdentifier(record, 'actionId'),
+    consumedFacts: readIdentifierList(record, 'consumedFacts'),
+    changedFacts: parseFactChanges(record.changedFacts),
+    introducedFacts: parseIntroducedFacts(record.introducedFacts),
+  }
+}
+
+function requireNull(value: unknown): null {
+  if (value !== null) throwInvalidResponse()
+  return null
+}
+
+function parseFactChanges(value: unknown): StoryTransition['changedFacts'] {
+  if (!Array.isArray(value)) throwInvalidResponse()
+  return value.map((item) => {
+    const record = expectRecord(item)
+    return { factId: readIdentifier(record, 'factId'), statement: readText(record, 'statement') }
+  })
+}
+
+function parseIntroducedFacts(value: unknown): StoryFact[] {
+  if (!Array.isArray(value)) throwInvalidResponse()
+  return value.map((item) => {
+    const record = expectRecord(item)
+    if (record.source !== 'confirmed-action' || record.mutability !== 'changeable') throwInvalidResponse()
+    return parseFactRecord(item)
+  })
+}
+
+function parseFactRecord(value: unknown): StoryFact {
+  const record = expectRecord(value)
+  const source = record.source
+  const mutability = record.mutability
+  if (source !== 'user' && source !== 'predicament' && source !== 'confirmed-action') throwInvalidResponse()
+  if (mutability !== 'fixed' && mutability !== 'changeable' && mutability !== 'unknown') throwInvalidResponse()
+
+  return {
+    id: readIdentifier(record, 'id'),
+    statement: readText(record, 'statement'),
+    source,
+    mutability,
+  }
+}
+
+function parseTurnHistory(value: unknown): StoryTurnResponse['history'] {
+  if (!Array.isArray(value)) throwInvalidResponse()
+  return value.map((item) => {
+    const record = expectRecord(item)
+    return {
+      turnId: readIdentifier(record, 'turnId'),
+      phase: readStoryTurnPhase(record.phase),
+      node: parseStoryNode(record.node),
+      conflict: parseStoryConflict(record.conflict),
+      selectedOption: parseStoryTurnOption(record.selectedOption),
+    }
+  })
+}
+
+function parseGeneratedStory(value: unknown): GeneratedStory {
+  const record = expectRecord(value)
+  const body = readText(record, 'body')
+
+  return {
+    title: readOptionalGeneratedText(record.title, 50) ?? '未命名故事',
+    logline: readOptionalGeneratedText(record.logline, 220) ?? '根据你确认的故事路径写成。',
+    body,
+    outline: parseOptionalStoryBeats(record.outline),
+    review: parseOptionalStoryReview(record.review),
+  }
+}
+
+function parseGeneratedOptionTuple<T>(
+  value: unknown,
+  parseOption: (option: unknown) => T,
+): [T, T, T] {
+  if (!Array.isArray(value) || value.length !== GENERATED_OPTION_COUNT) throwInvalidResponse()
+  return [parseOption(value[0]), parseOption(value[1]), parseOption(value[2])]
+}
+
+function parseOptionalStoryBeats(value: unknown): StoryBeat[] {
+  if (!Array.isArray(value)) return createFallbackStoryBeats()
+
+  const beats: StoryBeat[] = []
+  for (const item of value.slice(0, 8)) {
+    if (!isRecord(item)) continue
+
+    const label = readOptionalGeneratedText(item.label, 32)
+    const detail = readOptionalGeneratedText(item.detail, 240)
+    if (label && detail) beats.push({ label, detail })
+  }
+
+  return beats.length ? beats : createFallbackStoryBeats()
+}
+
+function parseOptionalStoryReview(value: unknown): StoryReviewItem[] {
+  if (!Array.isArray(value)) return createFallbackStoryReview()
+
+  const review: StoryReviewItem[] = []
+  for (const item of value.slice(0, 8)) {
+    if (!isRecord(item) || (item.tone !== 'pass' && item.tone !== 'warn')) continue
+
+    const label = readOptionalGeneratedText(item.label, 48)
+    const summary = readOptionalGeneratedText(item.value, 80)
+    const detail = readOptionalGeneratedText(item.detail, 260)
+    if (label && summary && detail) review.push({ label, value: summary, detail, tone: item.tone })
+  }
+
+  return review.length ? review : createFallbackStoryReview()
+}
+
+function createFallbackStoryBeats(): StoryBeat[] {
+  return [{
+    label: '已确认的路径',
+    detail: '故事正文已按当前确认的情境、行动和结局写成。',
+  }]
+}
+
+function createFallbackStoryReview(): StoryReviewItem[] {
+  return [{
+    label: '故事正文',
+    value: '已生成',
+    detail: '可以从当前路径继续阅读，并返回前面的选择进行修改。',
+    tone: 'pass',
+  }]
+}
+
+function parseApiErrorResponse(value: unknown): ApiErrorResponse | undefined {
+  if (!isRecord(value) || !isRecord(value.error)) return undefined
+
+  const { code, message } = value.error
+  if (typeof code !== 'string' || !code || typeof message !== 'string' || !message) return undefined
+
+  return { error: { code, message } }
+}
+
+function expectRecord(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) throwInvalidResponse()
+  return value
+}
+
+function readText(record: Record<string, unknown>, field: string): string {
+  const value = record[field]
+  if (typeof value !== 'string' || !value.trim()) throwInvalidResponse()
+  return value.trim()
+}
+
+function readOptionalGeneratedText(value: unknown, maximumLength: number): string | undefined {
+  if (typeof value !== 'string') return undefined
+
+  const text = value.trim()
+  return text && text.length <= maximumLength ? text : undefined
+}
+
+function readIdentifier(record: Record<string, unknown>, field: string): string {
+  const value = readText(record, field)
+  if (!/^[a-z][a-z0-9-]*$/i.test(value)) throwInvalidResponse()
+  return value
+}
+
+function readNonNegativeInteger(record: Record<string, unknown>, field: string): number {
+  const value = record[field]
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) throwInvalidResponse()
+  return value
+}
+
+function readIdentifierList(record: Record<string, unknown>, field: string): string[] {
+  const value = record[field]
+  if (!Array.isArray(value)) throwInvalidResponse()
+  return value.map((item) => {
+    if (typeof item !== 'string' || !/^[a-z][a-z0-9-]*$/i.test(item.trim())) throwInvalidResponse()
+    return item.trim()
+  })
+}
+
+function readStoryVariationAxis(value: unknown): StoryPredicament['variationAxis'] {
+  if (value === 'time' || value === 'resource' || value === 'relationship' || value === 'commitment') return value
+  throwInvalidResponse()
+}
+
+function readStoryTurnPhase(value: unknown): StoryTurn['phase'] {
+  if (value === 'opening' || value === 'development' || value === 'turn' || value === 'climax' || value === 'resolution') return value
+  throwInvalidResponse()
+}
+
+function readStoryGoalState(value: unknown): StoryNode['goalState'] {
+  if (value === 'trying' || value === 'blocked' || value === 'changed-plan' || value === 'near-completion' || value === 'resolved') {
+    return value
+  }
+
+  throwInvalidResponse()
+}
+
+function readInteger(record: Record<string, unknown>, field: string, minimum: number, maximum: number): number {
+  const value = record[field]
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < minimum || value > maximum) {
+    throwInvalidResponse()
+  }
+
+  return value
+}
+
+function readTextList(record: Record<string, unknown>, field: string, minimum: number, maximum: number): string[] {
+  const value = record[field]
+  if (!Array.isArray(value) || value.length < minimum || value.length > maximum) throwInvalidResponse()
+
+  return value.map((item) => {
+    if (typeof item !== 'string' || !item.trim()) throwInvalidResponse()
+    return item.trim()
+  })
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function throwInvalidResponse(): never {
+  throw new StoryApiError(INVALID_RESPONSE_MESSAGE, 'INVALID_RESPONSE')
+}

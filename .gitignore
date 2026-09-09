@@ -11,6 +11,9 @@ frontend/dist/
 frontend/.vite/
 *.tsbuildinfo
 
+# Local story session snapshots
+backend/data/
+
 # Secrets and local environment configuration
 .env
 .env.*
@@ -29,3 +32,5 @@ ARCHITECTURE.md
 PRODUCT_FLOW.md
 DEVELOPMENT_PLAN.md
 lizi.txt
+测试.txt
+老白.txt
