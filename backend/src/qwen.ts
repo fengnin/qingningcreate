@@ -1,8 +1,11 @@
+import type { StoryConflictCoreContextPrefill } from '../../shared/story-contract.js'
+
 export class AppError extends Error {
   constructor(
     message: string,
     public readonly statusCode: number,
     public readonly code: string,
+    public readonly conflictCoreContextPrefill?: StoryConflictCoreContextPrefill,
   ) {
     super(message)
     this.name = 'AppError'

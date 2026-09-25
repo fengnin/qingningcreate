@@ -1,19 +1,31 @@
 import {
   requestFullStory,
   requestHeadTailOptions,
-  requestStoryDirections,
+  requestConflictCores,
+  requestStoryPredicament,
   requestStoryTurn,
+  requestStoryTurnOptionRefinement,
 } from './storyApi'
 import {
   type PendingTurnRequest,
   type StorySessionState,
 } from './useStorySessionState'
-import type { StoryTurnMode, StoryView } from './types'
+import { normalizeConflictCoreContext } from './conflictCoreContext'
+import type {
+  StoryConflictCoreContext,
+  StorySessionVersion,
+  StoryTurnMode,
+  StoryTurnOptionRefinement,
+  StoryTurnResponse,
+  StoryView,
+} from './types'
 import type { StoryStageRequest } from './useStoryStageRequest'
 
 const defaultStoryExpansionScope = 'keep-scale' as const
 
-interface PredicamentGenerationOptions {
+interface ConflictCoreGenerationOptions {
+  context?: StoryConflictCoreContext
+  generateSystemDraft?: boolean
   preference?: string
   excludedTitles?: string[]
   fresh?: boolean
@@ -22,15 +34,21 @@ interface PredicamentGenerationOptions {
 export interface StorySessionActions {
   updateIdea: (idea: string) => void
   useExample: () => void
-  openDirectionPicker: () => Promise<void>
-  showDifferentPredicaments: () => Promise<void>
-  applyPredicamentFeedback: (feedback: string) => Promise<void>
-  selectPredicament: (id: string) => void
+  openConflictCorePicker: () => Promise<void>
+  showDifferentConflictCores: () => Promise<void>
+  applyConflictCoreFeedback: (feedback: string) => Promise<void>
+  applyConflictCoreContext: (context: StoryConflictCoreContext) => Promise<void>
+  generateSystemDraft: () => Promise<void>
+  selectConflictCore: (id: string) => void
+  continueToPredicament: () => Promise<void>
+  regeneratePredicament: () => Promise<void>
+  selectPredicamentApproach: (id: string) => void
   continueToHeadTail: () => Promise<void>
   regenerateHeadTail: () => Promise<void>
   selectHeadTail: (id: string) => void
   continueToStorySpine: () => Promise<void>
   selectTurnOption: (optionId: string) => void
+  refineTurnOption: (refinement: StoryTurnOptionRefinement) => Promise<void>
   continueStory: () => Promise<void>
   concludeStory: () => Promise<void>
   generateFullStory: () => Promise<void>
@@ -42,8 +60,9 @@ export interface StorySessionActions {
 }
 
 const previousViewByView: Partial<Record<StoryView, StoryView>> = {
-  'direction-picker': 'opening',
-  'head-tail': 'direction-picker',
+  'conflict-core-picker': 'opening',
+  predicament: 'conflict-core-picker',
+  'head-tail': 'predicament',
   'story-spine': 'head-tail',
   complete: 'story-spine',
 }
@@ -90,7 +109,7 @@ export function createStorySessionActions(
   const storyProgressActions = createStoryProgressActions(context)
 
   return {
-    ...createIdeaAndPredicamentActions(context),
+    ...createStoryFoundationActions(context),
     ...createStoryPlanningActions(context),
     ...storyProgressActions,
     ...createNavigationActions(context, storyProgressActions.generateFullStory),
@@ -103,50 +122,95 @@ interface StorySessionActionContext {
   loaders: StorySessionLoaders
 }
 
-function createIdeaAndPredicamentActions(
-  { state, loaders }: StorySessionActionContext,
+function createStoryFoundationActions(
+  { state, stage, loaders }: StorySessionActionContext,
 ): Pick<
   StorySessionActions,
   | 'updateIdea'
   | 'useExample'
-  | 'openDirectionPicker'
-  | 'showDifferentPredicaments'
-  | 'applyPredicamentFeedback'
-  | 'selectPredicament'
+  | 'openConflictCorePicker'
+  | 'showDifferentConflictCores'
+  | 'applyConflictCoreFeedback'
+  | 'applyConflictCoreContext'
+  | 'generateSystemDraft'
+  | 'selectConflictCore'
+  | 'continueToPredicament'
+  | 'regeneratePredicament'
+  | 'selectPredicamentApproach'
 > {
   const updateIdea = (idea: string) => {
-    if (idea.trim() !== state.trimmedIdea && state.predicamentOptions.length) {
+    if (idea.trim() !== state.trimmedIdea && state.conflictCores.length) {
       state.resetStoryFoundation()
     }
     state.setIdea(idea)
   }
 
-  const openDirectionPicker = async () => {
+  const openConflictCorePicker = async () => {
     if (!state.trimmedIdea) return
 
     state.resetStoryFoundation()
-    state.setView('direction-picker')
-    await loaders.loadPredicaments({ excludedTitles: [], fresh: true })
+    state.setView('conflict-core-picker')
+    await loaders.loadConflictCores({ excludedTitles: [], fresh: true })
   }
 
-  const applyPredicamentFeedback = async (feedback: string) => {
+  const applyConflictCoreFeedback = async (feedback: string) => {
     const preference = feedback.trim()
-    if (preference) await loaders.loadPredicaments({ preference })
+    if (preference) await loaders.loadConflictCores({ preference })
   }
 
-  const selectPredicament = (id: string) => {
-    if (id === state.selectedPredicamentId) return
-    state.setSelectedPredicamentId(id)
+  const applyConflictCoreContext = async (context: StoryConflictCoreContext) => {
+    const confirmedContext = normalizeConflictCoreContext(context)
+    if (!confirmedContext) return
+
+    state.setConflictCoreContext(confirmedContext)
+    await loaders.loadConflictCores({ context: confirmedContext, excludedTitles: [] })
+  }
+
+  const generateSystemDraft = async () => {
+    await loaders.loadConflictCores({ generateSystemDraft: true, excludedTitles: [] })
+  }
+
+  const selectConflictCore = (id: string) => {
+    if (id === state.selectedConflictCoreId) return
+    state.setSelectedConflictCoreId(id)
+    state.resetPlanAfter('conflict-core')
+  }
+
+  const loadSelectedConflictCorePredicament = async () => {
+    if (!state.selectedConflictCore || !state.storyId) return
+    await loaders.loadPredicament(state.selectedConflictCore)
+  }
+
+  const continueToPredicament = async () => {
+    if (!state.selectedConflictCore || !state.storyId) return
+    state.setView('predicament')
+    if (!state.predicament) await loadSelectedConflictCorePredicament()
+  }
+
+  const regeneratePredicament = async () => {
+    await loadSelectedConflictCorePredicament()
+  }
+
+  const selectPredicamentApproach = (id: string) => {
+    if (stage.stageStatus === 'loading' || !state.predicament?.approaches.some((approach) => approach.id === id)) return
+    if (id === state.selectedApproachId) return
+
+    state.setSelectedApproachId(id)
     state.resetPlanAfter('predicament')
   }
 
   return {
     updateIdea,
     useExample: () => updateIdea(createRandomIdea(state.idea)),
-    openDirectionPicker,
-    showDifferentPredicaments: () => loaders.loadPredicaments(),
-    applyPredicamentFeedback,
-    selectPredicament,
+    openConflictCorePicker,
+    showDifferentConflictCores: () => loaders.loadConflictCores(),
+    applyConflictCoreFeedback,
+    applyConflictCoreContext,
+    generateSystemDraft,
+    selectConflictCore,
+    continueToPredicament,
+    regeneratePredicament,
+    selectPredicamentApproach,
   }
 }
 
@@ -160,9 +224,9 @@ function createStoryPlanningActions(
   | 'continueToStorySpine'
 > {
   const continueToHeadTail = async () => {
-    if (!state.seed || !state.selectedPredicament || !state.storyId) return
+    if (!state.seed || !state.predicament || !state.selectedApproach || !state.storyId) return
     state.setView('head-tail')
-    if (!state.headTailOptions.length) await loaders.loadHeadTail(state.selectedPredicament, state.seed)
+    if (!state.headTailOptions.length) await loaders.loadHeadTail(state.predicament, state.seed, state.selectedApproach)
   }
 
   const selectHeadTail = (id: string) => {
@@ -171,7 +235,7 @@ function createStoryPlanningActions(
   }
 
   const continueToStorySpine = async () => {
-    if (!state.seed || !state.selectedPredicament || !state.selectedHeadTail || !state.storyId) return
+    if (!state.seed || !state.predicament || !state.selectedHeadTail || !state.storyId) return
 
     const selectedHeadTailId = state.selectedHeadTail.id
     const isExistingStoryPath = Boolean(state.currentTurn || state.turnHistory.length)
@@ -197,6 +261,7 @@ function createStoryProgressActions(
 ): Pick<
   StorySessionActions,
   | 'selectTurnOption'
+  | 'refineTurnOption'
   | 'continueStory'
   | 'concludeStory'
   | 'generateFullStory'
@@ -205,6 +270,29 @@ function createStoryProgressActions(
   const selectTurnOption = (optionId: string) => {
     if (!state.currentTurn || state.currentTurn.isConclusion || stage.stageStatus === 'loading') return
     state.setSelectedTurnOptionId(optionId)
+  }
+
+  const refineTurnOption = async ({ optionId, focus, feedback }: StoryTurnOptionRefinement) => {
+    const storyId = state.storyId
+    const currentTurn = state.currentTurn
+    const optionToRefine = currentTurn?.options.find((option) => option.id === optionId)
+    if (!storyId || !currentTurn || currentTurn.isConclusion || !optionToRefine) return
+
+    await runStorySessionStageRequest(
+      state,
+      stage,
+      () => requestStoryTurnOptionRefinement({
+        storyId,
+        revision: state.revision,
+        turnId: currentTurn.id,
+        optionId: optionToRefine.id,
+        focus,
+        feedback,
+      }),
+      (result) => {
+        applyStoryTurnState(state, result)
+      },
+    )
   }
 
   const advanceStory = (mode: Extract<StoryTurnMode, 'continue' | 'conclude'>) => {
@@ -219,10 +307,11 @@ function createStoryProgressActions(
   const generateFullStory = async () => {
     if (!state.trimmedIdea || !state.storyPlan || !state.storyId || state.generatedStory) return
 
-    await stage.runStageRequest(
+    await runStorySessionStageRequest(
+      state,
+      stage,
       () => requestFullStory({ storyId: state.storyId!, revision: state.revision }),
       (result) => {
-        state.applySessionVersion(result)
         state.setGeneratedStory(result.story)
         state.setView('complete')
       },
@@ -231,6 +320,7 @@ function createStoryProgressActions(
 
   return {
     selectTurnOption,
+    refineTurnOption,
     continueStory: () => advanceStory('continue'),
     concludeStory: async () => {
       if (state.currentTurn?.canConclude) await advanceStory('conclude')
@@ -247,8 +337,16 @@ function createNavigationActions(
   generateFullStory: StorySessionActions['generateFullStory'],
 ): Pick<StorySessionActions, 'retryCurrentStage' | 'goBack' | 'goBackToOpening' | 'restartStory'> {
   const retryCurrentStage = async () => {
-    if (state.view === 'direction-picker') {
-      await loaders.loadPredicaments({ preference: state.predicamentFeedback || undefined })
+    if (state.view === 'conflict-core-picker') {
+      await loaders.loadConflictCores({
+        context: normalizeConflictCoreContext(state.conflictCoreContext),
+        preference: state.conflictCoreFeedback || undefined,
+      })
+      return
+    }
+
+    if (state.view === 'predicament') {
+      if (state.selectedConflictCore) await loaders.loadPredicament(state.selectedConflictCore)
       return
     }
 
@@ -293,10 +391,12 @@ function createNavigationActions(
 }
 
 interface StorySessionLoaders {
-  loadPredicaments: (options?: PredicamentGenerationOptions) => Promise<void>
+  loadConflictCores: (options?: ConflictCoreGenerationOptions) => Promise<void>
+  loadPredicament: (core?: StorySessionState['selectedConflictCore']) => Promise<void>
   loadHeadTail: (
-    predicament?: StorySessionState['selectedPredicament'],
+    predicament?: StorySessionState['predicament'],
     seed?: StorySessionState['seed'],
+    approach?: StorySessionState['selectedApproach'],
   ) => Promise<void>
   loadStoryTurn: (request: PendingTurnRequest) => Promise<void>
 }
@@ -306,42 +406,91 @@ function createStorySessionLoaders(
   stage: StoryStageRequest,
 ): StorySessionLoaders {
   return {
-    loadPredicaments: (options) => loadPredicamentsFromApi(state, stage, options),
-    loadHeadTail: (predicament = state.selectedPredicament, seed = state.seed) => (
-      loadHeadTailFromApi(state, stage, predicament, seed)
+    loadConflictCores: (options) => loadConflictCoresFromApi(state, stage, options),
+    loadPredicament: (core = state.selectedConflictCore) => loadPredicamentFromApi(state, stage, core),
+    loadHeadTail: (predicament = state.predicament, seed = state.seed, approach = state.selectedApproach) => (
+      loadHeadTailFromApi(state, stage, predicament, seed, approach)
     ),
     loadStoryTurn: (request) => loadStoryTurnFromApi(state, stage, request),
   }
 }
 
-async function loadPredicamentsFromApi(
+function applyStoryTurnState(state: StorySessionState, result: StoryTurnResponse) {
+  state.setTurnHistory(result.history)
+  state.setCurrentTurn(result.turn)
+  state.setGeneratedStory(undefined)
+}
+
+async function runStorySessionStageRequest<Result extends StorySessionVersion>(
+  state: StorySessionState,
+  stage: StoryStageRequest,
+  request: () => Promise<Result>,
+  applyResult: (result: Result) => void,
+) {
+  await stage.runStageRequest(request, (result) => {
+    state.applySessionVersion(result)
+    applyResult(result)
+  })
+}
+
+async function loadConflictCoresFromApi(
   state: StorySessionState,
   stage: StoryStageRequest,
   {
+    context,
+    generateSystemDraft = false,
     preference,
-    excludedTitles = state.predicamentOptions.map((predicament) => predicament.title),
+    excludedTitles = state.conflictCores.map((core) => core.title),
     fresh = false,
-  }: PredicamentGenerationOptions = {},
+  }: ConflictCoreGenerationOptions = {},
 ) {
   if (!state.trimmedIdea) return
 
+  const confirmedContext = normalizeConflictCoreContext(context)
   const normalizedPreference = preference?.trim()
   const storyId = fresh ? undefined : state.storyId
-  await stage.runStageRequest(
-    () => requestStoryDirections({
+  await runStorySessionStageRequest(
+    state,
+    stage,
+    () => requestConflictCores({
       idea: state.trimmedIdea,
       expansionScope: defaultStoryExpansionScope,
+      context: confirmedContext,
+      generateSystemDraft: generateSystemDraft || undefined,
       storyId,
       revision: storyId ? state.revision : undefined,
       preference: normalizedPreference,
       excludedTitles: excludedTitles.length ? excludedTitles : undefined,
     }),
     (result) => {
-      state.applySessionVersion(result)
       state.setSeed(result.seed)
-      state.setPredicamentOptions(result.directions)
-      state.setSelectedPredicamentId(result.directions[0]?.id)
-      state.setPredicamentFeedback(normalizedPreference ?? '')
+      state.setConflictCores(result.conflictCores)
+      if (confirmedContext) state.setConflictCoreContext(confirmedContext)
+      state.setSelectedConflictCoreId(result.conflictCores[0]?.id)
+      state.setConflictCoreFeedback(normalizedPreference ?? '')
+      state.resetPlanAfter('conflict-core')
+    },
+  )
+}
+
+async function loadPredicamentFromApi(
+  state: StorySessionState,
+  stage: StoryStageRequest,
+  core = state.selectedConflictCore,
+) {
+  if (!core || !state.storyId) return
+
+  await runStorySessionStageRequest(
+    state,
+    stage,
+    () => requestStoryPredicament({
+      storyId: state.storyId!,
+      revision: state.revision,
+      conflictCoreId: core.id,
+    }),
+    (result) => {
+      state.setPredicament(result.predicament)
+      state.setSelectedApproachId(undefined)
       state.resetPlanAfter('predicament')
     },
   )
@@ -350,19 +499,22 @@ async function loadPredicamentsFromApi(
 async function loadHeadTailFromApi(
   state: StorySessionState,
   stage: StoryStageRequest,
-  predicament = state.selectedPredicament,
+  predicament = state.predicament,
   seed = state.seed,
+  approach = state.selectedApproach,
 ) {
-  if (!state.trimmedIdea || !seed || !predicament || !state.storyId) return
+  if (!state.trimmedIdea || !seed || !predicament || !approach || !state.storyId) return
 
-  await stage.runStageRequest(
+  await runStorySessionStageRequest(
+    state,
+    stage,
     () => requestHeadTailOptions({
       storyId: state.storyId!,
       revision: state.revision,
       predicamentId: predicament.id,
+      approachId: approach.id,
     }),
     (result) => {
-      state.applySessionVersion(result)
       state.setHeadTailOptions(result.options)
       state.setSelectedHeadTailId(result.options[0]?.id)
       state.resetPlanAfter('head-tail')
@@ -378,16 +530,15 @@ async function loadStoryTurnFromApi(
   if (!state.storyId) return
 
   state.setPendingTurnRequest(request)
-  await stage.runStageRequest(
+  await runStorySessionStageRequest(
+    state,
+    stage,
     () => requestStoryTurn({ storyId: state.storyId!, revision: state.revision, ...request }),
     (result) => {
-      state.applySessionVersion(result)
+      applyStoryTurnState(state, result)
       if (request.headTailId) state.setCommittedHeadTailId(request.headTailId)
-      state.setTurnHistory(result.history)
-      state.setCurrentTurn(result.turn)
       state.setSelectedTurnOptionId(undefined)
       state.setPendingTurnRequest(undefined)
-      state.setGeneratedStory(undefined)
     },
   )
 }

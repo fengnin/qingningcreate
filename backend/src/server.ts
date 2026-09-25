@@ -4,17 +4,23 @@ import { AppError } from './qwen.js'
 import {
   generateDirections,
   parseDirectionRequest,
+  parsePredicamentSessionRequest,
   parseHeadTailSessionRequest,
   parseStoryGenerationSessionRequest,
   parseStoryTurnSessionRequest,
+  parseStoryTurnOptionRefinementRequest,
   generateSessionHeadTailOptions,
+  generateSessionPredicament,
   generateSessionStory,
   generateSessionStoryTurn,
+  generateSessionStoryTurnOptionRefinement,
 } from './storyService.js'
 import type {
   ApiErrorResponse,
   HealthResponse,
+  StoryConflictCoreContextPrefill,
   StoryDirectionsResponse,
+  StoryPredicamentResponse,
   StoryGenerationResponse,
   StoryHeadTailResponse,
   StoryTurnResponse,
@@ -44,6 +50,13 @@ registerStoryStage(
 )
 
 registerStoryStage(
+  '/api/story-predicament',
+  parsePredicamentSessionRequest,
+  generateSessionPredicament,
+  (result) => result satisfies StoryPredicamentResponse,
+)
+
+registerStoryStage(
   '/api/story-head-tail',
   parseHeadTailSessionRequest,
   generateSessionHeadTailOptions,
@@ -54,6 +67,13 @@ registerStoryStage(
   '/api/story-spine/turn',
   parseStoryTurnSessionRequest,
   generateSessionStoryTurn,
+  (result) => result satisfies StoryTurnResponse,
+)
+
+registerStoryStage(
+  '/api/story-spine/turn-option/refine',
+  parseStoryTurnOptionRefinementRequest,
+  generateSessionStoryTurnOptionRefinement,
   (result) => result satisfies StoryTurnResponse,
 )
 
@@ -70,7 +90,7 @@ app.use((_request, response: Response<ApiErrorResponse>) => {
 
 app.use((error: unknown, _request: Request, response: Response<ApiErrorResponse>, _next: NextFunction) => {
   if (error instanceof AppError) {
-    sendApiError(response, error.statusCode, error.code, error.message)
+    sendApiError(response, error.statusCode, error.code, error.message, error.conflictCoreContextPrefill)
     return
   }
 
@@ -93,8 +113,20 @@ app.listen(port, () => {
   console.log(`Story API listening on http://127.0.0.1:${port}`)
 })
 
-function sendApiError(response: Response<ApiErrorResponse>, statusCode: number, code: string, message: string) {
-  response.status(statusCode).json({ error: { code, message } } satisfies ApiErrorResponse)
+function sendApiError(
+  response: Response<ApiErrorResponse>,
+  statusCode: number,
+  code: string,
+  message: string,
+  conflictCoreContextPrefill?: StoryConflictCoreContextPrefill,
+) {
+  response.status(statusCode).json({
+    error: {
+      code,
+      message,
+      ...(conflictCoreContextPrefill ? { conflictCoreContextPrefill } : {}),
+    },
+  } satisfies ApiErrorResponse)
 }
 
 function registerStoryStage<RequestBody, Result, ResponseBody>(

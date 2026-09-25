@@ -16,7 +16,7 @@ export type StoryFactMutability = 'fixed' | 'changeable' | 'unknown'
 export interface StoryFact {
   id: string
   statement: string
-  source: 'user' | 'predicament' | 'confirmed-action'
+  source: 'user' | 'system-draft' | 'predicament' | 'confirmed-action'
   mutability: StoryFactMutability
 }
 
@@ -52,10 +52,60 @@ export interface StorySeed {
   activeSituation: string
   lockedGoal: string | null
   lockedFacts: string[]
+  /**
+   * A provisional premise proposed after the user explicitly chooses the
+   * system-led route. It is never extracted from or attributed to the input.
+   */
+  systemDraft?: StoryConflictCoreSystemDraft
   worldMode: 'realistic-default' | 'user-specified'
   expansionScope: StoryExpansionScope
   unknowns: string[]
 }
+
+/**
+ * Facts the user explicitly confirms when an initial idea is too sparse to
+ * support several grounded conflict cores.
+ */
+export interface StoryConflictCoreContext {
+  goal?: string
+  stake?: string
+  constraint?: string
+}
+
+/**
+ * Original-text suggestions that the user may review before confirming a
+ * conflict-core context. These values never introduce facts on their own.
+ */
+export interface StoryConflictCoreContextPrefill {
+  goal?: string
+  stake?: string
+  constraint?: string
+}
+
+/**
+ * The system's clearly labelled, editable premise for a sparse idea. It is
+ * only present when the user asks the system to draft a first direction.
+ */
+export interface StoryConflictCoreSystemDraft {
+  goal: string
+  stake: string
+  constraint: string
+}
+
+/**
+ * The first-layer choice. It names the preserved goal, the single obstacle,
+ * and the thing the protagonist cannot keep while continuing.
+ */
+export interface StoryConflictCore {
+  id: string
+  title: string
+  variationAxis: StoryVariationAxis
+  preservedGoal: string
+  obstacle: string
+  tradeoff: string
+}
+
+export type StoryConflictCores = [StoryConflictCore, StoryConflictCore, StoryConflictCore]
 
 export interface StoryPredicament {
   id: string
@@ -64,14 +114,20 @@ export interface StoryPredicament {
   preservedGoal: string
   immediateSituation: string
   obstacle: string
+  tradeoff: string
   urgency: string
   choice: string
   plausibleCost: string
+  approaches: StoryPredicamentApproach[]
   facts: StoryFact[]
   actions: StoryAction[]
 }
 
-export type StoryPredicaments = [StoryPredicament, StoryPredicament, StoryPredicament]
+export interface StoryPredicamentApproach {
+  id: string
+  intent: string
+  cost: string
+}
 
 export interface StoryHeadTailOption {
   id: string
@@ -118,6 +174,27 @@ export interface StoryTurnOption {
   transition: StoryTransition
 }
 
+export interface StoryRefinement<TFocus extends string> {
+  focus: TFocus
+  feedback: string
+}
+
+export type StoryOptionRefinement<TFocus extends string> = StoryRefinement<TFocus> & {
+  optionId: string
+}
+
+export type StoryPredicamentRefinementFocus = 'scene' | 'urgency' | 'facts' | 'approaches' | 'costs'
+
+export type StoryPredicamentRefinement = StoryRefinement<StoryPredicamentRefinementFocus>
+
+export type StoryHeadTailRefinementFocus = 'opening' | 'development' | 'resolution' | 'cost' | 'tone'
+
+export type StoryHeadTailRefinement = StoryOptionRefinement<StoryHeadTailRefinementFocus>
+
+export type StoryTurnOptionRefinementFocus = 'action' | 'consequence' | 'tradeoff' | 'tone'
+
+export type StoryTurnOptionRefinement = StoryOptionRefinement<StoryTurnOptionRefinementFocus>
+
 export type StoryTurnPhase = 'opening' | 'development' | 'turn' | 'climax' | 'resolution'
 
 export type StoryTurnMode = 'start' | 'continue' | 'conclude'
@@ -151,6 +228,7 @@ export interface StoryTurnHistoryItem {
 export interface StoryPlan {
   seed: StorySeed
   predicament: StoryPredicament
+  approach: StoryPredicamentApproach
   headTail: StoryHeadTailOption
   turnHistory: StoryTurnHistoryItem[]
   conclusion: StoryTurn
@@ -174,16 +252,21 @@ export interface GeneratedStory {
 export interface StoryDirectionsRequest {
   idea: string
   expansionScope?: StoryExpansionScope
+  context?: StoryConflictCoreContext
+  generateSystemDraft?: boolean
   preference?: string
   excludedTitles?: string[]
   storyId?: string
   revision?: number
 }
 
-export interface StoryHeadTailSessionRequest {
-  storyId: string
-  revision: number
+export interface StoryPredicamentSessionRequest extends StorySessionVersion {
+  conflictCoreId: string
+}
+
+export interface StoryHeadTailSessionRequest extends StorySessionVersion {
   predicamentId: string
+  approachId: string
 }
 
 export interface StoryTurnSessionRequest {
@@ -193,6 +276,10 @@ export interface StoryTurnSessionRequest {
   headTailId?: string
   turnId?: string
   optionId?: string
+}
+
+export interface StoryTurnOptionRefinementRequest extends StorySessionVersion, StoryTurnOptionRefinement {
+  turnId: string
 }
 
 export interface StoryGenerationSessionRequest {
@@ -207,7 +294,13 @@ export interface StorySessionVersion {
 
 export interface StoryDirectionsResponse extends StorySessionVersion {
   seed: StorySeed
-  directions: StoryPredicaments
+  conflictCores: StoryConflictCores
+}
+
+export type StoryConflictCoresResponse = StoryDirectionsResponse
+
+export interface StoryPredicamentResponse extends StorySessionVersion {
+  predicament: StoryPredicament
 }
 
 export interface StoryHeadTailResponse extends StorySessionVersion {
@@ -227,6 +320,7 @@ export interface ApiErrorResponse {
   error: {
     code: string
     message: string
+    conflictCoreContextPrefill?: StoryConflictCoreContextPrefill
   }
 }
 

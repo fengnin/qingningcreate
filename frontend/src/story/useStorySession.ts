@@ -6,8 +6,12 @@ import type {
   GenerationStatus,
   StoryHeadTailOption,
   StoryPlan,
+  StoryConflictCore,
+  StoryConflictCores,
+  StoryConflictCoreContext,
+  StoryConflictCoreContextPrefill,
   StoryPredicament,
-  StoryPredicaments,
+  StoryPredicamentApproach,
   StorySeed,
   StoryTurn,
   StoryTurnHistoryItem,
@@ -20,10 +24,14 @@ export interface StorySession extends StorySessionActions {
   idea: string
   trimmedIdea: string
   seed: StorySeed | undefined
-  predicamentOptions: StoryPredicaments | []
-  predicamentFeedback: string
-  selectedPredicament: StoryPredicament | undefined
-  selectedPredicamentId: string | undefined
+  conflictCores: StoryConflictCores | []
+  conflictCoreContext: StoryConflictCoreContext
+  conflictCoreFeedback: string
+  selectedConflictCore: StoryConflictCore | undefined
+  selectedConflictCoreId: string | undefined
+  predicament: StoryPredicament | undefined
+  selectedApproach: StoryPredicamentApproach | undefined
+  selectedApproachId: string | undefined
   headTailOptions: StoryHeadTailOption[]
   selectedHeadTail: StoryHeadTailOption | undefined
   selectedHeadTailId: string | undefined
@@ -35,6 +43,8 @@ export interface StorySession extends StorySessionActions {
   storyPlan: StoryPlan | undefined
   stageStatus: GenerationStatus
   stageError: string | undefined
+  stageErrorCode: string | undefined
+  stageErrorContextPrefill: StoryConflictCoreContextPrefill | undefined
   generatedStory: GeneratedStory | undefined
 }
 
@@ -48,10 +58,14 @@ export function useStorySession(): StorySession {
     idea: state.idea,
     trimmedIdea: state.trimmedIdea,
     seed: state.seed,
-    predicamentOptions: state.predicamentOptions,
-    predicamentFeedback: state.predicamentFeedback,
-    selectedPredicament: state.selectedPredicament,
-    selectedPredicamentId: state.selectedPredicamentId,
+    conflictCores: state.conflictCores,
+    conflictCoreContext: state.conflictCoreContext,
+    conflictCoreFeedback: state.conflictCoreFeedback,
+    selectedConflictCore: state.selectedConflictCore,
+    selectedConflictCoreId: state.selectedConflictCoreId,
+    predicament: state.predicament,
+    selectedApproach: state.selectedApproach,
+    selectedApproachId: state.selectedApproachId,
     headTailOptions: state.headTailOptions,
     selectedHeadTail: state.selectedHeadTail,
     selectedHeadTailId: state.selectedHeadTailId,
@@ -63,6 +77,8 @@ export function useStorySession(): StorySession {
     storyPlan: state.storyPlan,
     stageStatus: stage.stageStatus,
     stageError: stage.stageError,
+    stageErrorCode: stage.stageErrorCode,
+    stageErrorContextPrefill: stage.stageErrorContextPrefill,
     generatedStory: state.generatedStory,
     ...actions,
   }

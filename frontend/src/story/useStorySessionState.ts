@@ -3,8 +3,11 @@ import type {
   GeneratedStory,
   StoryHeadTailOption,
   StoryPlan,
+  StoryConflictCore,
+  StoryConflictCores,
+  StoryConflictCoreContext,
   StoryPredicament,
-  StoryPredicaments,
+  StoryPredicamentApproach,
   StorySeed,
   StorySessionVersion,
   StoryTurn,
@@ -14,7 +17,7 @@ import type {
   StoryView,
 } from './types'
 
-export type StoryPlanResetPoint = 'predicament' | 'head-tail'
+export type StoryPlanResetPoint = 'conflict-core' | 'predicament' | 'head-tail'
 
 export interface PendingTurnRequest {
   mode: StoryTurnMode
@@ -30,12 +33,20 @@ export interface StorySessionState {
   setIdea: (idea: string) => void
   seed: StorySeed | undefined
   setSeed: (seed: StorySeed | undefined) => void
-  predicamentOptions: StoryPredicaments | []
-  setPredicamentOptions: (options: StoryPredicaments | []) => void
-  predicamentFeedback: string
-  setPredicamentFeedback: (feedback: string) => void
-  selectedPredicamentId: string | undefined
-  setSelectedPredicamentId: (id: string | undefined) => void
+  conflictCores: StoryConflictCores | []
+  setConflictCores: (options: StoryConflictCores | []) => void
+  conflictCoreContext: StoryConflictCoreContext
+  setConflictCoreContext: (context: StoryConflictCoreContext) => void
+  conflictCoreFeedback: string
+  setConflictCoreFeedback: (feedback: string) => void
+  selectedConflictCoreId: string | undefined
+  setSelectedConflictCoreId: (id: string | undefined) => void
+  selectedConflictCore: StoryConflictCore | undefined
+  predicament: StoryPredicament | undefined
+  setPredicament: (predicament: StoryPredicament | undefined) => void
+  selectedApproachId: string | undefined
+  setSelectedApproachId: (id: string | undefined) => void
+  selectedApproach: StoryPredicamentApproach | undefined
   headTailOptions: StoryHeadTailOption[]
   setHeadTailOptions: (options: StoryHeadTailOption[]) => void
   selectedHeadTailId: string | undefined
@@ -55,7 +66,6 @@ export interface StorySessionState {
   storyId: string | undefined
   revision: number
   trimmedIdea: string
-  selectedPredicament: StoryPredicament | undefined
   selectedHeadTail: StoryHeadTailOption | undefined
   selectedTurnOption: StoryTurnOption | undefined
   storyPlan: StoryPlan | undefined
@@ -68,9 +78,12 @@ export function useStorySessionState(): StorySessionState {
   const [view, setView] = useState<StoryView>('opening')
   const [idea, setIdea] = useState('')
   const [seed, setSeed] = useState<StorySeed>()
-  const [predicamentOptions, setPredicamentOptions] = useState<StoryPredicaments | []>([])
-  const [predicamentFeedback, setPredicamentFeedback] = useState('')
-  const [selectedPredicamentId, setSelectedPredicamentId] = useState<string>()
+  const [conflictCores, setConflictCores] = useState<StoryConflictCores | []>([])
+  const [conflictCoreContext, setConflictCoreContext] = useState<StoryConflictCoreContext>({})
+  const [conflictCoreFeedback, setConflictCoreFeedback] = useState('')
+  const [selectedConflictCoreId, setSelectedConflictCoreId] = useState<string>()
+  const [predicament, setPredicament] = useState<StoryPredicament>()
+  const [selectedApproachId, setSelectedApproachId] = useState<string>()
   const [headTailOptions, setHeadTailOptions] = useState<StoryHeadTailOption[]>([])
   const [selectedHeadTailId, setSelectedHeadTailId] = useState<string>()
   const [committedHeadTailId, setCommittedHeadTailId] = useState<string>()
@@ -83,9 +96,13 @@ export function useStorySessionState(): StorySessionState {
   const [revision, setRevision] = useState(0)
 
   const trimmedIdea = idea.trim()
-  const selectedPredicament = useMemo(
-    () => predicamentOptions.find((predicament) => predicament.id === selectedPredicamentId),
-    [predicamentOptions, selectedPredicamentId],
+  const selectedConflictCore = useMemo(
+    () => conflictCores.find((core) => core.id === selectedConflictCoreId),
+    [conflictCores, selectedConflictCoreId],
+  )
+  const selectedApproach = useMemo(
+    () => predicament?.approaches.find((approach) => approach.id === selectedApproachId),
+    [predicament, selectedApproachId],
   )
   const selectedHeadTail = useMemo(
     () => headTailOptions.find((option) => option.id === selectedHeadTailId),
@@ -96,8 +113,8 @@ export function useStorySessionState(): StorySessionState {
     [currentTurn, selectedTurnOptionId],
   )
   const storyPlan = useMemo(
-    () => getCompletedStoryPlan(seed, selectedPredicament, selectedHeadTail, turnHistory, currentTurn),
-    [currentTurn, seed, selectedHeadTail, selectedPredicament, turnHistory],
+    () => getCompletedStoryPlan(seed, predicament, selectedApproach, selectedHeadTail, turnHistory, currentTurn),
+    [currentTurn, seed, selectedApproach, selectedHeadTail, predicament, turnHistory],
   )
 
   const resetStorySpine = () => {
@@ -109,10 +126,29 @@ export function useStorySessionState(): StorySessionState {
     setGeneratedStory(undefined)
   }
 
+  const clearPredicamentSelection = () => {
+    setPredicament(undefined)
+    setSelectedApproachId(undefined)
+  }
+
+  const clearHeadTailSelection = () => {
+    setHeadTailOptions([])
+    setSelectedHeadTailId(undefined)
+  }
+
+  const clearConflictCoreSelection = () => {
+    setConflictCores([])
+    setConflictCoreFeedback('')
+    setSelectedConflictCoreId(undefined)
+  }
+
   const resetPlanAfter = (resetPoint: StoryPlanResetPoint) => {
-    if (resetPoint === 'predicament') {
-      setHeadTailOptions([])
-      setSelectedHeadTailId(undefined)
+    if (resetPoint === 'conflict-core') {
+      clearPredicamentSelection()
+    }
+
+    if (resetPoint === 'conflict-core' || resetPoint === 'predicament') {
+      clearHeadTailSelection()
     }
 
     resetStorySpine()
@@ -122,10 +158,9 @@ export function useStorySessionState(): StorySessionState {
     setStoryId(undefined)
     setRevision(0)
     setSeed(undefined)
-    setPredicamentOptions([])
-    setPredicamentFeedback('')
-    setSelectedPredicamentId(undefined)
-    resetPlanAfter('predicament')
+    setConflictCoreContext({})
+    clearConflictCoreSelection()
+    resetPlanAfter('conflict-core')
   }
 
   const applySessionVersion = (result: StorySessionVersion) => {
@@ -140,12 +175,20 @@ export function useStorySessionState(): StorySessionState {
     setIdea,
     seed,
     setSeed,
-    predicamentOptions,
-    setPredicamentOptions,
-    predicamentFeedback,
-    setPredicamentFeedback,
-    selectedPredicamentId,
-    setSelectedPredicamentId,
+    conflictCores,
+    setConflictCores,
+    conflictCoreContext,
+    setConflictCoreContext,
+    conflictCoreFeedback,
+    setConflictCoreFeedback,
+    selectedConflictCoreId,
+    setSelectedConflictCoreId,
+    selectedConflictCore,
+    predicament,
+    setPredicament,
+    selectedApproachId,
+    setSelectedApproachId,
+    selectedApproach,
     headTailOptions,
     setHeadTailOptions,
     selectedHeadTailId,
@@ -165,7 +208,6 @@ export function useStorySessionState(): StorySessionState {
     storyId,
     revision,
     trimmedIdea,
-    selectedPredicament,
     selectedHeadTail,
     selectedTurnOption,
     storyPlan,
@@ -178,13 +220,14 @@ export function useStorySessionState(): StorySessionState {
 function getCompletedStoryPlan(
   seed: StorySeed | undefined,
   predicament: StoryPredicament | undefined,
+  approach: StoryPredicamentApproach | undefined,
   headTail: StoryHeadTailOption | undefined,
   turnHistory: StoryTurnHistoryItem[],
   currentTurn: StoryTurn | undefined,
 ): StoryPlan | undefined {
-  if (!seed || !predicament || !headTail || !turnHistory.length || !currentTurn?.isConclusion) {
+  if (!seed || !predicament || !approach || !headTail || !turnHistory.length || !currentTurn?.isConclusion) {
     return undefined
   }
 
-  return { seed, predicament, headTail, turnHistory, conclusion: currentTurn }
+  return { seed, predicament, approach, headTail, turnHistory, conclusion: currentTurn }
 }

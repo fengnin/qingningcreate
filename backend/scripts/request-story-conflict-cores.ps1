@@ -18,7 +18,7 @@ $requestBody = [ordered]@{
   expansionScope = $ExpansionScope
 } | ConvertTo-Json -Compress
 
-$uri = "http://127.0.0.1:$Port/api/story-conflict-cores"
+$uri = "http://127.0.0.1:$Port/api/story-directions"
 
 try {
   $response = Invoke-RestMethod `

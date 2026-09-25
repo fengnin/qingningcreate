@@ -114,7 +114,8 @@ function createInitialNarrativeState(
     source: 'user',
     mutability: 'fixed',
   }))
-  const facts = [...userFacts, ...predicament.facts]
+  const systemDraftFacts = createSystemDraftFacts(seed)
+  const facts = [...userFacts, ...systemDraftFacts, ...predicament.facts]
 
   if (facts.length > maximumFacts || hasDuplicateIds(facts)) {
     throw new AppError('故事困境中的事实标识重复，请重新生成。', 502, 'INVALID_MODEL_OUTPUT')
@@ -126,6 +127,36 @@ function createInitialNarrativeState(
     actions: predicament.actions,
     appliedTransitions: [],
   }
+}
+
+function createSystemDraftFacts(seed: StorySeed): StoryFact[] {
+  if (!seed.systemDraft) return []
+
+  const knownStatements = new Set(
+    [...seed.lockedFacts, seed.lockedGoal]
+      .filter((statement): statement is string => Boolean(statement))
+      .map(normalizeFactStatement),
+  )
+  const systemDraftStatements: string[] = []
+
+  for (const statement of [seed.systemDraft.goal, seed.systemDraft.stake, seed.systemDraft.constraint]) {
+    const normalized = normalizeFactStatement(statement)
+    if (knownStatements.has(normalized)) continue
+
+    knownStatements.add(normalized)
+    systemDraftStatements.push(statement)
+  }
+
+  return systemDraftStatements.map((statement, index) => ({
+    id: `fact-system-draft-${index + 1}`,
+    statement,
+    source: 'system-draft',
+    mutability: 'fixed',
+  }))
+}
+
+function normalizeFactStatement(statement: string): string {
+  return statement.trim().replace(/\s+/gu, ' ')
 }
 
 function validateTurnOption(

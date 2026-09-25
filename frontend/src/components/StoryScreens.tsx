@@ -1,4 +1,4 @@
-import { type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import {
   ArrowLeft,
   ArrowRight,
@@ -14,31 +14,48 @@ import {
   Target,
   Waypoints,
 } from 'lucide-react'
-import { PredicamentFeedbackControl } from './PredicamentFeedbackControl'
+import { ConflictCoreFeedbackControl } from './ConflictCoreFeedbackControl'
+import { ConflictCoreContextChoice } from './ConflictCoreContextChoice'
+import { ConflictCoreContextForm } from './ConflictCoreContextForm'
+import { StoryTurnOptionRefinementControl } from './StoryTurnOptionRefinementControl'
+import { mergeConflictCoreContext } from '../story/conflictCoreContext'
 import type {
   StoryHeadTailOption,
+  StoryConflictCore,
+  StoryConflictCoreContext,
+  StoryConflictCoreSystemDraft,
   StoryNode,
   StoryPredicament,
+  StoryPredicamentApproach,
   StoryStep,
   StoryTurn,
   StoryTurnHistoryItem,
   StoryTurnOption,
+  StoryVariationAxis,
 } from '../story/types'
 import type { StorySession } from '../story/useStorySession'
 
 const journeyStages: { step: StoryStep; label: string; detail: string }[] = [
-  { step: 1, label: '故事困境', detail: '保留念头，补齐阻碍' },
-  { step: 2, label: '故事两端', detail: '确定开始与结尾' },
-  { step: 3, label: '逐步发展', detail: '选择后，再发生下一步' },
-  { step: 4, label: '收束故事', detail: '让主角完成关键行动' },
-  { step: 5, label: '写成故事', detail: '生成场景与对白' },
+  { step: 1, label: '冲突核心', detail: '先确定它卡在哪里' },
+  { step: 2, label: '具体困境', detail: '再落到当前局面' },
+  { step: 3, label: '故事两端', detail: '确定开始与结尾' },
+  { step: 4, label: '逐步发展', detail: '选择后，再发生下一步' },
+  { step: 5, label: '收束故事', detail: '让主角完成关键行动' },
+  { step: 6, label: '写成故事', detail: '生成场景与对白' },
 ]
 
-const variationAxisLabel: Record<StoryPredicament['variationAxis'], string> = {
+const variationAxisLabel: Record<StoryVariationAxis, string> = {
   time: '时间',
   resource: '条件',
   relationship: '关系',
   commitment: '承诺',
+}
+
+const conflictAxisLabel: Record<StoryVariationAxis, string> = {
+  time: '时间在逼近',
+  resource: '条件在收紧',
+  relationship: '关系在拉扯',
+  commitment: '承诺在施压',
 }
 
 const goalStateLabel: Record<StoryNode['goalState'], string> = {
@@ -48,6 +65,8 @@ const goalStateLabel: Record<StoryNode['goalState'], string> = {
   'near-completion': '接近做到',
   resolved: '结果已定',
 }
+
+type ConflictCoreContextRouteView = 'choice' | 'manual'
 
 export function OpeningScreen({ session }: { session: StorySession }) {
   return (
@@ -75,8 +94,8 @@ export function OpeningScreen({ session }: { session: StorySession }) {
             <small>{session.idea.length} / 60</small>
           </span>
         </label>
-        <button className="primary-action opening-action" type="button" onClick={() => void session.openDirectionPicker()} disabled={!session.trimmedIdea}>
-          展开故事困境 <ArrowRight size={18} />
+        <button className="primary-action opening-action" type="button" onClick={() => void session.openConflictCorePicker()} disabled={!session.trimmedIdea}>
+          寻找冲突核心 <ArrowRight size={18} />
         </button>
       </section>
       <footer className="opening-footer"><StoryJourney current={0} /></footer>
@@ -84,52 +103,139 @@ export function OpeningScreen({ session }: { session: StorySession }) {
   )
 }
 
-export function DirectionPickerScreen({ session }: { session: StorySession }) {
+export function ConflictCorePickerScreen({ session }: { session: StorySession }) {
   const isLoading = session.stageStatus === 'loading'
-  const hasDirections = session.predicamentOptions.length > 0
+  const hasConflictCores = session.conflictCores.length > 0
+  const [contextRouteView, setContextRouteView] = useState<ConflictCoreContextRouteView>()
+  const [hasEnteredContextRoute, setHasEnteredContextRoute] = useState(false)
+  const [isSystemDraftEditorOpen, setIsSystemDraftEditorOpen] = useState(false)
+  const systemDraft = session.seed?.systemDraft
+  const isContextChoiceVisible = contextRouteView === 'choice'
+    || (contextRouteView === undefined && session.stageErrorCode === 'CONFLICT_CORE_NEEDS_CONTEXT')
+  const isManualContextFormOpen = contextRouteView === 'manual'
+  const isContextRecoveryVisible = isContextChoiceVisible || isManualContextFormOpen
+
+  const showContextRouteChoice = () => {
+    setIsSystemDraftEditorOpen(false)
+    setContextRouteView('choice')
+  }
+  const chooseManualContext = () => {
+    setHasEnteredContextRoute(true)
+    setContextRouteView('manual')
+  }
+  const generateSystemDraft = () => {
+    setHasEnteredContextRoute(true)
+    setContextRouteView(undefined)
+    void session.generateSystemDraft()
+  }
+  const applyManualContext = async (context: StoryConflictCoreContext) => {
+    setContextRouteView(undefined)
+    await session.applyConflictCoreContext(context)
+  }
+  const applySystemDraftAsContext = async (context: StoryConflictCoreContext) => {
+    setIsSystemDraftEditorOpen(false)
+    await session.applyConflictCoreContext(context)
+  }
+  const retryConflictCoreStage = () => {
+    if (session.stageErrorCode === 'SYSTEM_DRAFT_GENERATION_FAILED') {
+      void session.generateSystemDraft()
+      return
+    }
+
+    void session.retryCurrentStage()
+  }
+  const shouldReturnToContextChoice = isManualContextFormOpen
+    || isSystemDraftEditorOpen
+    || (hasEnteredContextRoute && !isContextChoiceVisible)
+  const goBackFromConflictCore = () => {
+    if (shouldReturnToContextChoice) {
+      showContextRouteChoice()
+      return
+    }
+
+    session.goBack()
+  }
 
   return (
     <StoryWorkspace
       step={1}
-      eyebrow="01 / 05 · 故事困境"
-      title="先看看这件事，会遇到什么难处。"
-      lead="人物和愿望先不补写；现在只决定阻碍、时机，以及主角要怎样继续。"
+      eyebrow="01 / 06 · 冲突核心"
+      title="先确认，主角到底会被什么卡住。"
+      lead="先只选共同目标、核心阻碍和真正的两难；具体场景与当下压力留到下一步。"
       session={session}
-      aside={<PredicamentSummary seed={session.seed} predicament={session.selectedPredicament} />}
+      aside={<ConflictCoreSummary seed={session.seed} core={session.selectedConflictCore} />}
+      onBack={goBackFromConflictCore}
+      backLabel={shouldReturnToContextChoice ? '返回补充方式' : undefined}
     >
-      {isLoading && <GenerationNotice label="正在展开三种故事困境" detail="保留你的原始念头，再补齐阻碍、时机和代价。" />}
-      {session.stageError && <GenerationError message={session.stageError} onRetry={() => void session.retryCurrentStage()} />}
-      {!isLoading && hasDirections && (
+      {isLoading && <GenerationNotice label="正在寻找三种冲突核心" detail="先保留故事主线，再判断什么会真正阻断它。" />}
+      {isContextRecoveryVisible ? (
+        <ConflictCoreContextRecovery
+          session={session}
+          disabled={isLoading}
+          isManualContextFormOpen={isManualContextFormOpen}
+          onGenerateSystemDraft={generateSystemDraft}
+          onChooseManualContext={chooseManualContext}
+          onApplyContext={applyManualContext}
+        />
+      ) : session.stageError ? (
+        <GenerationError
+          message={session.stageError}
+          onRetry={retryConflictCoreStage}
+        />
+      ) : null}
+      {!isLoading && !isContextRecoveryVisible && hasConflictCores && (
         <>
           <div className="stage-heading">
             <div>
               <p>围绕“{session.trimmedIdea}”继续</p>
-              <strong>原始目标不变，先选它此刻会遇到什么难处。</strong>
+              <strong>三种不同的卡点，都从同一个目标出发。</strong>
             </div>
-            <span>选定一种困境后，再决定故事从哪里开始，最后如何收束。</span>
+            <span>先比较难处，再确认哪一种值得展开。</span>
           </div>
-          {session.predicamentFeedback.trim() && <p className="direction-feedback-status"><Sparkles size={14} /> 已记住：“{session.predicamentFeedback.trim()}”</p>}
-          <div className="direction-list" aria-label="故事困境">
-            {session.predicamentOptions.map((predicament, index) => (
-              <StoryPredicamentOption
-                predicament={predicament}
+          <div className="conflict-core-goal" aria-label="共同目标">
+            <span><Target size={14} /> 共同目标</span>
+            <strong>{session.seed?.lockedGoal ?? session.conflictCores[0]?.preservedGoal}</strong>
+          </div>
+          {systemDraft && (
+            <SystemDraftSummary
+              draft={systemDraft}
+              onEdit={() => {
+                setHasEnteredContextRoute(true)
+                setIsSystemDraftEditorOpen(true)
+              }}
+            />
+          )}
+          {systemDraft && isSystemDraftEditorOpen && (
+            <ConflictCoreContextForm
+              idea={session.trimmedIdea}
+              initialContext={mergeConflictCoreContext(session.conflictCoreContext, systemDraft)}
+              systemDraft={systemDraft}
+              disabled={isLoading}
+              onApplyContext={applySystemDraftAsContext}
+            />
+          )}
+          {session.conflictCoreFeedback.trim() && <p className="conflict-core-feedback-status"><Sparkles size={14} /> 已记住：“{session.conflictCoreFeedback.trim()}”</p>}
+          <div className="conflict-core-list" aria-label="冲突核心">
+            {session.conflictCores.map((core, index) => (
+              <ConflictCoreOption
+                core={core}
                 index={index}
-                key={predicament.id}
-                selected={predicament.id === session.selectedPredicamentId}
-                onSelect={session.selectPredicament}
+                key={core.id}
+                selected={core.id === session.selectedConflictCoreId}
+                onSelect={session.selectConflictCore}
               />
             ))}
           </div>
-          <PredicamentFeedbackControl
-            appliedFeedback={session.predicamentFeedback}
+          <ConflictCoreFeedbackControl
+            appliedFeedback={session.conflictCoreFeedback}
             disabled={isLoading}
-            onApplyFeedback={session.applyPredicamentFeedback}
-            onShowDifferentPredicaments={session.showDifferentPredicaments}
+            onApplyFeedback={session.applyConflictCoreFeedback}
+            onShowDifferentConflictCores={session.showDifferentConflictCores}
           />
           <StageActions
-            onNext={() => void session.continueToHeadTail()}
-            nextLabel="确认这个困境"
-            disabled={!session.selectedPredicament}
+            onNext={() => void session.continueToPredicament()}
+            nextLabel="确认这个冲突核心"
+            disabled={!session.selectedConflictCore}
           />
         </>
       )}
@@ -137,15 +243,114 @@ export function DirectionPickerScreen({ session }: { session: StorySession }) {
   )
 }
 
-export function HeadTailScreen({ session }: { session: StorySession }) {
+function ConflictCoreContextRecovery({
+  session,
+  disabled,
+  isManualContextFormOpen,
+  onGenerateSystemDraft,
+  onChooseManualContext,
+  onApplyContext,
+}: {
+  session: StorySession
+  disabled: boolean
+  isManualContextFormOpen: boolean
+  onGenerateSystemDraft: () => void
+  onChooseManualContext: () => void
+  onApplyContext: (context: StoryConflictCoreContext) => Promise<void>
+}) {
+  if (isManualContextFormOpen) {
+    return (
+      <ConflictCoreContextForm
+        idea={session.trimmedIdea}
+        initialContext={mergeConflictCoreContext(session.stageErrorContextPrefill, session.conflictCoreContext)}
+        prefill={session.stageErrorContextPrefill}
+        disabled={disabled}
+        onApplyContext={onApplyContext}
+      />
+    )
+  }
+
+  return (
+    <ConflictCoreContextChoice
+      idea={session.trimmedIdea}
+      disabled={disabled}
+      onGenerateSystemDraft={onGenerateSystemDraft}
+      onChooseManualContext={onChooseManualContext}
+    />
+  )
+}
+
+function SystemDraftSummary({
+  draft,
+  onEdit,
+}: {
+  draft: StoryConflictCoreSystemDraft
+  onEdit: () => void
+}) {
+  return (
+    <section className="system-draft-summary" aria-label="系统暂定设定">
+      <header>
+        <span><Sparkles size={14} /> 系统暂定设定</span>
+        <button className="text-action" type="button" onClick={onEdit}>改为自己补充</button>
+      </header>
+      <dl>
+        <div><dt>目标</dt><dd>{draft.goal}</dd></div>
+        <div><dt>代价</dt><dd>{draft.stake}</dd></div>
+        <div><dt>限制</dt><dd>{draft.constraint}</dd></div>
+      </dl>
+      <p>这组前提由系统提出，不是原始念头；当前冲突核心会以它为基础继续展开。</p>
+    </section>
+  )
+}
+
+export function PredicamentPickerScreen({ session }: { session: StorySession }) {
+  const isLoading = session.stageStatus === 'loading'
+  const predicament = session.predicament
+
   return (
     <StoryWorkspace
       step={2}
-      eyebrow="02 / 05 · 故事两端"
+      eyebrow="02 / 06 · 具体困境"
+      title="再把这个阻碍，落到一个当下局面。"
+      lead="把冲突落到当前局面，再选择一条应对方向作为后续故事的起点。"
+      session={session}
+      aside={<PredicamentSummary seed={session.seed} predicament={predicament} approach={session.selectedApproach} />}
+    >
+      <StepContent
+        loading={isLoading}
+        error={session.stageError}
+        loadingLabel="正在展开具体困境"
+        loadingDetail="保留已确认的目标和阻碍，再补齐此刻能进入故事的局面。"
+        onRetry={() => void session.retryCurrentStage()}
+      >
+        {predicament && (
+          <PredicamentDetail
+            predicament={predicament}
+            selectedApproachId={session.selectedApproachId}
+            onSelectApproach={session.selectPredicamentApproach}
+            disabled={isLoading}
+          />
+        )}
+        <StageActions
+          onRegenerate={() => void session.regeneratePredicament()}
+          onNext={() => void session.continueToHeadTail()}
+          nextLabel="确认这个具体困境"
+          disabled={!predicament || !session.selectedApproach}
+        />
+      </StepContent>
+    </StoryWorkspace>
+  )
+}
+
+export function HeadTailScreen({ session }: { session: StorySession }) {
+  return (
+    <StoryWorkspace
+      step={3}
+      eyebrow="03 / 06 · 故事两端"
       title="先定故事从哪里开始，最后如何结束。"
       lead="选择迫使故事开始的事件，并定下主角最后亲自完成的行动、目标结果与代价。"
       session={session}
-      aside={<PredicamentSummary seed={session.seed} predicament={session.selectedPredicament} compact />}
+      aside={<PredicamentSummary seed={session.seed} predicament={session.predicament} approach={session.selectedApproach} compact />}
     >
       <StepContent
         loading={session.stageStatus === 'loading'}
@@ -184,12 +389,22 @@ export function StorySpineScreen({ session }: { session: StorySession }) {
   const canConclude = currentTurn?.canConclude ?? false
   const isWritingStory = hasConclusion && session.stageStatus === 'loading'
   const hasStoryGenerationError = hasConclusion && Boolean(session.stageError)
-  const step = hasConclusion ? 4 : 3
+  const step = hasConclusion ? 5 : 4
+  const currentTurnPanel = currentTurn ? (
+    <CurrentStoryTurn
+      currentTurn={currentTurn}
+      selectedOptionId={session.selectedTurnOptionId}
+      onSelect={session.selectTurnOption}
+      onRefineOption={session.refineTurnOption}
+      disabled={session.stageStatus === 'loading'}
+      hasGeneratedStory={Boolean(story)}
+    />
+  ) : null
 
   return (
     <StoryWorkspace
       step={step}
-      eyebrow={hasConclusion ? '04 / 05 · 故事收束' : '03 / 05 · 逐步发展'}
+      eyebrow={hasConclusion ? '05 / 06 · 故事收束' : '04 / 06 · 逐步发展'}
       title={hasConclusion ? '这些确认的选择，已经让故事可以走向结局。' : '先让这一段发生，再决定下一步。'}
       lead={hasConclusion ? '回看这条由你确认的因果链；结尾会在它之后自然完成。' : '每次只处理当前局面。选定行动后，下一段会承接它的实际后果。'}
       session={session}
@@ -198,7 +413,7 @@ export function StorySpineScreen({ session }: { session: StorySession }) {
       {hasConclusion ? (
         <>
           <StoryTurnHistory history={session.turnHistory} />
-          {currentTurn && <CurrentStoryTurn currentTurn={currentTurn} selectedOptionId={session.selectedTurnOptionId} onSelect={session.selectTurnOption} hasGeneratedStory={Boolean(story)} />}
+          {currentTurnPanel}
           {isWritingStory && <GenerationNotice label="正在按这条路径写成完整故事" detail="完成后会在独立的完整故事页中打开。" />}
           {hasStoryGenerationError && <GenerationError message={session.stageError!} onRetry={() => void session.retryCurrentStage()} />}
           {!isWritingStory && !hasStoryGenerationError && (story ? (
@@ -222,8 +437,8 @@ export function StorySpineScreen({ session }: { session: StorySession }) {
           loadingDetail="只会生成当前这一步，并保留此前已经确认的行动和后果。"
           onRetry={() => void session.retryCurrentStage()}
         >
-        <StoryTurnHistory history={session.turnHistory} />
-        {currentTurn && <CurrentStoryTurn currentTurn={currentTurn} selectedOptionId={session.selectedTurnOptionId} onSelect={session.selectTurnOption} />}
+          <StoryTurnHistory history={session.turnHistory} />
+          {currentTurnPanel}
           <TurnActions
             canConclude={canConclude}
             disabled={!canAdvance}
@@ -245,7 +460,7 @@ export function CompletedStory({ session }: { session: StorySession }) {
     <main className="app-shell setup-shell stage-shell complete-shell">
       <header className="setup-header complete-header">
         <Brand />
-        <StoryJourney current={5} />
+        <StoryJourney current={6} />
         <div className="stage-header-actions complete-header-actions">
           <button className="opening-back" type="button" onClick={session.goBack}>
             <ArrowLeft size={18} /> 返回故事路径
@@ -259,7 +474,7 @@ export function CompletedStory({ session }: { session: StorySession }) {
         <header className="completed-heading">
           <span className="complete-mark"><Check size={20} /></span>
           <div>
-            <p className="eyebrow"><FileText size={16} /> 05 / 05 · 完整故事</p>
+            <p className="eyebrow"><FileText size={16} /> 06 / 06 · 完整故事</p>
             <h1>{story.title}</h1>
             <p className="completed-logline">{story.logline}</p>
           </div>
@@ -270,7 +485,7 @@ export function CompletedStory({ session }: { session: StorySession }) {
             <StoryBody body={story.body} />
           </article>
           <CompletedStoryPath
-            predicament={session.selectedPredicament}
+            predicament={session.predicament}
             headTail={session.selectedHeadTail}
             history={session.turnHistory}
             conclusion={session.currentTurn?.isConclusion ? session.currentTurn : undefined}
@@ -356,6 +571,8 @@ function StoryWorkspace({
   lead,
   session,
   aside,
+  onBack,
+  backLabel,
   children,
 }: {
   step: StoryStep
@@ -364,9 +581,12 @@ function StoryWorkspace({
   lead: string
   session: StorySession
   aside: ReactNode
+  onBack?: () => void
+  backLabel?: string
   children: ReactNode
 }) {
-  const isRecoveringStoryPath = session.stageStatus === 'error' && step >= 3
+  const isRecoveringStoryPath = session.stageStatus === 'error' && step >= 4
+  const handleBack = onBack ?? session.goBack
 
   return (
     <main className="app-shell setup-shell stage-shell">
@@ -375,13 +595,13 @@ function StoryWorkspace({
         <StoryJourney current={step} />
         <div className="stage-header-actions">
           {session.generatedStory && <button className="toolbar-action restart-action" type="button" onClick={session.restartStory}><RefreshCcw size={15} /> 新建故事</button>}
-          <button className="opening-back" type="button" onClick={session.goBack} disabled={session.stageStatus === 'loading'}><ArrowLeft size={18} /> {isRecoveringStoryPath ? '回到当前故事路径' : '返回上一步'}</button>
+          <button className="opening-back" type="button" onClick={handleBack} disabled={session.stageStatus === 'loading'}><ArrowLeft size={18} /> {backLabel ?? (isRecoveringStoryPath ? '回到当前故事路径' : '返回上一步')}</button>
         </div>
       </header>
       <section className="setup-layout stage-layout">
         <div className="setup-main stage-main">
           <p className="eyebrow"><StageIcon step={step} size={16} /> {eyebrow}</p>
-          <h1 className={step === 2 ? 'head-tail-title' : undefined}>{title}</h1>
+          <h1 className={step === 3 ? 'head-tail-title' : undefined}>{title}</h1>
           <p className="setup-lead">{lead}</p>
           {step > 1 && session.trimmedIdea && (
             <p className="locked-idea"><span><FileText size={14} /> 原始念头</span><strong>{session.trimmedIdea}</strong></p>
@@ -420,23 +640,144 @@ function StageActions({ onRegenerate, onNext, nextLabel, disabled }: {
   )
 }
 
-function StoryPredicamentOption({ predicament, index, selected, onSelect }: { predicament: StoryPredicament; index: number; selected: boolean; onSelect: (id: string) => void }) {
+function ConflictCoreOption({ core, index, selected, onSelect }: { core: StoryConflictCore; index: number; selected: boolean; onSelect: (id: string) => void }) {
   return (
-    <button className={`direction-option ${selected ? 'is-selected' : ''}`} type="button" onClick={() => onSelect(predicament.id)}>
-      <span className="direction-index">0{index + 1}</span>
-      <span className="direction-icon"><FileText size={18} /></span>
-      <span className="direction-copy">
-        <span className="direction-topline"><em>{variationAxisLabel[predicament.variationAxis]}</em><strong>{predicament.title}</strong></span>
-        <span className="direction-premise">{predicament.immediateSituation}</span>
-        <span className="direction-anchor-points">
-          <span className="direction-anchor-point is-opening"><small>原本想做的事</small><b>{predicament.preservedGoal}</b></span>
-          <span className="direction-anchor-connector" aria-hidden="true"><ArrowRight size={15} /></span>
-          <span className="direction-anchor-point is-climax"><small>这次必须做的选择</small><b>{predicament.choice}</b></span>
-        </span>
-        <span className="direction-bridge"><b>眼前阻碍</b>{predicament.obstacle}</span>
-        <span className="direction-anchor-meta"><span><b>为什么现在</b>{predicament.urgency}</span><span><b>可能代价</b>{predicament.plausibleCost}</span></span>
+    <button
+      className={`conflict-core-option ${selected ? 'is-selected' : ''}`}
+      type="button"
+      onClick={() => onSelect(core.id)}
+      aria-pressed={selected}
+    >
+      <span className="conflict-core-option-topline">
+        <span className="conflict-core-option-index">{String(index + 1).padStart(2, '0')}</span>
+        <span className="conflict-core-option-axis">{conflictAxisLabel[core.variationAxis]}</span>
+        <span className="conflict-core-option-choice" aria-hidden="true">{selected ? <Check size={14} /> : <span />}</span>
       </span>
-      <span className="choice-indicator" aria-hidden="true">{selected ? <Check size={15} /> : <span />}</span>
+      <span className="conflict-core-option-content">
+        <strong className="conflict-core-option-title">{core.title}</strong>
+        <span className="conflict-core-option-obstacle">
+          <small>核心阻碍</small>
+          <b>{core.obstacle}</b>
+        </span>
+      </span>
+      <span className="conflict-core-option-tradeoff">
+        <small>真正的两难</small>
+        <b>{core.tradeoff}</b>
+      </span>
+    </button>
+  )
+}
+
+function PredicamentDetail({
+  predicament,
+  selectedApproachId,
+  onSelectApproach,
+  disabled,
+}: {
+  predicament: StoryPredicament
+  selectedApproachId: string | undefined
+  onSelectApproach: (id: string) => void
+  disabled: boolean
+}) {
+  return (
+    <section className="predicament-detail" aria-label="具体困境">
+      <header className="predicament-detail-heading">
+        <span>{variationAxisLabel[predicament.variationAxis]}</span>
+        <h2>{predicament.title}</h2>
+      </header>
+      <div className="predicament-scene">
+        <span>当前场景</span>
+        <p>{predicament.immediateSituation}</p>
+      </div>
+      <PredicamentContext predicament={predicament} />
+      <PredicamentApproachPicker
+        approaches={predicament.approaches}
+        selectedApproachId={selectedApproachId}
+        onSelectApproach={onSelectApproach}
+        disabled={disabled}
+      />
+    </section>
+  )
+}
+
+function PredicamentContext({ predicament }: { predicament: StoryPredicament }) {
+  return (
+    <>
+      <dl className="predicament-facts">
+        <div><dt>原始目标</dt><dd>{predicament.preservedGoal}</dd></div>
+        <div><dt>直接阻碍</dt><dd>{predicament.obstacle}</dd></div>
+        <div><dt>核心取舍</dt><dd>{predicament.tradeoff}</dd></div>
+        <div><dt>为什么必须现在处理</dt><dd>{predicament.urgency}</dd></div>
+        <div><dt>必须面对</dt><dd>{predicament.choice}</dd></div>
+        <div><dt>共同风险</dt><dd>{predicament.plausibleCost}</dd></div>
+      </dl>
+      <section className="predicament-known-facts" aria-label="暂定事实">
+        <p>暂定事实</p>
+        <ul>
+          {predicament.facts.map((fact) => <li key={fact.id}>{fact.statement}</li>)}
+        </ul>
+      </section>
+    </>
+  )
+}
+
+function PredicamentApproachPicker({
+  approaches,
+  selectedApproachId,
+  onSelectApproach,
+  disabled,
+}: {
+  approaches: StoryPredicamentApproach[]
+  selectedApproachId: string | undefined
+  onSelectApproach: (id: string) => void
+  disabled: boolean
+}) {
+  return (
+    <section className="predicament-approach-section" aria-label="选择应对方向">
+      <p>选择一条应对方向</p>
+      <div className="predicament-approaches">
+        {approaches.map((approach, index) => (
+          <PredicamentApproachOption
+            approach={approach}
+            index={index}
+            key={approach.id}
+            selected={approach.id === selectedApproachId}
+            onSelect={onSelectApproach}
+            disabled={disabled}
+          />
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function PredicamentApproachOption({
+  approach,
+  index,
+  selected,
+  onSelect,
+  disabled,
+}: {
+  approach: StoryPredicamentApproach
+  index: number
+  selected: boolean
+  onSelect: (id: string) => void
+  disabled: boolean
+}) {
+  return (
+    <button
+      className={`predicament-approach ${selected ? 'is-selected' : ''}`}
+      type="button"
+      onClick={() => onSelect(approach.id)}
+      aria-pressed={selected}
+      disabled={disabled}
+    >
+      <span className="predicament-approach-heading">
+        <span className="predicament-approach-label">方向 {index + 1}</span>
+        <span className="choice-indicator" aria-hidden="true">{selected ? <Check size={14} /> : <span />}</span>
+      </span>
+      <strong>{approach.intent}</strong>
+      <span className="predicament-approach-cost"><b>直接代价</b><span>{approach.cost}</span></span>
     </button>
   )
 }
@@ -497,10 +838,12 @@ function ConfirmedTurnRow({ item, index }: { item: StoryTurnHistoryItem; index: 
   )
 }
 
-function CurrentStoryTurn({ currentTurn, selectedOptionId, onSelect, hasGeneratedStory }: {
+function CurrentStoryTurn({ currentTurn, selectedOptionId, onSelect, onRefineOption, disabled, hasGeneratedStory }: {
   currentTurn: StoryTurn
   selectedOptionId: string | undefined
   onSelect: (optionId: string) => void
+  onRefineOption: StorySession['refineTurnOption']
+  disabled: boolean
   hasGeneratedStory?: boolean
 }) {
   const { conflict, node } = currentTurn
@@ -530,10 +873,12 @@ function CurrentStoryTurn({ currentTurn, selectedOptionId, onSelect, hasGenerate
             {currentTurn.options.map((option) => (
               <TurnOption
                 key={option.id}
-                option={option}
-                selected={option.id === selectedOptionId}
-                onSelect={onSelect}
-              />
+              option={option}
+              selected={option.id === selectedOptionId}
+              onSelect={onSelect}
+              onRefineOption={onRefineOption}
+              disabled={disabled}
+            />
             ))}
           </div>
         </>
@@ -542,16 +887,21 @@ function CurrentStoryTurn({ currentTurn, selectedOptionId, onSelect, hasGenerate
   )
 }
 
-function TurnOption({ option, selected, onSelect }: {
+function TurnOption({ option, selected, onSelect, onRefineOption, disabled }: {
   option: StoryTurnOption
   selected: boolean
   onSelect: (optionId: string) => void
+  onRefineOption: StorySession['refineTurnOption']
+  disabled: boolean
 }) {
   return (
-    <button className={`branch-option ${selected ? 'is-selected' : ''}`} type="button" onClick={() => onSelect(option.id)} aria-pressed={selected}>
-      <span className="branch-choice-mark">{selected ? <Check size={15} /> : null}</span>
-      <span><strong>{option.label}</strong><small>{option.action}</small><em><b>立即</b>{option.immediateConsequence}</em><em><b>可能影响</b>{option.laterEffect}</em></span>
-    </button>
+    <div className="turn-option-group">
+      <button className={`branch-option ${selected ? 'is-selected' : ''}`} type="button" onClick={() => onSelect(option.id)} aria-pressed={selected} disabled={disabled}>
+        <span className="branch-choice-mark">{selected ? <Check size={15} /> : null}</span>
+        <span><strong>{option.label}</strong><small>{option.action}</small><em><b>立即</b>{option.immediateConsequence}</em><em><b>可能影响</b>{option.laterEffect}</em></span>
+      </button>
+      <StoryTurnOptionRefinementControl option={option} disabled={disabled} onRefine={onRefineOption} />
+    </div>
   )
 }
 
@@ -569,18 +919,47 @@ function TurnActions({ canConclude, disabled, onContinue, onConclude }: {
   )
 }
 
-function PredicamentSummary({ seed, predicament, compact = false }: { seed: StorySession['seed']; predicament: StoryPredicament | undefined; compact?: boolean }) {
-  if (!predicament) return <AsideEmpty icon={<Target size={19} />} label="正在等你确认一个故事困境" detail="选中后，原始目标和这次阻碍会固定下来。" />
+function ConflictCoreSummary({ seed, core }: { seed: StorySession['seed']; core: StoryConflictCore | undefined }) {
+  if (!core) return <AsideEmpty icon={<Target size={19} />} label="正在等你确认一个冲突核心" detail="先选定故事目标会被什么真正卡住。" />
+  return (
+    <>
+      <span className="aside-icon"><Target size={19} /></span>
+      <p className="eyebrow">已确认的冲突核心</p>
+      <dl className="anchor-preview">
+        <div><dt>{getStoryGoalLabel(seed)}</dt><dd>{seed?.lockedGoal ?? core.preservedGoal}</dd></div>
+        <div><dt>核心阻碍</dt><dd>{core.obstacle}</dd></div>
+        <div><dt>真正的两难</dt><dd>{core.tradeoff}</dd></div>
+      </dl>
+      <div className="aside-principle"><Lightbulb size={16} /><span>下一步会把这个阻碍落到具体局面，但不会偷偷换掉目标。</span></div>
+    </>
+  )
+}
+
+function PredicamentSummary({
+  seed,
+  predicament,
+  approach,
+  compact = false,
+}: {
+  seed: StorySession['seed']
+  predicament: StoryPredicament | undefined
+  approach: StoryPredicamentApproach | undefined
+  compact?: boolean
+}) {
+  if (!predicament) return <AsideEmpty icon={<Target size={19} />} label="正在等你确认一个故事困境" detail="选中后，故事目标和这次阻碍会固定下来。" />
   return (
     <>
       <span className="aside-icon"><Target size={19} /></span>
       <p className="eyebrow">已确认的故事困境</p>
       <h2>{predicament.title}</h2>
       <dl className="anchor-preview">
-        <div><dt>原始目标</dt><dd>{seed?.lockedGoal ?? predicament.preservedGoal}</dd></div>
+        <div><dt>{getStoryGoalLabel(seed)}</dt><dd>{seed?.lockedGoal ?? predicament.preservedGoal}</dd></div>
         <div><dt>当前阻碍</dt><dd>{predicament.obstacle}</dd></div>
-        <div><dt>此刻选择</dt><dd>{predicament.choice}</dd></div>
-        {!compact && <div><dt>可能代价</dt><dd>{predicament.plausibleCost}</dd></div>}
+        <div><dt>核心取舍</dt><dd>{predicament.tradeoff}</dd></div>
+        <div><dt>眼前取舍</dt><dd>{predicament.choice}</dd></div>
+        {approach && <div><dt>已选方向</dt><dd>{approach.intent}</dd></div>}
+        {!compact && approach && <div><dt>方向代价</dt><dd>{approach.cost}</dd></div>}
+        {!compact && <div><dt>共同风险</dt><dd>{predicament.plausibleCost}</dd></div>}
       </dl>
       <div className="aside-principle"><Lightbulb size={16} /><span>后续步骤会保留这件事和这次阻碍，不会悄悄换成另一条主线。</span></div>
     </>
@@ -624,6 +1003,11 @@ function AsideEmpty({ icon, label, detail }: { icon: ReactNode; label: string; d
   return <><span className="aside-icon">{icon}</span><p className="eyebrow">创作向导</p><h2>{label}</h2><div className="aside-principle"><Lightbulb size={16} /><span>{detail}</span></div></>
 }
 
+function getStoryGoalLabel(seed: StorySession['seed']): string {
+  if (seed?.lockedGoal) return '原始目标'
+  return seed?.systemDraft ? '暂定目标' : '故事目标'
+}
+
 function StoryBody({ body }: { body: string }) {
   return <div className="story-body">{body.split(/\n{2,}/).map((paragraph, index) => <p key={index}>{paragraph}</p>)}</div>
 }
@@ -632,8 +1016,20 @@ function GenerationNotice({ label, detail }: { label: string; detail: string }) 
   return <div className="generation-notice" role="status"><span className="generation-spinner" aria-hidden="true" /><div><strong>{label}</strong><p>{detail}</p></div></div>
 }
 
-function GenerationError({ message, onRetry }: { message: string; onRetry: () => void }) {
-  return <div className="generation-error" role="alert"><CircleAlert size={17} /><div><strong>这一步没有生成成功</strong><p>{message}</p><button className="text-action" type="button" onClick={onRetry}><RefreshCcw size={14} /> 再试一次</button></div></div>
+function GenerationError({ message, onRetry }: {
+  message: string
+  onRetry: () => void
+}) {
+  return (
+    <div className="generation-error" role="alert">
+      <CircleAlert size={17} />
+      <div>
+        <strong>这一步没有生成成功</strong>
+        <p>{message}</p>
+        <button className="text-action" type="button" onClick={onRetry}><RefreshCcw size={14} /> 再试一次</button>
+      </div>
+    </div>
+  )
 }
 
 function StoryJourney({ current, compact = false }: { current: number; compact?: boolean }) {
@@ -641,7 +1037,7 @@ function StoryJourney({ current, compact = false }: { current: number; compact?:
 }
 
 function StageIcon({ step, size }: { step: StoryStep; size: number }) {
-  const Icon = [Target, Route, Waypoints, GitBranch, FileText][step - 1]
+  const Icon = [Target, FileText, Route, Waypoints, GitBranch, FileText][step - 1]
   return <Icon size={size} />
 }
 

@@ -2,9 +2,13 @@ import type {
   ApiErrorResponse,
   GeneratedStory,
   StoryConflict,
+  StoryConflictCore,
+  StoryConflictCoreContextPrefill,
   StoryBeat,
   StoryDirectionsRequest,
   StoryDirectionsResponse,
+  StoryPredicamentResponse,
+  StoryPredicamentSessionRequest,
   StoryGenerationSessionRequest,
   StoryGenerationResponse,
   StoryHeadTailOption,
@@ -16,6 +20,7 @@ import type {
   StoryReviewItem,
   StoryTurn,
   StoryTurnOption,
+  StoryTurnOptionRefinementRequest,
   StoryTurnSessionRequest,
   StoryTurnResponse,
   StoryFact,
@@ -31,14 +36,19 @@ export class StoryApiError extends Error {
   constructor(
     message: string,
     public readonly code?: string,
+    public readonly conflictCoreContextPrefill?: StoryConflictCoreContextPrefill,
   ) {
     super(message)
     this.name = 'StoryApiError'
   }
 }
 
-export function requestStoryDirections(request: StoryDirectionsRequest): Promise<StoryDirectionsResponse> {
-  return postJson('/api/story-directions', request, parseDirectionsResponse)
+export function requestConflictCores(request: StoryDirectionsRequest): Promise<StoryDirectionsResponse> {
+  return postJson('/api/story-directions', request, parseConflictCoresResponse)
+}
+
+export function requestStoryPredicament(request: StoryPredicamentSessionRequest): Promise<StoryPredicamentResponse> {
+  return postJson('/api/story-predicament', request, parsePredicamentResponse)
 }
 
 export function requestHeadTailOptions(request: StoryHeadTailSessionRequest): Promise<StoryHeadTailResponse> {
@@ -47,6 +57,12 @@ export function requestHeadTailOptions(request: StoryHeadTailSessionRequest): Pr
 
 export function requestStoryTurn(request: StoryTurnSessionRequest): Promise<StoryTurnResponse> {
   return postJson('/api/story-spine/turn', request, parseStoryTurnResponse)
+}
+
+export function requestStoryTurnOptionRefinement(
+  request: StoryTurnOptionRefinementRequest,
+): Promise<StoryTurnResponse> {
+  return postJson('/api/story-spine/turn-option/refine', request, parseStoryTurnResponse)
 }
 
 export function requestFullStory(request: StoryGenerationSessionRequest): Promise<StoryGenerationResponse> {
@@ -73,7 +89,11 @@ async function postJson<T>(
   const payload = await readJson(response)
   if (!response.ok) {
     const error = parseApiErrorResponse(payload)
-    throw new StoryApiError(error?.error.message ?? '生成没有完成，请稍后重试。', error?.error.code)
+    throw new StoryApiError(
+      error?.error.message ?? '生成没有完成，请稍后重试。',
+      error?.error.code,
+      error?.error.conflictCoreContextPrefill,
+    )
   }
 
   return parseResponse(payload)
@@ -87,13 +107,21 @@ async function readJson(response: Response): Promise<unknown> {
   }
 }
 
-function parseDirectionsResponse(payload: unknown): StoryDirectionsResponse {
+function parseConflictCoresResponse(payload: unknown): StoryDirectionsResponse {
   const record = expectRecord(payload)
 
   return {
     ...parseStorySessionVersion(record),
     seed: parseStorySeed(record.seed),
-    directions: parseGeneratedOptionTuple(record.directions, parseStoryPredicament),
+    conflictCores: parseGeneratedOptionTuple(record.conflictCores, parseStoryConflictCore),
+  }
+}
+
+function parsePredicamentResponse(payload: unknown): StoryPredicamentResponse {
+  const record = expectRecord(payload)
+  return {
+    ...parseStorySessionVersion(record),
+    predicament: parseStoryPredicament(record.predicament),
   }
 }
 
@@ -143,15 +171,28 @@ function parseStorySeed(value: unknown): StorySeed {
   if (expansionScope !== 'keep-scale' && expansionScope !== 'grounded-obstacle' && expansionScope !== 'larger-story' && expansionScope !== 'genre-led') {
     throwInvalidResponse()
   }
+  const systemDraft = parseSystemConflictCoreDraft(record.systemDraft)
 
   return {
     subject: readText(record, 'subject'),
     activeSituation: readText(record, 'activeSituation'),
     lockedGoal: typeof lockedGoal === 'string' ? lockedGoal.trim() : null,
     lockedFacts: readTextList(record, 'lockedFacts', 1, 5),
+    ...(systemDraft ? { systemDraft } : {}),
     worldMode,
     expansionScope,
     unknowns: readTextList(record, 'unknowns', 1, 6),
+  }
+}
+
+function parseSystemConflictCoreDraft(value: unknown): StorySeed['systemDraft'] {
+  if (value === undefined || value === null) return undefined
+
+  const record = expectRecord(value)
+  return {
+    goal: readText(record, 'goal'),
+    stake: readText(record, 'stake'),
+    constraint: readText(record, 'constraint'),
   }
 }
 
@@ -165,12 +206,38 @@ function parseStoryPredicament(value: unknown): StoryPredicament {
     preservedGoal: readText(record, 'preservedGoal'),
     immediateSituation: readText(record, 'immediateSituation'),
     obstacle: readText(record, 'obstacle'),
+    tradeoff: readText(record, 'tradeoff'),
     urgency: readText(record, 'urgency'),
     choice: readText(record, 'choice'),
     plausibleCost: readText(record, 'plausibleCost'),
+    approaches: parsePredicamentApproaches(record.approaches),
     facts: parseStoryFacts(record.facts),
     actions: parseStoryActions(record.actions),
   }
+}
+
+function parseStoryConflictCore(value: unknown): StoryConflictCore {
+  const record = expectRecord(value)
+  return {
+    id: readIdentifier(record, 'id'),
+    title: readText(record, 'title'),
+    variationAxis: readStoryVariationAxis(record.variationAxis),
+    preservedGoal: readText(record, 'preservedGoal'),
+    obstacle: readText(record, 'obstacle'),
+    tradeoff: readText(record, 'tradeoff'),
+  }
+}
+
+function parsePredicamentApproaches(value: unknown): StoryPredicament['approaches'] {
+  if (!Array.isArray(value) || value.length !== 2) throwInvalidResponse()
+  return value.map((item) => {
+    const record = expectRecord(item)
+    return {
+      id: readIdentifier(record, 'id'),
+      intent: readText(record, 'intent'),
+      cost: readText(record, 'cost'),
+    }
+  })
 }
 
 function parseHeadTailOption(value: unknown): StoryHeadTailOption {
@@ -313,7 +380,7 @@ function parseStoryAction(value: unknown): StoryAction {
 }
 
 function parseStoryFacts(value: unknown): StoryFact[] {
-  if (!Array.isArray(value) || value.length < 1) throwInvalidResponse()
+  if (!Array.isArray(value) || value.length < 2 || value.length > 4) throwInvalidResponse()
   return value.map((item) => parseFactRecord(item))
 }
 
@@ -376,7 +443,7 @@ function parseFactRecord(value: unknown): StoryFact {
   const record = expectRecord(value)
   const source = record.source
   const mutability = record.mutability
-  if (source !== 'user' && source !== 'predicament' && source !== 'confirmed-action') throwInvalidResponse()
+  if (source !== 'user' && source !== 'system-draft' && source !== 'predicament' && source !== 'confirmed-action') throwInvalidResponse()
   if (mutability !== 'fixed' && mutability !== 'changeable' && mutability !== 'unknown') throwInvalidResponse()
 
   return {
@@ -475,7 +542,36 @@ function parseApiErrorResponse(value: unknown): ApiErrorResponse | undefined {
   const { code, message } = value.error
   if (typeof code !== 'string' || !code || typeof message !== 'string' || !message) return undefined
 
-  return { error: { code, message } }
+  const conflictCoreContextPrefill = parseConflictCoreContextPrefill(value.error.conflictCoreContextPrefill)
+  return {
+    error: {
+      code,
+      message,
+      ...(conflictCoreContextPrefill ? { conflictCoreContextPrefill } : {}),
+    },
+  }
+}
+
+function parseConflictCoreContextPrefill(value: unknown): StoryConflictCoreContextPrefill | undefined {
+  if (!isRecord(value)) return undefined
+
+  const goal = readErrorPrefillText(value.goal)
+  const stake = readErrorPrefillText(value.stake)
+  const constraint = readErrorPrefillText(value.constraint)
+  if (!goal && !stake && !constraint) return undefined
+
+  return {
+    ...(goal ? { goal } : {}),
+    ...(stake ? { stake } : {}),
+    ...(constraint ? { constraint } : {}),
+  }
+}
+
+function readErrorPrefillText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+
+  const text = value.trim()
+  return text && text.length <= 120 ? text : undefined
 }
 
 function expectRecord(value: unknown): Record<string, unknown> {

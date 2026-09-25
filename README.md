@@ -98,7 +98,7 @@ cd backend
 npm.cmd run request:directions -- -Idea "放学铃响前三分钟，一个学生发现最好的朋友开始刻意躲着自己"
 ```
 
-该命令会请求 `POST /api/story-directions` 并将生成结果输出到终端。
+该命令会请求 `POST /api/story-directions`，输出三条只含“原始目标”“核心阻碍”和“真正的两难”的冲突核心。选定一条后，再将返回的 `storyId`、`revision` 和 `conflictCoreId` 提交到 `POST /api/story-predicament`，展开为具体困境；用户再从两种应对方向中选择一条，作为后续故事两端、逐步发展和成稿的路线起点。
 
 ## 构建
 
