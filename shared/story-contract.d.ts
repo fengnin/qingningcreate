@@ -83,6 +83,26 @@ export interface StoryConflictCoreContextPrefill {
 }
 
 /**
+ * A mechanism premise proposed for one independent system-led branch.
+ * These premises are alternatives, not facts that all become true together.
+ */
+export type StoryConflictCoreMechanismType =
+  | 'information-gap'
+  | 'boundary-conflict'
+  | 'meaning-commitment'
+  | 'initiation-block'
+  | 'window-pressure'
+  | 'resource-constraint'
+  | 'commitment-conflict'
+
+export interface StoryConflictCoreSystemDraftDirection {
+  label: string
+  mechanismType: StoryConflictCoreMechanismType
+  premise: string
+  tradeoff: string
+}
+
+/**
  * The system's clearly labelled, editable premise for a sparse idea. It is
  * only present when the user asks the system to draft a first direction.
  */
@@ -90,6 +110,13 @@ export interface StoryConflictCoreSystemDraft {
   goal: string
   stake: string
   constraint: string
+  /**
+   * Three mutually exclusive branch premises. Optional for persisted sessions
+   * created before branch planning was introduced.
+   */
+  directions?: StoryConflictCoreSystemDraftDirection[]
+  /** The one branch carried forward after the user makes a selection. */
+  activeDirection?: StoryConflictCoreSystemDraftDirection
 }
 
 /**
@@ -321,6 +348,7 @@ export interface ApiErrorResponse {
     code: string
     message: string
     conflictCoreContextPrefill?: StoryConflictCoreContextPrefill
+    systemDraftPrefill?: StoryConflictCoreSystemDraft
   }
 }
 

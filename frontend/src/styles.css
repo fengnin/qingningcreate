@@ -235,6 +235,7 @@ textarea:focus-visible {
 
 .opening-content {
   align-self: center;
+  min-width: 0;
   width: min(620px, 48vw);
   padding: 60px 0 30px 7vw;
   animation: sceneEnter 600ms 80ms ease both;
@@ -270,6 +271,7 @@ textarea:focus-visible {
 
 .idea-field {
   display: grid;
+  min-width: 0;
   width: min(510px, 100%);
   gap: 9px;
   padding: 15px 16px 12px;
@@ -284,8 +286,12 @@ textarea:focus-visible {
 }
 
 .idea-field textarea {
-  min-height: 96px;
+  min-height: 124px;
+  max-height: 216px;
+  min-width: 0;
   width: 100%;
+  padding-right: 8px;
+  overflow-y: auto;
   resize: vertical;
   border: 0;
   outline: 0;
@@ -294,16 +300,39 @@ textarea:focus-visible {
   font-family: Georgia, "Songti SC", serif;
   font-size: 17px;
   line-height: 1.65;
+  scrollbar-color: #d87961 #111a17;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
 }
 
 .idea-field textarea::placeholder {
   color: #718078;
 }
 
+.idea-field textarea::-webkit-scrollbar {
+  width: 10px;
+}
+
+.idea-field textarea::-webkit-scrollbar-track {
+  border-left: 1px solid #34463d;
+  background: #111a17;
+}
+
+.idea-field textarea::-webkit-scrollbar-thumb {
+  border: 2px solid #182321;
+  border-radius: 8px;
+  background: #657a70;
+}
+
+.idea-field textarea::-webkit-scrollbar-thumb:hover {
+  background: #d87961;
+}
+
 .field-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  min-width: 0;
   color: #76827b;
   font-size: 12px;
 }
@@ -679,6 +708,28 @@ textarea:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.conflict-core-option-premise {
+  display: grid;
+  gap: 4px;
+  padding-top: 12px;
+  border-top: 1px solid #3e5148;
+}
+
+.conflict-core-option-premise small {
+  color: #9eafa4;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.conflict-core-option-premise b {
+  color: #b8c7bd;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.58;
+  overflow-wrap: anywhere;
+}
+
 .conflict-core-option-obstacle {
   display: grid;
   gap: 4px;
@@ -705,7 +756,8 @@ textarea:focus-visible {
 }
 
 .conflict-core-option.is-selected .conflict-core-option-obstacle b,
-.conflict-core-option.is-selected .conflict-core-option-tradeoff b {
+.conflict-core-option.is-selected .conflict-core-option-tradeoff b,
+.conflict-core-option.is-selected .conflict-core-option-premise b {
   color: #f1b09b;
 }
 
@@ -854,6 +906,24 @@ textarea:focus-visible {
   font-weight: 500;
   line-height: 1.6;
   overflow-wrap: anywhere;
+}
+
+.conflict-core-context-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 9px 0;
+  border-bottom: 1px solid #40534a;
+  color: #e6ae88;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.conflict-core-context-notice > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: #e58a6c;
 }
 
 .conflict-core-context-routes {
@@ -1074,6 +1144,59 @@ textarea:focus-visible {
   color: #94a399;
   font-size: 11px;
   line-height: 1.6;
+}
+
+.system-draft-directions {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid #40534a;
+  list-style: none;
+}
+
+.system-draft-directions li {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 9px;
+  padding: 10px 0;
+  border-bottom: 1px solid #40534a;
+}
+
+.system-draft-directions > li > span {
+  color: #df7b61;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.6;
+}
+
+.system-draft-directions li > div {
+  min-width: 0;
+}
+
+.system-draft-directions strong {
+  color: #dfe8df;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.system-draft-directions p {
+  margin: 3px 0 0;
+  color: #aebbb2;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.system-draft-direction-tradeoff {
+  color: #8f9f96 !important;
+}
+
+.system-draft-direction-tradeoff small {
+  margin-right: 5px;
+  color: #c78b73;
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .conflict-core-refine {

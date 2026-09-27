@@ -138,8 +138,16 @@ function createSystemDraftFacts(seed: StorySeed): StoryFact[] {
       .map(normalizeFactStatement),
   )
   const systemDraftStatements: string[] = []
+  const directions = seed.systemDraft.activeDirection
+    ? [seed.systemDraft.activeDirection]
+    : seed.systemDraft.directions ?? []
 
-  for (const statement of [seed.systemDraft.goal, seed.systemDraft.stake, seed.systemDraft.constraint]) {
+  for (const statement of [
+    seed.systemDraft.goal,
+    seed.systemDraft.stake,
+    seed.systemDraft.constraint,
+    ...directions.flatMap((direction) => [direction.premise, direction.tradeoff]),
+  ]) {
     const normalized = normalizeFactStatement(statement)
     if (knownStatements.has(normalized)) continue
 

@@ -19,6 +19,7 @@ import type {
   ApiErrorResponse,
   HealthResponse,
   StoryConflictCoreContextPrefill,
+  StoryConflictCoreSystemDraft,
   StoryDirectionsResponse,
   StoryPredicamentResponse,
   StoryGenerationResponse,
@@ -90,7 +91,14 @@ app.use((_request, response: Response<ApiErrorResponse>) => {
 
 app.use((error: unknown, _request: Request, response: Response<ApiErrorResponse>, _next: NextFunction) => {
   if (error instanceof AppError) {
-    sendApiError(response, error.statusCode, error.code, error.message, error.conflictCoreContextPrefill)
+    sendApiError(
+      response,
+      error.statusCode,
+      error.code,
+      error.message,
+      error.conflictCoreContextPrefill,
+      error.systemDraftPrefill,
+    )
     return
   }
 
@@ -119,12 +127,14 @@ function sendApiError(
   code: string,
   message: string,
   conflictCoreContextPrefill?: StoryConflictCoreContextPrefill,
+  systemDraftPrefill?: StoryConflictCoreSystemDraft,
 ) {
   response.status(statusCode).json({
     error: {
       code,
       message,
       ...(conflictCoreContextPrefill ? { conflictCoreContextPrefill } : {}),
+      ...(systemDraftPrefill ? { systemDraftPrefill } : {}),
     },
   } satisfies ApiErrorResponse)
 }

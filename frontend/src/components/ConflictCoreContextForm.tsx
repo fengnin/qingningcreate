@@ -13,6 +13,7 @@ interface ConflictCoreContextFormProps {
   initialContext: StoryConflictCoreContext
   prefill?: StoryConflictCoreContextPrefill
   systemDraft?: StoryConflictCoreSystemDraft
+  isSystemDraftRecovery?: boolean
   disabled?: boolean
   onApplyContext: (context: StoryConflictCoreContext) => Promise<void>
 }
@@ -52,12 +53,13 @@ export function ConflictCoreContextForm({
   initialContext,
   prefill,
   systemDraft,
+  isSystemDraftRecovery = false,
   disabled = false,
   onApplyContext,
 }: ConflictCoreContextFormProps) {
   const [draft, setDraft] = useState<StoryConflictCoreContext>(initialContext)
   const confirmedContext = normalizeConflictCoreContext(draft)
-  const contextNote = getConflictCoreContextNote(prefill, systemDraft)
+  const contextNote = getConflictCoreContextNote(prefill, systemDraft, isSystemDraftRecovery)
 
   const updateDraft = (field: ConflictCoreContextField, value: string) => {
     setDraft((current) => ({ ...current, [field]: value }))
@@ -108,8 +110,13 @@ export function ConflictCoreContextForm({
 function getConflictCoreContextNote(
   prefill: StoryConflictCoreContextPrefill | undefined,
   systemDraft: StoryConflictCoreSystemDraft | undefined,
+  isSystemDraftRecovery: boolean,
 ): string {
   if (systemDraft) {
+    if (isSystemDraftRecovery) {
+      return '系统给出的暂定设定没有自动采用。你可以直接修改并确认；提交后才会成为你确认的故事事实。'
+    }
+
     return '以下内容来自系统暂定设定，可直接修改；提交后才会成为你确认的故事事实。'
   }
 

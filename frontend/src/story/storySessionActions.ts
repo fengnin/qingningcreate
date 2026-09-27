@@ -11,6 +11,7 @@ import {
   type StorySessionState,
 } from './useStorySessionState'
 import { normalizeConflictCoreContext } from './conflictCoreContext'
+import { getNextStoryIdeaExample } from './storyIdeaExamples'
 import type {
   StoryConflictCoreContext,
   StorySessionVersion,
@@ -66,39 +67,6 @@ const previousViewByView: Partial<Record<StoryView, StoryView>> = {
   'story-spine': 'head-tail',
   complete: 'story-spine',
 }
-
-const storyIdeaExamples = [
-  '李明第一天自己去上学。',
-  '王小雨和同学一起做值日。',
-  '陈晨在放学路上捡到一片漂亮的叶子。',
-  '周末，小雅和家人去公园玩。',
-  '赵阳第一次学骑自行车。',
-  '刘佳帮妈妈一起去买菜。',
-  '张宁给奶奶做一张生日卡。',
-  '林可参加班级的朗读比赛。',
-  '何宇和好朋友因为一件小事闹别扭了。',
-  '孙悦照顾窗台上刚发芽的小植物。',
-  '吴迪忘记带作业本，想在上课前找到办法。',
-  '杨帆把雨伞借给了同学，放学时自己没有伞。',
-  '许诺第一次去图书馆借书。',
-  '高兴发现自己的水杯和同学的拿错了。',
-  '杜若想学会做一道简单的早餐。',
-  '马超放学后留下来整理教室里的图书角。',
-  '唐果要把借来的漫画书按时还给同学。',
-  '宋然在手工课上做坏了自己的纸风车。',
-  '冯乐带着弟弟去楼下买牛奶。',
-  '顾宁发现小区公告栏上的活动报名快结束了。',
-  '程晓在运动会上报名参加了接力赛。',
-  '罗言想把攒下的零花钱买一份礼物。',
-  '韩梅第一次帮爸爸整理阳台。',
-  '方圆在班级分享会上介绍自己最喜欢的一本书。',
-  '潘安发现同桌今天没有来上课，想去看看他。',
-  '谢雨和姐姐一起准备周末的野餐。',
-  '郑晨把钥匙落在了教室里。',
-  '朱琳答应帮朋友保守一个小秘密。',
-  '梁川在放学后练习跳绳。',
-  '董欣想邀请新搬来的邻居一起玩。',
-]
 
 export function createStorySessionActions(
   state: StorySessionState,
@@ -201,7 +169,7 @@ function createStoryFoundationActions(
 
   return {
     updateIdea,
-    useExample: () => updateIdea(createRandomIdea(state.idea)),
+    useExample: () => updateIdea(getNextStoryIdeaExample(state.idea)),
     openConflictCorePicker,
     showDifferentConflictCores: () => loaders.loadConflictCores(),
     applyConflictCoreFeedback,
@@ -377,7 +345,7 @@ function createNavigationActions(
 
   const restartStory = () => {
     state.setView('opening')
-    state.setIdea('')
+    state.setIdea(getNextStoryIdeaExample(state.idea))
     state.resetStoryFoundation()
     stage.clearStageFeedback()
   }
@@ -541,18 +509,4 @@ async function loadStoryTurnFromApi(
       state.setPendingTurnRequest(undefined)
     },
   )
-}
-
-function createRandomIdea(currentIdea: string): string {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const idea = pickRandom(storyIdeaExamples)
-    if (idea !== currentIdea) return idea
-  }
-
-  const fallbackIdea = storyIdeaExamples[0]
-  return fallbackIdea === currentIdea ? storyIdeaExamples[1] : fallbackIdea
-}
-
-function pickRandom<T>(items: readonly T[]): T {
-  return items[Math.floor(Math.random() * items.length)]
 }

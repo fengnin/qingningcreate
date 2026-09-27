@@ -11,6 +11,7 @@ import type {
   StoryConflictCores,
   StoryConflictCoreContext,
   StoryConflictCoreContextPrefill,
+  StoryConflictCoreMechanismType,
   StoryConflictCoreSystemDraft,
   StoryFact,
   StoryFactMutability,
@@ -64,11 +65,20 @@ const invalidModelOutputContext: ValidationErrorContext = {
 }
 
 const maxConflictCoreGenerationAttempts = 3
-const maxStorySeedExtractionAttempts = 2
-const maxSystemDraftGenerationAttempts = 2
+const maxConflictCoreReplacementAttempts = 2
+const maxConflictCoreContractReviewAttempts = 2
+const maxConflictCoreGroundingReviewAttempts = 2
+const conflictCoreContractReviewMaxTokens = 2_000
+const conflictCoreGroundingReviewMaxTokens = 1_500
+const maximumStoryIdeaLength = 120
+const maxStorySeedExtractionAttempts = 3
+const maxSystemDraftGenerationAttempts = 3
+const systemConflictCoreDraftMaxTokens = 1_200
 const maximumStorySeedLockedFacts = 5
 const maximumStorySeedLockedFactLength = 120
 const maximumConflictCoreContextLength = 120
+const maximumSystemDraftFieldLength = 64
+const maximumSystemDraftDirectionLabelLength = 16
 const maxPredicamentGenerationAttempts = 3
 const maxHeadTailGenerationAttempts = 2
 const maxStoryTurnGenerationAttempts = 3
@@ -120,14 +130,7 @@ type ConflictCoreContractPart =
 
 type ConflictCoreGoalForm = 'explicit-goal' | 'action' | 'decision' | 'event-or-state'
 
-type ConflictCoreMechanismType =
-  | 'information-gap'
-  | 'boundary-conflict'
-  | 'meaning-commitment'
-  | 'initiation-block'
-  | 'window-pressure'
-  | 'resource-constraint'
-  | 'commitment-conflict'
+type ConflictCoreMechanismType = StoryConflictCoreMechanismType
 
 const conflictCoreMechanismTypes: readonly ConflictCoreMechanismType[] = [
   'information-gap',
@@ -148,6 +151,19 @@ const conflictCoreMechanismVariationAxis: Record<ConflictCoreMechanismType, Stor
   'resource-constraint': 'resource',
   'commitment-conflict': 'commitment',
 }
+
+const unestablishedPrecisionPattern = /(?:\d+(?:\.\d+)?\s*(?:%|秒|分钟|小时|天|周|月|年|步|米|公里|点(?:钟)?|时|分)|(?<!下)[零〇一二两三四五六七八九十百千万亿半]+\s*(?:%|秒|分钟|小时|天|周|月|年|步|米|公里|点钟|时|分)|倒数|第(?:\d+|[零〇一二两三四五六七八九十百千万亿半]+)(?:步|次))/gu
+const systemDraftMultipleAssumptionsPattern = /(?:、|同时|另外|此外|并且|以及|还需|还要|先[\s\S]{0,24}?再|不仅[\s\S]{0,24}?还)/u
+const systemDraftUnsupportedDetailRules: ReadonlyArray<{ label: string, pattern: RegExp }> = [
+  { label: '技术实施细节', pattern: /(?:USB|Wi-?Fi|账号|密码|验证码|登录|接口|电量|序列号|存储卡|硬盘|芯片|故障|损坏|失灵|断网)/giu },
+  { label: '资源或操作状态', pattern: /(?:尚未导出|无法导出|正在传输|已上传|已下载|已备份|未备份|格式损坏|无法预览|无法播放)/gu },
+  { label: '文书或程序细节', pattern: /(?:借条|条款|承诺书|手写|签字|复印件|合同|申请表|审批|登记|手续|校规)/gu },
+  { label: '外部身份或机构', pattern: /(?:校方|部门|机构|平台|客服|管理员|工作人员)/gu },
+  { label: '他人的既定状态', pattern: /(?:已经断联|拒绝(?:回复|见面|配合)?|不愿(?:回复|见面|配合)?|不再接收|未设置公开联系方式|已经离开|已经到达|已经删除|已经封锁|已读|未读)/gu },
+  { label: '他人边界或历史', pattern: /(?:对方(?:明确)?(?:拒绝|禁止|要求不再)|不再接收|不再联系|对方已(?:删除|封锁|拉黑))/gu },
+  { label: '心理或关系结论', pattern: /(?:尚未厘清|犹豫|害怕|期待|希望|后悔|在意|无法面对|纠结|担心|觉得|认为|感到|解释或告别|告别还是挽留|自我定义|沉默式容忍|真实意愿|期待看到|关系二次伤害|默认隔离状态|有限清醒时间)/gu },
+  { label: '完整行动流程', pattern: /(?:先[\s\S]{0,24}?再|随后|接着)/gu },
+]
 
 const conflictCoreContractPartLabel: Record<ConflictCoreContractPart, string> = {
   lockedFacts: '保留原始事实',
@@ -222,6 +238,7 @@ interface ConflictCoreGroundingReview {
 }
 
 interface ConflictCoreContractViolation {
+  conflictCoreId: string
   title: string
   missingParts: ConflictCoreContractPart[]
   unestablishedClaims?: string[]
@@ -231,10 +248,22 @@ interface ConflictCoreRepairContext {
   violations: ConflictCoreContractViolation[]
 }
 
+type SystemDraftDirection = NonNullable<StoryConflictCoreSystemDraft['directions']>[number]
+
+interface SystemDraftTextField {
+  label: string
+  value: string
+}
+
 interface ConflictCoreCandidateEvaluation {
   contractReviews: ConflictCoreContractReview[]
   groundingReviews: ConflictCoreGroundingReview[]
   violations: ConflictCoreContractViolation[]
+}
+
+interface ConflictCoreReplacementResult {
+  cores: StoredStoryConflictCores
+  failedViolations: ConflictCoreContractViolation[]
 }
 
 interface ConflictCoreRetryState {
@@ -243,6 +272,32 @@ interface ConflictCoreRetryState {
   lastViolations?: ConflictCoreContractViolation[]
   lastGenerationError?: string
   lastReviewError?: string
+}
+
+/**
+ * Mutable state for one conflict-core generation request. Keeping this state
+ * together makes the retry loop's ownership explicit: accepted branches,
+ * unreviewed replacements, and review cache are all retained independently.
+ */
+interface ConflictCoreGenerationState {
+  currentCores?: StoredStoryConflictCores
+  repairContext?: ConflictCoreRepairContext
+  pendingReplacements?: ConflictCoreContractViolation[]
+  readonly hasIndependentSystemBranches: boolean
+  readonly branchCores: Map<number, StoredStoryConflictCore>
+  readonly unreviewedReplacementIndexes: Set<number>
+  readonly groundingReviewCache: Map<StoredStoryConflictCore, ConflictCoreGroundingReview>
+  readonly retryState: ConflictCoreRetryState
+}
+
+interface ConflictCoreReviewPlan<TReview> {
+  label: string
+  candidates: readonly StoredStoryConflictCore[]
+  maximumAttempts: number
+  retryInstruction: string
+  requestReview: (repairInstruction?: string) => Promise<TReview[]>
+  requestIndividually: () => Promise<TReview[]>
+  createProtocolError: () => AppError
 }
 
 interface HeadTailGoalReview {
@@ -362,13 +417,25 @@ const retryableModelOutputErrorCodes = new Set([
   'QWEN_INVALID_RESPONSE',
 ])
 
+const transientQwenErrorCodes = new Set([
+  'QWEN_NETWORK_ERROR',
+  'QWEN_TIMEOUT',
+  'QWEN_RATE_LIMITED',
+  'QWEN_UPSTREAM_ERROR',
+])
+
 const retryableConflictCoreGenerationErrorCodes = new Set([
   ...retryableModelOutputErrorCodes,
+  ...transientQwenErrorCodes,
   'INVALID_CONFLICT_CORE_OUTPUT',
+  'CONFLICT_CORE_GENERATION_RETRY_EXHAUSTED',
+  'CONFLICT_CORE_REPLACEMENT_FAILED',
+  'INVALID_CONFLICT_CORE_REPAIR',
 ])
 
 const retryableConflictCoreReviewErrorCodes = new Set([
   ...retryableModelOutputErrorCodes,
+  ...transientQwenErrorCodes,
   'INVALID_CONFLICT_CORE_REVIEW',
   'INVALID_CONFLICT_CORE_GROUNDING_REVIEW',
 ])
@@ -399,11 +466,12 @@ interface StorySeedExtraction {
 interface ResolvedStorySeed {
   seed: StorySeed
   contextPrefill: StoryConflictCoreContextPrefill
+  usesOriginalIdeaFallback: boolean
 }
 
 export function parseDirectionRequest(body: unknown): StoryDirectionsRequest {
   const record = parseRequestRecord(body, ['idea', 'expansionScope', 'context', 'generateSystemDraft', 'preference', 'excludedTitles', 'storyId', 'revision'])
-  const idea = readText(record, 'idea', '请先写下一个故事想法。', 60, invalidRequestContext)
+  const idea = readText(record, 'idea', '请先写下一个故事想法。', maximumStoryIdeaLength, invalidRequestContext)
   const expansionScope = readStoryExpansionScope(record.expansionScope)
   const context = parseConflictCoreContext(record.context)
   const generateSystemDraft = readOptionalBoolean(record, 'generateSystemDraft', '系统生成选项不正确，请重试。', invalidRequestContext) ?? false
@@ -517,75 +585,346 @@ async function generateConflictCoreSet(
   request: StoryDirectionsRequest,
   existingSeed?: StorySeed,
 ): Promise<{ seed: StorySeed; conflictCores: StoredStoryConflictCores }> {
-  const resolvedSeed = existingSeed
-    ? { seed: existingSeed, contextPrefill: getConflictCoreContextPrefill(existingSeed) }
-    : await resolveStorySeed(request)
-  let seed = resolvedSeed.seed
-  const { contextPrefill } = resolvedSeed
-
-  if (request.generateSystemDraft) {
-    seed = applySystemConflictCoreDraft(seed, await generateSystemConflictCoreDraft(request.idea, seed))
-  }
-
-  let repairContext: ConflictCoreRepairContext | undefined
-  const retryState: ConflictCoreRetryState = {
-    excludedTitles: request.excludedTitles ?? [],
-  }
+  const { seed, contextPrefill } = await prepareConflictCoreGenerationSeed(request, existingSeed)
+  const state = createConflictCoreGenerationState(seed, request.excludedTitles)
 
   for (let attempt = 0; attempt < maxConflictCoreGenerationAttempts; attempt += 1) {
-    let conflictCores: StoredStoryConflictCores
-    try {
-      conflictCores = await generateConflictCoreBatch({
-        ...request,
-        excludedTitles: retryState.excludedTitles,
-      }, seed, repairContext, attempt)
-    } catch (error) {
-      if (!isRetryableConflictCoreGenerationError(error)) throw error
+    const conflictCores = await getConflictCoreCandidatesForAttempt(request, seed, state, attempt)
+    if (!conflictCores) continue
 
-      retryState.lastGenerationError = describeConflictCoreGenerationFailure(error)
-      console.warn(`Story conflict core generation rejected (attempt ${attempt + 1}): ${retryState.lastGenerationError}`)
-      continue
-    }
+    const evaluation = await evaluateConflictCoreCandidatesForAttempt(request, seed, conflictCores, state, attempt)
+    if (!evaluation) continue
 
-    let evaluation: ConflictCoreCandidateEvaluation
-    try {
-      evaluation = await evaluateConflictCoreCandidate(
-        request.idea,
-        seed,
-        request.expansionScope ?? 'keep-scale',
-        conflictCores,
-      )
-    } catch (error) {
-      if (isRetryableConflictCoreReviewError(error)) {
-        retryState.lastReviewError = describeConflictCoreReviewFailure(error)
-        console.warn(`Story conflict core review rejected (attempt ${attempt + 1}): ${retryState.lastReviewError}`)
-        continue
-      }
-
-      console.warn(`Story conflict core review was unavailable: ${getErrorIdentifier(error)}`)
-      throw new AppError('冲突核心质量检查暂时不可用，请稍后重试。', 502, 'CONFLICT_CORE_REVIEW_FAILED')
-    }
-    retryState.lastViolations = evaluation.violations
+    state.retryState.lastReviewError = undefined
+    state.retryState.lastViolations = evaluation.violations
 
     if (shouldLogConflictCoreDiagnostics) {
       console.warn(`Story conflict core reviews: contract=${JSON.stringify(evaluation.contractReviews)}; grounding=${JSON.stringify(evaluation.groundingReviews)}`)
     }
 
-    if (!evaluation.violations.length) return { seed, conflictCores }
+    if (!evaluation.violations.length) {
+      state.unreviewedReplacementIndexes.clear()
+      return { seed, conflictCores }
+    }
 
     if (shouldLogConflictCoreDiagnostics) {
       console.warn(`Story conflict core contract violations (attempt ${attempt + 1}): ${JSON.stringify(evaluation.violations)}; candidates=${JSON.stringify(conflictCores)}`)
     }
 
-    if (!retryState.bestViolations || evaluation.violations.length < retryState.bestViolations.length) {
-      retryState.bestViolations = evaluation.violations
-    }
-
-    repairContext = { violations: evaluation.violations }
-    retryState.excludedTitles = [...retryState.excludedTitles, ...conflictCores.map((core) => core.title)]
+    scheduleConflictCoreReplacements(state, conflictCores, evaluation.violations)
   }
 
-  throw createConflictCoreRetryExhaustedError(retryState, contextPrefill)
+  throw createConflictCoreRetryExhaustedError(state.retryState, contextPrefill, seed)
+}
+
+async function prepareConflictCoreGenerationSeed(
+  request: StoryDirectionsRequest,
+  existingSeed?: StorySeed,
+): Promise<{ seed: StorySeed; contextPrefill: StoryConflictCoreContextPrefill }> {
+  const resolvedSeed = existingSeed
+    ? {
+      seed: existingSeed,
+      contextPrefill: getConflictCoreContextPrefill(existingSeed),
+      usesOriginalIdeaFallback: false,
+    }
+    : await resolveStorySeed(request)
+  let seed = releaseActiveSystemDraftDirection(resolvedSeed.seed, existingSeed, request)
+  const { contextPrefill } = resolvedSeed
+
+  if (resolvedSeed.usesOriginalIdeaFallback && !request.context && !request.generateSystemDraft) {
+    throw createConflictCoreContextRequiredError(contextPrefill)
+  }
+
+  if (request.generateSystemDraft) {
+    try {
+      seed = applySystemConflictCoreDraft(seed, await generateSystemConflictCoreDraft(request.idea, seed))
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== 'SYSTEM_DRAFT_GENERATION_FAILED') throw error
+
+      throw new AppError(
+        error.message,
+        error.statusCode,
+        error.code,
+        hasConflictCoreContextPrefill(contextPrefill) ? contextPrefill : undefined,
+        error.systemDraftPrefill,
+      )
+    }
+  }
+
+  return { seed, contextPrefill }
+}
+
+function releaseActiveSystemDraftDirection(
+  seed: StorySeed,
+  existingSeed: StorySeed | undefined,
+  request: StoryDirectionsRequest,
+): StorySeed {
+  // Re-entering the picker asks for a new comparison set. Keep the planned
+  // directions, but release the prior choice so each branch can be generated.
+  if (!existingSeed?.systemDraft?.activeDirection || request.context || request.generateSystemDraft) {
+    return seed
+  }
+
+  const systemDraft = seed.systemDraft
+  if (!systemDraft) {
+    throw new AppError('系统暂定设定不完整，请重新生成。', 502, 'INVALID_MODEL_OUTPUT')
+  }
+
+  return {
+    ...seed,
+    systemDraft: {
+      ...systemDraft,
+      activeDirection: undefined,
+    },
+  }
+}
+
+function createConflictCoreGenerationState(
+  seed: StorySeed,
+  excludedTitles: string[] | undefined,
+): ConflictCoreGenerationState {
+  return {
+    hasIndependentSystemBranches: !seed.systemDraft?.activeDirection
+      && seed.systemDraft?.directions?.length === generatedOptionCount,
+    branchCores: new Map(),
+    unreviewedReplacementIndexes: new Set(),
+    groundingReviewCache: new Map(),
+    retryState: { excludedTitles: excludedTitles ?? [] },
+  }
+}
+
+async function getConflictCoreCandidatesForAttempt(
+  request: StoryDirectionsRequest,
+  seed: StorySeed,
+  state: ConflictCoreGenerationState,
+  attempt: number,
+): Promise<StoredStoryConflictCores | undefined> {
+  if (state.pendingReplacements?.length) {
+    const replacementCores = state.hasIndependentSystemBranches
+      ? await replaceIndependentConflictCoreCandidates(request, seed, state, attempt)
+      : await replaceBatchConflictCoreCandidates(request, seed, state, attempt)
+    if (replacementCores) state.currentCores = replacementCores
+    return replacementCores
+  }
+
+  if (state.currentCores) return state.currentCores
+
+  const generatedCores = state.hasIndependentSystemBranches
+    ? await generateIndependentConflictCoreCandidates(request, seed, state, attempt)
+    : await generateBatchConflictCoreCandidates(request, seed, state, attempt)
+  if (generatedCores) state.currentCores = generatedCores
+  return generatedCores
+}
+
+async function generateIndependentConflictCoreCandidates(
+  request: StoryDirectionsRequest,
+  seed: StorySeed,
+  state: ConflictCoreGenerationState,
+  attempt: number,
+): Promise<StoredStoryConflictCores | undefined> {
+  let generationFailed = false
+
+  // Each accepted branch stays in the map. A later retry requests only the
+  // indexes that are still missing, so a bad B never regenerates A or C.
+  for (const index of getMissingConflictCoreIndexes(state.branchCores)) {
+    try {
+      const core = await generateConflictCoreBranchWithRetry(
+        withConflictCoreExcludedTitles(request, state.retryState),
+        seed,
+        index,
+        state.repairContext,
+        attempt,
+      )
+      state.branchCores.set(index, core)
+    } catch (error) {
+      if (!isRetryableConflictCoreGenerationError(error)) throw error
+
+      generationFailed = true
+      const failure = rememberConflictCoreGenerationFailure(state.retryState, error, `第 ${index + 1} 条分支：`)
+      console.warn(`Story conflict core branch ${index + 1} rejected (attempt ${attempt + 1}): ${failure}`)
+    }
+  }
+
+  if (generationFailed || getMissingConflictCoreIndexes(state.branchCores).length) return undefined
+
+  state.retryState.lastGenerationError = undefined
+  return toConflictCoreTuple(state.branchCores)
+}
+
+async function generateBatchConflictCoreCandidates(
+  request: StoryDirectionsRequest,
+  seed: StorySeed,
+  state: ConflictCoreGenerationState,
+  attempt: number,
+): Promise<StoredStoryConflictCores | undefined> {
+  try {
+    const cores = await generateConflictCoreBatch(
+      withConflictCoreExcludedTitles(request, state.retryState),
+      seed,
+      state.repairContext,
+      attempt,
+    )
+    state.retryState.lastGenerationError = undefined
+    return cores
+  } catch (error) {
+    if (!isRetryableConflictCoreGenerationError(error)) throw error
+
+    const failure = rememberConflictCoreGenerationFailure(state.retryState, error)
+    console.warn(`Story conflict core generation rejected (attempt ${attempt + 1}): ${failure}`)
+    return undefined
+  }
+}
+
+async function replaceIndependentConflictCoreCandidates(
+  request: StoryDirectionsRequest,
+  seed: StorySeed,
+  state: ConflictCoreGenerationState,
+  attempt: number,
+): Promise<StoredStoryConflictCores | undefined> {
+  const retainedCores = [...state.branchCores.entries()]
+    .filter(([index]) => !state.unreviewedReplacementIndexes.has(index))
+    .map(([, core]) => core)
+  const remainingReplacements: ConflictCoreContractViolation[] = []
+
+  for (const violation of state.pendingReplacements ?? []) {
+    const targetIndex = getConflictCoreIndex(violation.conflictCoreId)
+    const target = targetIndex === undefined ? undefined : state.branchCores.get(targetIndex)
+    if (targetIndex === undefined || !target) {
+      remainingReplacements.push(violation)
+      state.retryState.lastGenerationError = '审核结果没有对应的候选分支。'
+      continue
+    }
+
+    try {
+      const replacement = await generateConflictCoreReplacement(
+        withConflictCoreExcludedTitles(request, state.retryState),
+        seed,
+        target,
+        targetIndex,
+        retainedCores,
+        violation,
+        attempt,
+      )
+      state.branchCores.set(targetIndex, replacement)
+    } catch (error) {
+      if (!isRetryableConflictCoreGenerationError(error)) throw error
+
+      remainingReplacements.push(violation)
+      const failure = rememberConflictCoreGenerationFailure(state.retryState, error)
+      console.warn(`Story conflict core branch ${targetIndex + 1} replacement rejected (attempt ${attempt + 1}): ${failure}`)
+    }
+  }
+
+  state.pendingReplacements = remainingReplacements.length ? remainingReplacements : undefined
+  if (state.pendingReplacements) return undefined
+
+  state.retryState.lastGenerationError = undefined
+  return toConflictCoreTuple(state.branchCores)
+}
+
+async function replaceBatchConflictCoreCandidates(
+  request: StoryDirectionsRequest,
+  seed: StorySeed,
+  state: ConflictCoreGenerationState,
+  attempt: number,
+): Promise<StoredStoryConflictCores | undefined> {
+  if (!state.currentCores || !state.pendingReplacements?.length) {
+    throw new AppError('冲突核心替换状态不完整，请重新生成。', 502, 'INVALID_CONFLICT_CORE_REPAIR')
+  }
+
+  try {
+    const replacementResult = await replaceConflictCoreCandidates(
+      withConflictCoreExcludedTitles(request, state.retryState),
+      seed,
+      state.currentCores,
+      state.pendingReplacements,
+      attempt,
+      state.unreviewedReplacementIndexes,
+    )
+    state.currentCores = replacementResult.cores
+    state.pendingReplacements = replacementResult.failedViolations.length
+      ? replacementResult.failedViolations
+      : undefined
+    if (state.pendingReplacements) {
+      state.retryState.lastGenerationError ||= '替换候选生成失败。'
+      return undefined
+    }
+
+    state.retryState.lastGenerationError = undefined
+    return replacementResult.cores
+  } catch (error) {
+    if (!isRetryableConflictCoreGenerationError(error)) throw error
+
+    const failure = rememberConflictCoreGenerationFailure(state.retryState, error)
+    console.warn(`Story conflict core replacement rejected (attempt ${attempt + 1}): ${failure}`)
+    return undefined
+  }
+}
+
+async function evaluateConflictCoreCandidatesForAttempt(
+  request: StoryDirectionsRequest,
+  seed: StorySeed,
+  conflictCores: StoredStoryConflictCores,
+  state: ConflictCoreGenerationState,
+  attempt: number,
+): Promise<ConflictCoreCandidateEvaluation | undefined> {
+  try {
+    return await evaluateConflictCoreCandidate(
+      request.idea,
+      seed,
+      request.expansionScope ?? 'keep-scale',
+      conflictCores,
+      state.groundingReviewCache,
+    )
+  } catch (error) {
+    if (isRetryableConflictCoreReviewError(error)) {
+      state.retryState.lastReviewError = describeConflictCoreReviewFailure(error)
+      console.warn(`Story conflict core review rejected; retaining current candidates (attempt ${attempt + 1}): ${state.retryState.lastReviewError}`)
+      return undefined
+    }
+
+    console.warn(`Story conflict core review was unavailable: ${getErrorIdentifier(error)}`)
+    throw createConflictCoreReviewUnavailableError(error)
+  }
+}
+
+function scheduleConflictCoreReplacements(
+  state: ConflictCoreGenerationState,
+  conflictCores: StoredStoryConflictCores,
+  violations: ConflictCoreContractViolation[],
+) {
+  if (!state.retryState.bestViolations || violations.length < state.retryState.bestViolations.length) {
+    state.retryState.bestViolations = violations
+  }
+
+  state.repairContext = { violations }
+  state.pendingReplacements = violations
+  state.unreviewedReplacementIndexes.clear()
+  violations.forEach((violation) => {
+    const index = getConflictCoreIndex(violation.conflictCoreId)
+    if (index !== undefined) state.unreviewedReplacementIndexes.add(index)
+  })
+  state.retryState.excludedTitles = [...new Set([
+    ...state.retryState.excludedTitles,
+    ...conflictCores.map((core) => core.title),
+  ])]
+}
+
+function withConflictCoreExcludedTitles(
+  request: StoryDirectionsRequest,
+  retryState: ConflictCoreRetryState,
+): StoryDirectionsRequest {
+  return { ...request, excludedTitles: retryState.excludedTitles }
+}
+
+function rememberConflictCoreGenerationFailure(
+  retryState: ConflictCoreRetryState,
+  error: unknown,
+  prefix = '',
+): string {
+  const failure = `${prefix}${describeConflictCoreGenerationFailure(error)}`
+  retryState.lastGenerationError = failure
+  return failure
 }
 
 async function generateConflictCoreBatch(
@@ -594,8 +933,17 @@ async function generateConflictCoreBatch(
   repairContext: ConflictCoreRepairContext | undefined,
   attempt: number,
 ): Promise<StoredStoryConflictCores> {
+  if (!seed.systemDraft?.activeDirection && seed.systemDraft?.directions?.length === generatedOptionCount) {
+    const cores: StoredStoryConflictCore[] = []
+    for (let index = 0; index < generatedOptionCount; index += 1) {
+      cores.push(await generateConflictCoreBranchWithRetry(request, seed, index, repairContext, attempt))
+    }
+
+    return [cores[0], cores[1], cores[2]]
+  }
+
   const record = await requestModelRecord({
-    systemPrompt: `${conflictCoreSystemPrompt}\n\n${conflictCoreGenerationSupplement}\n\n${conflictCoreFieldSeparationSupplement}${getSystemDraftPromptSupplement(seed)}`,
+    systemPrompt: `${conflictCoreSystemPrompt}\n\n${conflictCoreGenerationSupplement}\n\n${conflictCoreFieldSeparationSupplement}\n\n${getConflictCoreAllowedSourceRule(seed)}${getSystemDraftPromptSupplement(seed)}`,
     userPrompt: buildConflictCorePrompt(request, seed, repairContext),
     temperature: attempt === 0 ? 0.52 : 0.36,
     maxTokens: 1_400,
@@ -608,7 +956,250 @@ async function generateConflictCoreBatch(
     '模型没有生成完整的三个冲突核心，请重试。',
     'INVALID_CONFLICT_CORE_OUTPUT',
   )
-  return parseGeneratedOptionTuple(values, parseModelConflictCore)
+  const cores = parseGeneratedOptionTuple(values, parseModelConflictCore)
+  assertConflictCoreBatchMatchesSystemDraft(seed, cores)
+  return cores
+}
+
+function getMissingConflictCoreIndexes(
+  cores: ReadonlyMap<number, StoredStoryConflictCore>,
+): number[] {
+  return Array.from({ length: generatedOptionCount }, (_, index) => index)
+    .filter((index) => !cores.has(index))
+}
+
+function toConflictCoreTuple(
+  cores: ReadonlyMap<number, StoredStoryConflictCore>,
+): StoredStoryConflictCores {
+  const values = getMissingConflictCoreIndexes(cores)
+  if (values.length) {
+    throw new AppError('三个冲突分支尚未全部生成，请重试。', 502, 'INVALID_CONFLICT_CORE_OUTPUT')
+  }
+
+  return [cores.get(0)!, cores.get(1)!, cores.get(2)!]
+}
+
+async function generateConflictCoreBranchWithRetry(
+  request: StoryDirectionsRequest,
+  seed: StorySeed,
+  index: number,
+  repairContext: ConflictCoreRepairContext | undefined,
+  generationRound: number,
+): Promise<StoredStoryConflictCore> {
+  let lastError: unknown
+
+  for (let attempt = 0; attempt < maxConflictCoreGenerationAttempts; attempt += 1) {
+    try {
+      return await generateConflictCoreBranch(request, seed, index, repairContext, generationRound + attempt)
+    } catch (error) {
+      if (!isRetryableConflictCoreGenerationError(error)) throw error
+      lastError = error
+      console.warn(
+        `Story conflict core branch ${index + 1} rejected (round ${generationRound + 1}, attempt ${attempt + 1}): ${describeConflictCoreGenerationFailure(error)}`,
+      )
+    }
+  }
+
+  throw new AppError(
+    `第 ${index + 1} 条冲突分支连续生成失败（${describeConflictCoreGenerationFailure(lastError)}），请重试。`,
+    502,
+    'CONFLICT_CORE_GENERATION_RETRY_EXHAUSTED',
+  )
+}
+
+async function generateConflictCoreBranch(
+  request: StoryDirectionsRequest,
+  seed: StorySeed,
+  index: number,
+  repairContext: ConflictCoreRepairContext | undefined,
+  attempt: number,
+): Promise<StoredStoryConflictCore> {
+  const direction = getSystemDraftDirection(seed, index)
+  if (!direction) {
+    throw new AppError('系统暂定冲突分支不完整，请重新生成。', 502, 'INVALID_CONFLICT_CORE_OUTPUT')
+  }
+
+  const branchViolation = repairContext?.violations.find((violation) => violation.conflictCoreId === `conflict-core-${index + 1}`)
+  const repair = branchViolation
+    ? `\n这一分支上一版未通过审核：${formatConflictCoreRepairContext({ violations: [branchViolation] })}。${getConflictCoreRepairGuidance({ violations: [branchViolation] })}`
+    : ''
+  const record = await requestModelRecord({
+    systemPrompt: `${conflictCoreSystemPrompt}\n\n${conflictCoreGenerationSupplement}\n\n${conflictCoreFieldSeparationSupplement}\n\n${getConflictCoreAllowedSourceRule(seed)}${getSystemDraftPromptSupplement(seed)}`,
+    userPrompt: buildConflictCoreBranchPrompt(request, seed, direction, index, repair),
+    temperature: attempt === 0 ? 0.5 : 0.32,
+    maxTokens: 1_000,
+  }, '模型没有返回可用的分支冲突核心，请重试。')
+  const value = isPlainRecord(record.core)
+    ? record.core
+    : Array.isArray(record.cores) && record.cores.length
+      ? record.cores[0]
+      : record
+  const core = parseModelConflictCore(value, index)
+  if (core.mechanismType !== direction.mechanismType) {
+    throw new AppError(`第 ${index + 1} 条分支没有沿用规划的冲突机制，请重试。`, 502, 'INVALID_CONFLICT_CORE_OUTPUT')
+  }
+  if (!core.evidence?.some((evidence) => hasOriginalTextPhrase(direction.premise, evidence)
+    || hasOriginalTextPhrase(direction.tradeoff, evidence))) {
+    throw new AppError(`第 ${index + 1} 条分支没有引用规划前提，请重试。`, 502, 'INVALID_CONFLICT_CORE_OUTPUT')
+  }
+  return core
+}
+
+function getSystemDraftDirection(
+  seed: Pick<StorySeed, 'systemDraft'>,
+  index: number,
+): SystemDraftDirection | undefined {
+  return seed.systemDraft?.activeDirection ?? seed.systemDraft?.directions?.[index]
+}
+
+// Picker operations resolve the original index before a branch becomes active;
+// this keeps re-selection correct even when a previous branch is still active.
+function getSystemDraftDirectionForIndex(
+  seed: Pick<StorySeed, 'systemDraft'>,
+  index: number,
+): SystemDraftDirection | undefined {
+  return seed.systemDraft?.directions?.[index] ?? seed.systemDraft?.activeDirection
+}
+
+function assertConflictCoreBatchMatchesSystemDraft(
+  seed: Pick<StorySeed, 'systemDraft'>,
+  cores: StoredStoryConflictCores,
+) {
+  const directions = seed.systemDraft?.directions
+  if (!directions) return
+
+  cores.forEach((core, index) => {
+    const direction = getSystemDraftDirection(seed, index)
+    if (!direction || core.mechanismType !== direction.mechanismType) {
+      throw new AppError(
+        `第 ${index + 1} 条冲突核心没有沿用对应的系统暂定分支，请重试。`,
+        502,
+        'INVALID_CONFLICT_CORE_OUTPUT',
+      )
+    }
+
+    if (!core.evidence?.some((evidence) => hasOriginalTextPhrase(direction.premise, evidence)
+      || hasOriginalTextPhrase(direction.tradeoff, evidence))) {
+      throw new AppError(
+        `第 ${index + 1} 条冲突核心没有引用对应分支的暂定依据，请重试。`,
+        502,
+        'INVALID_CONFLICT_CORE_OUTPUT',
+      )
+    }
+  })
+}
+
+async function replaceConflictCoreCandidates(
+  request: StoryDirectionsRequest,
+  seed: StorySeed,
+  cores: StoredStoryConflictCores,
+  violations: ConflictCoreContractViolation[],
+  generationRound: number,
+  unreviewedReplacementIndexes: Set<number>,
+): Promise<ConflictCoreReplacementResult> {
+  const violationById = new Map(violations.map((violation) => [violation.conflictCoreId, violation]))
+  const replacementIndexes = cores.flatMap((core, index) => (violationById.has(core.id) ? [index] : []))
+
+  if (!replacementIndexes.length) {
+    throw new AppError('冲突核心审核没有指出可替换的候选，请重新生成。', 502, 'INVALID_CONFLICT_CORE_REPAIR')
+  }
+
+  const replacementIndexSet = new Set(replacementIndexes)
+  // Only candidates that passed the previous review are stable anchors. A
+  // replacement has not been reviewed yet and must not constrain another
+  // replacement's mechanism or evidence.
+  const retainedCores = cores.filter((_, candidateIndex) => (
+    !replacementIndexSet.has(candidateIndex) && !unreviewedReplacementIndexes.has(candidateIndex)
+  ))
+  const nextCores = [...cores]
+  const failedViolations: ConflictCoreContractViolation[] = []
+
+  for (const index of replacementIndexes) {
+    const target = cores[index]
+    const violation = violationById.get(target.id)
+    if (!violation) continue
+
+    try {
+      const replacement = await generateConflictCoreReplacement(
+        request,
+        seed,
+        target,
+        index,
+        retainedCores,
+        violation,
+        generationRound,
+      )
+      nextCores[index] = replacement
+      unreviewedReplacementIndexes.add(index)
+    } catch (error) {
+      if (!isRetryableConflictCoreGenerationError(error)) throw error
+      failedViolations.push(violation)
+    }
+  }
+
+  return {
+    cores: [nextCores[0], nextCores[1], nextCores[2]],
+    failedViolations,
+  }
+}
+
+async function generateConflictCoreReplacement(
+  request: StoryDirectionsRequest,
+  seed: StorySeed,
+  target: StoredStoryConflictCore,
+  targetIndex: number,
+  retainedCores: StoredStoryConflictCore[],
+  violation: ConflictCoreContractViolation,
+  generationRound: number,
+): Promise<StoredStoryConflictCore> {
+  let lastGenerationError: string | undefined
+
+  for (let attempt = 0; attempt < maxConflictCoreReplacementAttempts; attempt += 1) {
+    try {
+      const record = await requestModelRecord({
+        systemPrompt: `${conflictCoreSystemPrompt}\n\n${conflictCoreGenerationSupplement}\n\n${conflictCoreFieldSeparationSupplement}\n\n${getConflictCoreAllowedSourceRule(seed)}${getSystemDraftPromptSupplement(seed)}`,
+        userPrompt: buildConflictCoreReplacementPrompt(request, seed, target, retainedCores, violation),
+        temperature: attempt === 0 ? 0.36 : 0.2,
+        maxTokens: 1_000,
+      }, '模型没有返回可用的替换冲突核心，请重试。')
+      const replacementValue = isPlainRecord(record.core)
+        ? record.core
+        : Array.isArray(record.cores) && record.cores.length
+          ? record.cores[0]
+          : record
+      const replacement = parseModelConflictCore(replacementValue, targetIndex)
+      const direction = getSystemDraftDirection(seed, targetIndex)
+      if (direction && replacement.mechanismType !== direction.mechanismType) {
+        throw new AppError(
+          `第 ${targetIndex + 1} 条替换核心没有沿用对应的系统暂定分支，请重试。`,
+          502,
+          'INVALID_CONFLICT_CORE_OUTPUT',
+        )
+      }
+      if (direction && !replacement.evidence?.some((evidence) => hasOriginalTextPhrase(direction.premise, evidence)
+        || hasOriginalTextPhrase(direction.tradeoff, evidence))) {
+        throw new AppError(
+          `第 ${targetIndex + 1} 条替换核心没有引用对应分支的暂定依据，请重试。`,
+          502,
+          'INVALID_CONFLICT_CORE_OUTPUT',
+        )
+      }
+      return replacement
+    } catch (error) {
+      if (!isRetryableConflictCoreGenerationError(error)) throw error
+
+      lastGenerationError = describeConflictCoreGenerationFailure(error)
+      console.warn(
+        `Story conflict core replacement rejected (round ${generationRound + 1}, attempt ${attempt + 1}): ${lastGenerationError}`,
+      )
+    }
+  }
+
+  throw new AppError(
+    `模型没有返回可替换的冲突核心（${lastGenerationError ?? '输出不完整'}），请重新生成。`,
+    502,
+    'CONFLICT_CORE_REPLACEMENT_FAILED',
+  )
 }
 
 async function generatePredicamentForCore(
@@ -616,12 +1207,13 @@ async function generatePredicamentForCore(
   core: StoredStoryConflictCore,
 ): Promise<StoryPredicament> {
   let repairMessage: string | undefined
+  const seed = getStorySeedForConflictCore(session.seed, core)
 
   for (let attempt = 0; attempt < maxPredicamentGenerationAttempts; attempt += 1) {
     try {
       const record = await requestModelRecord({
         systemPrompt: predicamentExpansionSystemPrompt,
-        userPrompt: buildPredicamentExpansionPrompt(session.idea, session.seed, core, repairMessage),
+        userPrompt: buildPredicamentExpansionPrompt(session.idea, seed, core, repairMessage),
         temperature: attempt === 0 ? 0.68 : 0.5,
         maxTokens: 2_000,
       }, '模型没有返回可用的具体困境，请重试。')
@@ -640,6 +1232,24 @@ async function generatePredicamentForCore(
   }
 
   throw new AppError('具体困境连续生成失败，请返回上一步重新选择冲突核心。', 502, 'PREDICAMENT_EXPANSION_FAILED')
+}
+
+function getStorySeedForConflictCore(
+  seed: StorySeed,
+  core: Pick<StoredStoryConflictCore, 'id'>,
+): StorySeed {
+  const directionIndex = getConflictCoreIndex(core.id)
+  const direction = directionIndex === undefined ? undefined : getSystemDraftDirectionForIndex(seed, directionIndex)
+  if (!seed.systemDraft || !direction) return seed
+
+  return {
+    ...seed,
+    systemDraft: {
+      ...seed.systemDraft,
+      directions: [direction],
+      activeDirection: direction,
+    },
+  }
 }
 
 function assertPredicamentMatchesConflictCore(
@@ -662,27 +1272,172 @@ async function reviewConflictCoreContract(
   expansionScope: StoryExpansionScope,
   cores: StoredStoryConflictCores,
 ): Promise<ConflictCoreContractReview[]> {
+  return runConflictCoreReview({
+    label: 'contract',
+    candidates: cores,
+    maximumAttempts: maxConflictCoreContractReviewAttempts,
+    retryInstruction: '上一版没有满足审核 JSON 协议。必须只返回 reviews 数组，条数和 conflictCoreId 必须与输入候选完全一致；每项必须包含全部布尔字段与 unestablishedClaims 数组。',
+    requestReview: (repairInstruction) => requestConflictCoreContractReview(
+      idea,
+      seed,
+      expansionScope,
+      cores,
+      repairInstruction,
+    ),
+    requestIndividually: () => reviewConflictCoreContractIndividually(idea, seed, expansionScope, cores),
+    createProtocolError: () => new AppError(
+      '模型没有完成冲突核心的质量检查，请重试。',
+      502,
+      'INVALID_CONFLICT_CORE_REVIEW',
+    ),
+  })
+}
+
+async function requestConflictCoreContractReview(
+  idea: string,
+  seed: StorySeed,
+  expansionScope: StoryExpansionScope,
+  cores: readonly StoredStoryConflictCore[],
+  repairMessage?: string,
+  comparisonCores: readonly StoredStoryConflictCore[] = cores,
+): Promise<ConflictCoreContractReview[]> {
   const record = await requestModelRecord({
-    systemPrompt: `${conflictCoreContractReviewSystemPrompt}\n\n${conflictCoreReviewSupplement}\n\n${conflictCoreReviewEvidenceSupplement}${getSystemDraftPromptSupplement(seed)}`,
-    userPrompt: buildConflictCoreReviewPrompt(idea, seed, expansionScope, cores),
+    systemPrompt: `${conflictCoreContractReviewSystemPrompt}\n\n${conflictCoreReviewSupplement}\n\n${conflictCoreReviewEvidenceSupplement}\n\n${getConflictCoreAllowedSourceRule(seed)}${getSystemDraftPromptSupplement(seed)}`,
+    userPrompt: buildConflictCoreReviewPrompt(idea, seed, expansionScope, cores, repairMessage, comparisonCores),
     temperature: 0.1,
-    maxTokens: 1_400,
+    maxTokens: conflictCoreContractReviewMaxTokens,
   }, '模型没有完成冲突核心的质量检查，请重试。')
   return parseConflictCoreReviews(record.reviews, cores)
+}
+
+async function reviewConflictCoreContractIndividually(
+  idea: string,
+  seed: StorySeed,
+  expansionScope: StoryExpansionScope,
+  cores: StoredStoryConflictCores,
+): Promise<ConflictCoreContractReview[]> {
+  return reviewConflictCoreCandidatesIndividually(cores, (core) => (
+    requestConflictCoreContractReview(
+      idea,
+      seed,
+      expansionScope,
+      [core],
+      '这是批量审核的协议兜底。只返回当前这一条的 review；仍需把横向比较参考中的其他候选纳入 usesDistinctMechanism 和 sharesCommonGoal 判断。',
+      cores,
+    )
+  ))
 }
 
 async function reviewConflictCoreGrounding(
   idea: string,
   seed: StorySeed,
-  cores: StoredStoryConflictCores,
+  cores: readonly StoredStoryConflictCore[],
+): Promise<ConflictCoreGroundingReview[]> {
+  return runConflictCoreReview({
+    label: 'grounding',
+    candidates: cores,
+    maximumAttempts: maxConflictCoreGroundingReviewAttempts,
+    retryInstruction: '上一版没有满足审核 JSON 协议。必须只返回 reviews 数组，条数和 conflictCoreId 必须与输入候选完全一致；每项都必须包含 unestablishedClaims 数组。',
+    requestReview: (repairInstruction) => requestConflictCoreGroundingReview(
+      idea,
+      seed,
+      cores,
+      repairInstruction,
+    ),
+    requestIndividually: () => reviewConflictCoreGroundingIndividually(idea, seed, cores),
+    createProtocolError: () => new AppError(
+      '模型没有完成冲突核心的事实核对，请重试。',
+      502,
+      'INVALID_CONFLICT_CORE_GROUNDING_REVIEW',
+    ),
+  })
+}
+
+async function runConflictCoreReview<TReview>({
+  label,
+  candidates,
+  maximumAttempts,
+  retryInstruction,
+  requestReview,
+  requestIndividually,
+  createProtocolError,
+}: ConflictCoreReviewPlan<TReview>): Promise<TReview[]> {
+  let lastReviewError: unknown
+
+  for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+    try {
+      return await requestReview(attempt === 0 ? undefined : retryInstruction)
+    } catch (error) {
+      if (!isRetryableConflictCoreReviewError(error)) throw error
+
+      lastReviewError = error
+      console.warn(`Story conflict core ${label} review rejected (attempt ${attempt + 1}): ${describeConflictCoreReviewFailure(error)}`)
+    }
+  }
+
+  if (candidates.length > 1) {
+    console.warn(`Story conflict core ${label} batch did not satisfy the protocol; retrying each candidate independently.`)
+    return requestIndividually()
+  }
+
+  throw lastReviewError ?? createProtocolError()
+}
+
+async function requestConflictCoreGroundingReview(
+  idea: string,
+  seed: StorySeed,
+  cores: readonly StoredStoryConflictCore[],
+  repairMessage?: string,
 ): Promise<ConflictCoreGroundingReview[]> {
   const record = await requestModelRecord({
-    systemPrompt: `${conflictCoreGroundingReviewSystemPrompt}${getSystemDraftPromptSupplement(seed)}`,
-    userPrompt: buildConflictCoreGroundingReviewPrompt(idea, seed, cores),
+    systemPrompt: `${getConflictCoreGroundingReviewSystemPrompt(seed)}\n\n${getConflictCoreAllowedSourceRule(seed)}${getSystemDraftPromptSupplement(seed)}`,
+    userPrompt: buildConflictCoreGroundingReviewPrompt(idea, seed, cores, repairMessage),
     temperature: 0.1,
-    maxTokens: 900,
+    maxTokens: conflictCoreGroundingReviewMaxTokens,
   }, '模型没有完成冲突核心的事实核对，请重试。')
+  if (shouldLogConflictCoreDiagnostics) {
+    console.warn(`Story conflict core grounding review shape: ${describeConflictCoreGroundingReviewShape(record.reviews)}`)
+  }
   return parseConflictCoreGroundingReviews(record.reviews, cores)
+}
+
+async function reviewConflictCoreGroundingIndividually(
+  idea: string,
+  seed: StorySeed,
+  cores: readonly StoredStoryConflictCore[],
+): Promise<ConflictCoreGroundingReview[]> {
+  return reviewConflictCoreCandidatesIndividually(
+    cores,
+    (core) => reviewConflictCoreGrounding(idea, seed, [core]),
+  )
+}
+
+async function reviewConflictCoreCandidatesIndividually<TReview>(
+  cores: readonly StoredStoryConflictCore[],
+  requestCandidateReview: (core: StoredStoryConflictCore) => Promise<TReview[]>,
+): Promise<TReview[]> {
+  const reviews: TReview[] = []
+
+  for (const core of cores) {
+    const [review] = await requestCandidateReview(core)
+    reviews.push(review)
+  }
+
+  return reviews
+}
+
+function describeConflictCoreGroundingReviewShape(value: unknown): string {
+  if (!Array.isArray(value)) return `reviews=${value === null ? 'null' : typeof value}`
+
+  const entries = value.map((item) => {
+    if (!isPlainRecord(item)) return typeof item
+
+    const id = typeof item.conflictCoreId === 'string' ? item.conflictCoreId : typeof item.conflictCoreId
+    const claims = item.unestablishedClaims
+    return `${id}:${Array.isArray(claims) ? claims.length : typeof claims}`
+  })
+
+  return `reviews=${value.length}; entries=${entries.join(',')}`
 }
 
 async function evaluateConflictCoreCandidate(
@@ -690,9 +1445,37 @@ async function evaluateConflictCoreCandidate(
   seed: StorySeed,
   expansionScope: StoryExpansionScope,
   cores: StoredStoryConflictCores,
+  groundingReviewCache: Map<StoredStoryConflictCore, ConflictCoreGroundingReview>,
 ): Promise<ConflictCoreCandidateEvaluation> {
   const contractReviews = await reviewConflictCoreContract(idea, seed, expansionScope, cores)
-  const groundingReviews = await reviewConflictCoreGrounding(idea, seed, cores)
+  const coresNeedingGroundingReview = cores.filter((core) => !groundingReviewCache.has(core))
+
+  if (coresNeedingGroundingReview.length) {
+    const newGroundingReviews = await reviewConflictCoreGrounding(idea, seed, coresNeedingGroundingReview)
+    const newGroundingReviewById = new Map(newGroundingReviews.map((review) => [review.conflictCoreId, review]))
+
+    for (const core of coresNeedingGroundingReview) {
+      const review = requireReviewForCandidate(
+        newGroundingReviewById,
+        core.id,
+        '模型事实核对结果没有覆盖全部冲突核心，请重试。',
+        'INVALID_CONFLICT_CORE_GROUNDING_REVIEW',
+      )
+      groundingReviewCache.set(core, review)
+    }
+  }
+
+  const groundingReviews = cores.map((core) => {
+    const review = groundingReviewCache.get(core)
+    if (!review) {
+      throw new AppError(
+        '模型事实核对结果没有覆盖全部冲突核心，请重试。',
+        invalidModelOutputContext.statusCode,
+        'INVALID_CONFLICT_CORE_GROUNDING_REVIEW',
+      )
+    }
+    return review
+  })
   const violations = collectConflictCoreViolations(seed, cores, contractReviews, groundingReviews)
 
   return { contractReviews, groundingReviews, violations }
@@ -733,6 +1516,7 @@ function collectConflictCoreViolations(
     if (!missingParts.length) return []
 
     return [{
+      conflictCoreId: core.id,
       title: core.title,
       missingParts,
       unestablishedClaims: collectUnestablishedClaims(review, groundingReview),
@@ -786,12 +1570,13 @@ function hasDistinctConflictCoreMechanisms(cores: StoredStoryConflictCores): boo
 }
 
 function shouldRequestMoreConflictCoreContext(violations: ConflictCoreContractViolation[]): boolean {
-  if (violations.length !== generatedOptionCount) return false
+  if (!violations.length) return false
 
-  // A speculative candidate often also loses its goal or tradeoff structure
-  // after its invented premise is removed. Treat it as context-limited when
-  // every card is still blocked by evidence, rather than surfacing a 502.
-  return violations.every(({ missingParts }) => missingParts.some((part) => conflictCoreContextLimitedParts.has(part)))
+  // A candidate that repeatedly fails grounding or mechanism coverage needs
+  // more confirmed premises. This remains true even when other candidates
+  // passed, because the caller can preserve those candidates while the user
+  // confirms only the missing context for the failed one.
+  return violations.some(({ missingParts }) => missingParts.some((part) => conflictCoreContextLimitedParts.has(part)))
 }
 
 function createConflictCoreRetryExhaustedError({
@@ -799,17 +1584,22 @@ function createConflictCoreRetryExhaustedError({
   lastViolations,
   lastGenerationError,
   lastReviewError,
-}: ConflictCoreRetryState, contextPrefill: StoryConflictCoreContextPrefill): AppError {
+}: ConflictCoreRetryState, contextPrefill: StoryConflictCoreContextPrefill, seed: Pick<StorySeed, 'systemDraft'>): AppError {
   const hasContextLimitedViolations = [bestViolations, lastViolations]
     .some((violations) => violations !== undefined && shouldRequestMoreConflictCoreContext(violations))
 
   if (hasContextLimitedViolations) {
-    return new AppError(
-      '这条念头还缺少能支撑三种冲突的事实。请选择让系统先给一版，或补充并确认故事设定。',
-      422,
-      'CONFLICT_CORE_NEEDS_CONTEXT',
-      hasConflictCoreContextPrefill(contextPrefill) ? contextPrefill : undefined,
-    )
+    if (seed.systemDraft) {
+      return new AppError(
+        '系统暂定设定已经生成，但其中的分支没有通过事实核对；当前候选没有被放行。请重新生成一版系统暂定设定。',
+        502,
+        'SYSTEM_DRAFT_CONFLICT_CORE_RETRY_EXHAUSTED',
+        undefined,
+        seed.systemDraft,
+      )
+    }
+
+    return createConflictCoreContextRequiredError(contextPrefill)
   }
 
   if (lastGenerationError && !bestViolations) {
@@ -817,6 +1607,14 @@ function createConflictCoreRetryExhaustedError({
       `模型连续 ${maxConflictCoreGenerationAttempts} 次没有返回完整的冲突核心（${lastGenerationError}），请重新生成。`,
       502,
       'CONFLICT_CORE_GENERATION_RETRY_EXHAUSTED',
+    )
+  }
+
+  if (lastGenerationError) {
+    return new AppError(
+      `已保留通过审核的冲突核心，但不合格候选替换失败（${lastGenerationError}），请重新生成。`,
+      502,
+      'CONFLICT_CORE_REPLACEMENT_FAILED',
     )
   }
 
@@ -828,14 +1626,38 @@ function createConflictCoreRetryExhaustedError({
     )
   }
 
-  return new AppError('生成的冲突核心没有同时满足原始事实、共同目标和机制差异，请重新生成。', 502, 'CONFLICT_CORE_FIDELITY_FAILED')
+  if (lastReviewError) {
+    return new AppError(
+      `已生成候选，但冲突核心审核连续失败（${lastReviewError}）；当前候选没有被放行，请重新生成。`,
+      502,
+      'CONFLICT_CORE_REVIEW_RETRY_EXHAUSTED',
+    )
+  }
+
+  return new AppError(
+    '当前念头还没有稳定生成三条同时满足原始事实、共同目标和机制差异的冲突核心，请补充设定或重新生成。',
+    502,
+    'CONFLICT_CORE_FIDELITY_FAILED',
+  )
+}
+
+function createConflictCoreContextRequiredError(
+  contextPrefill: StoryConflictCoreContextPrefill,
+): AppError {
+  return new AppError(
+    '当前念头还缺少能稳定支撑三种不同冲突机制的事实。请选择让系统先给一版，或补充并确认故事设定。',
+    422,
+    'CONFLICT_CORE_NEEDS_CONTEXT',
+    hasConflictCoreContextPrefill(contextPrefill) ? contextPrefill : undefined,
+  )
 }
 
 function hasConflictCoreEvidenceFromPremises(seed: StorySeed, core: StoredStoryConflictCore): boolean {
   const evidence = core.evidence ?? []
   if (!evidence.length) return false
 
-  return evidence.every((item) => getConflictCoreEvidenceSourceTexts(seed).some((source) => hasOriginalTextPhrase(source, item)))
+  return evidence.every((item) => getConflictCoreEvidenceSourceTextsForCore(seed, core)
+    .some((source) => hasOriginalTextPhrase(source, item)))
 }
 
 function goalReferencesSeed(seed: StorySeed, goal: string): boolean {
@@ -867,11 +1689,45 @@ function getUserConfirmedSeedSourceTexts(seed: Pick<StorySeed, 'activeSituation'
 }
 
 function getSystemDraftSourceTexts(seed: Pick<StorySeed, 'systemDraft'>): string[] {
-  return seed.systemDraft ? [seed.systemDraft.goal, seed.systemDraft.stake, seed.systemDraft.constraint] : []
+  if (!seed.systemDraft) return []
+
+  const directions = seed.systemDraft.activeDirection
+    ? [seed.systemDraft.activeDirection]
+    : seed.systemDraft.directions ?? []
+  return [
+    seed.systemDraft.goal,
+    seed.systemDraft.stake,
+    seed.systemDraft.constraint,
+    ...directions.flatMap((direction) => [direction.premise, direction.tradeoff]),
+  ]
 }
 
 function getConflictCoreEvidenceSourceTexts(seed: StorySeed): string[] {
   return [...getUserConfirmedSeedSourceTexts(seed), ...getSystemDraftSourceTexts(seed)]
+}
+
+function getConflictCoreEvidenceSourceTextsForCore(
+  seed: StorySeed,
+  core: Pick<StoredStoryConflictCore, 'id'>,
+): string[] {
+  if (!seed.systemDraft?.directions && !seed.systemDraft?.activeDirection) return getConflictCoreEvidenceSourceTexts(seed)
+
+  const index = getConflictCoreIndex(core.id)
+  const direction = index === undefined
+    ? seed.systemDraft.activeDirection
+    : getSystemDraftDirection(seed, index)
+  return [
+    ...getUserConfirmedSeedSourceTexts(seed),
+    seed.systemDraft.goal,
+    seed.systemDraft.stake,
+    seed.systemDraft.constraint,
+    ...(direction ? [direction.premise, direction.tradeoff] : []),
+  ]
+}
+
+function getConflictCoreIndex(id: string): number | undefined {
+  const match = /^conflict-core-([1-3])$/.exec(id)
+  return match ? Number(match[1]) - 1 : undefined
 }
 
 function normalizeGoalText(value: string): string {
@@ -887,10 +1743,9 @@ function hasOriginalTextPhrase(source: string, phrase: string): boolean {
 }
 
 function containsUnestablishedPrecision(seed: StorySeed, core: StoredStoryConflictCore): boolean {
-  const establishedText = getConflictCoreEvidenceSourceTexts(seed).join('')
+  const establishedText = getConflictCoreEvidenceSourceTextsForCore(seed, core).join('')
   const candidateText = [core.obstacle, core.tradeoff, core.decisionFocus ?? '', core.mechanism ?? ''].join('')
-  const precisionPattern = /(?:\d+(?:\.\d+)?|(?<!下)[零〇一二两三四五六七八九十百千万亿半]+)\s*(?:秒|分钟|小时|天|周|月|年|步|米|公里)|倒数|第(?:\d+|[零〇一二两三四五六七八九十百千万亿半]+)(?:步|次)/gu
-  return (candidateText.match(precisionPattern) ?? [])
+  return (candidateText.match(unestablishedPrecisionPattern) ?? [])
     .some((match) => !establishedText.includes(match))
 }
 
@@ -969,38 +1824,93 @@ export async function generateSessionPredicament(
 }
 
 async function resolveStorySeed(request: StoryDirectionsRequest): Promise<ResolvedStorySeed> {
-  let lastValidationError: AppError | undefined
+  let repairMessage: string | undefined
 
   for (let attempt = 0; attempt < maxStorySeedExtractionAttempts; attempt += 1) {
     try {
-      const extraction = await extractStorySeed(request.idea)
+      const extraction = await extractStorySeed(request.idea, repairMessage, attempt)
       assertStorySeedUsesOriginalText(request.idea, extraction.seed)
-      assertConflictCoreContextPrefillUsesOriginalText(request.idea, extraction.contextPrefill)
+      const contextPrefill = retainOriginalContextPrefill(request.idea, extraction.contextPrefill)
       return {
         seed: {
           ...applyConflictCoreContext(extraction.seed, request.context),
           expansionScope: request.expansionScope ?? 'keep-scale',
         },
-        contextPrefill: extraction.contextPrefill,
+        contextPrefill,
+        usesOriginalIdeaFallback: false,
       }
     } catch (error) {
-      if (!(error instanceof AppError) || error.code !== 'INVALID_MODEL_OUTPUT') throw error
-      lastValidationError = error
+      if (!isRetryableStorySeedExtractionError(error)) throw error
+
+      repairMessage = getStorySeedExtractionRepairMessage(error)
+      console.warn(`Story seed extraction rejected (attempt ${attempt + 1}): ${getErrorIdentifier(error)}`)
     }
   }
 
-  throw lastValidationError ?? new AppError('模型没有保留原始念头中的关键信息，请重试。', 502, 'INVALID_MODEL_OUTPUT')
+  console.warn(`Story seed extraction fell back to the original idea after ${maxStorySeedExtractionAttempts} rejected attempts.`)
+  const fallbackSeed = createOriginalIdeaFallbackSeed(request.idea, request.context)
+  return {
+    seed: {
+      ...fallbackSeed,
+      expansionScope: request.expansionScope ?? 'keep-scale',
+    },
+    contextPrefill: getConflictCoreContextPrefill(fallbackSeed),
+    usesOriginalIdeaFallback: true,
+  }
 }
 
-async function extractStorySeed(idea: string): Promise<StorySeedExtraction> {
+function isRetryableStorySeedExtractionError(error: unknown): boolean {
+  return error instanceof AppError
+    && (retryableModelOutputErrorCodes.has(error.code) || transientQwenErrorCodes.has(error.code))
+}
+
+function getStorySeedExtractionRepairMessage(error: unknown): string {
+  if (error instanceof AppError && error.code === 'INVALID_MODEL_OUTPUT') {
+    return '上一版缺少必填字段，或没有逐字保留原始念头中的锁定信息。'
+  }
+
+  return '上一版不是可读取的完整 JSON。'
+}
+
+function createOriginalIdeaFallbackSeed(
+  idea: string,
+  context: StoryConflictCoreContext | undefined,
+): StorySeedDraft {
+  const lockedFacts = [...new Set([
+    idea,
+    ...[context?.stake, context?.constraint].filter((value): value is string => Boolean(value)),
+  ])]
+  const unknowns = [
+    ...(!context?.goal ? ['主角此刻的具体目标'] : []),
+    ...(!context?.stake ? ['主角最在意的事'] : []),
+    ...(!context?.constraint ? ['当前限制或阻碍'] : []),
+  ]
+
+  return {
+    // Preserve the raw idea verbatim instead of inferring actors or facts locally.
+    subject: idea,
+    activeSituation: idea,
+    lockedGoal: context?.goal ?? null,
+    lockedFacts,
+    worldMode: 'realistic-default',
+    unknowns,
+  }
+}
+
+async function extractStorySeed(
+  idea: string,
+  repairMessage: string | undefined,
+  attempt: number,
+): Promise<StorySeedExtraction> {
   const record = await requestModelRecord({
     systemPrompt: storySeedSystemPrompt,
-    userPrompt: buildStorySeedPrompt(idea),
-    temperature: 0.1,
+    userPrompt: buildStorySeedPrompt(idea, repairMessage),
+    temperature: attempt === 0 ? 0.1 : 0.05,
     maxTokens: 680,
   }, '模型没有识别出原始念头中的锁定信息，请重试。')
 
-  const seedRecord = expectRecord(record.seed, '模型没有识别出完整的原始念头锁定信息，请重试。', invalidModelOutputContext)
+  // json_object models occasionally omit the schema's seed wrapper.
+  const seedRecord = isPlainRecord(record.seed) ? record.seed : record
   const seed = parseStorySeedDraft(seedRecord, invalidModelOutputContext)
   return {
     seed,
@@ -1016,14 +1926,24 @@ function assertStorySeedUsesOriginalText(idea: string, seed: StorySeedDraft) {
   }
 }
 
-function assertConflictCoreContextPrefillUsesOriginalText(
+function retainOriginalContextPrefill(
   idea: string,
   contextPrefill: StoryConflictCoreContextPrefill,
-) {
-  const suggestedValues = Object.values(contextPrefill)
-  const hasUnquotedValue = suggestedValues.some((value) => value !== undefined && !hasOriginalTextPhrase(idea, value))
-  if (hasUnquotedValue) {
-    throw new AppError('模型没有逐字保留原始念头中的补充设定建议，请重试。', 502, 'INVALID_MODEL_OUTPUT')
+): StoryConflictCoreContextPrefill {
+  const goal = contextPrefill.goal && hasOriginalTextPhrase(idea, contextPrefill.goal)
+    ? contextPrefill.goal
+    : undefined
+  const stake = contextPrefill.stake && hasOriginalTextPhrase(idea, contextPrefill.stake)
+    ? contextPrefill.stake
+    : undefined
+  const constraint = contextPrefill.constraint && hasOriginalTextPhrase(idea, contextPrefill.constraint)
+    ? contextPrefill.constraint
+    : undefined
+
+  return {
+    ...(goal ? { goal } : {}),
+    ...(stake ? { stake } : {}),
+    ...(constraint ? { constraint } : {}),
   }
 }
 
@@ -1058,62 +1978,205 @@ async function generateSystemConflictCoreDraft(
   idea: string,
   seed: StorySeed,
 ): Promise<StoryConflictCoreSystemDraft> {
+  let repairMessage: string | undefined
+  let candidate: StoryConflictCoreSystemDraft | undefined
+
   for (let attempt = 0; attempt < maxSystemDraftGenerationAttempts; attempt += 1) {
     try {
       const record = await requestModelRecord({
         systemPrompt: systemConflictCoreDraftSystemPrompt,
-        userPrompt: buildSystemConflictCoreDraftPrompt(idea, seed),
-        temperature: attempt === 0 ? 0.68 : 0.42,
-        maxTokens: 680,
+        userPrompt: candidate
+          ? buildSystemConflictCoreDraftRepairPrompt(idea, seed, candidate, repairMessage ?? '上一版没有通过最小事实检查。')
+          : buildSystemConflictCoreDraftPrompt(idea, seed, repairMessage),
+        temperature: attempt === 0 ? 0.22 : 0.1,
+        maxTokens: systemConflictCoreDraftMaxTokens,
       }, '模型没有生成可用的暂定故事设定，请重试。')
-      const draft = parseSystemConflictCoreDraft(record.systemDraft)
-      assertSystemConflictCoreDraft(seed, draft)
+      const draft = parseSystemConflictCoreDraft(record, seed.lockedGoal)
+      candidate = draft
+      if (shouldLogConflictCoreDiagnostics) {
+        console.warn(`System conflict core draft candidate (attempt ${attempt + 1}): ${JSON.stringify(draft)}`)
+      }
+      assertSystemConflictCoreDraft(idea, seed, draft)
       return draft
     } catch (error) {
-      if (!(error instanceof AppError) || !retryableModelOutputErrorCodes.has(error.code)) throw error
+      if (!isRetryableSystemDraftGenerationError(error)) throw error
+
+      repairMessage = describeSystemDraftGenerationFailure(error)
+      if (shouldLogConflictCoreDiagnostics) {
+        console.warn(`System conflict core draft rejected (attempt ${attempt + 1}): ${repairMessage}`)
+      }
     }
   }
 
   throw new AppError(
-    '系统暂定设定连续生成失败，请重新生成或改为自己补充。',
+    '系统暂定设定没有通过最小事实检查；当前候选没有被采用。请重新生成一版系统暂定分支。',
     502,
     'SYSTEM_DRAFT_GENERATION_FAILED',
   )
 }
 
-function parseSystemConflictCoreDraft(value: unknown): StoryConflictCoreSystemDraft {
+function isRetryableSystemDraftGenerationError(error: unknown): boolean {
+  return error instanceof AppError
+    && (retryableModelOutputErrorCodes.has(error.code) || transientQwenErrorCodes.has(error.code))
+}
+
+function describeSystemDraftGenerationFailure(error: unknown): string {
+  return error instanceof AppError
+    ? error.message
+    : '上一版不是完整的 JSON 对象。'
+}
+
+function parseSystemConflictCoreDraft(
+  value: unknown,
+  lockedGoal: string | null,
+): StoryConflictCoreSystemDraft {
   const message = '模型没有生成完整的暂定故事设定，请重试。'
-  const record = expectRecord(value, message, invalidModelOutputContext)
+  const rootRecord = expectRecord(value, message, invalidModelOutputContext)
+  // json_object models occasionally omit the schema's systemDraft wrapper.
+  const record = isPlainRecord(rootRecord.systemDraft) ? rootRecord.systemDraft : rootRecord
+
+  const directions = parseSystemDraftDirections(record.directions, message)
+
   return {
-    goal: readText(record, 'goal', message, maximumConflictCoreContextLength, invalidModelOutputContext),
-    stake: readText(record, 'stake', message, maximumConflictCoreContextLength, invalidModelOutputContext),
-    constraint: readText(record, 'constraint', message, maximumConflictCoreContextLength, invalidModelOutputContext),
+    goal: lockedGoal ?? readText(record, 'goal', message, maximumSystemDraftFieldLength, invalidModelOutputContext),
+    stake: readText(record, 'stake', message, maximumSystemDraftFieldLength, invalidModelOutputContext),
+    constraint: readText(record, 'constraint', message, maximumSystemDraftFieldLength, invalidModelOutputContext),
+    ...(directions ? { directions } : {}),
   }
 }
 
-function assertSystemConflictCoreDraft(seed: StorySeed, draft: StoryConflictCoreSystemDraft) {
-  if (seed.lockedGoal && draft.goal !== seed.lockedGoal) {
-    throw new AppError('系统暂定设定没有保留用户已明确的目标，请重试。', 502, 'INVALID_MODEL_OUTPUT')
+function parseSystemDraftDirections(
+  value: unknown,
+  message: string,
+): StoryConflictCoreSystemDraft['directions'] {
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value) || value.length !== generatedOptionCount) {
+    throw new AppError('系统暂定设定必须包含三条彼此不同的冲突方向，请重试。', invalidModelOutputContext.statusCode, invalidModelOutputContext.code)
   }
 
-  const resolvedGoal = seed.lockedGoal ?? draft.goal
-  const normalizedValues = [resolvedGoal, draft.stake, draft.constraint].map(normalizeGoalText)
+  const directions = value.map((item) => {
+    const record = expectRecord(item, message, invalidModelOutputContext)
+    return {
+      label: readText(record, 'label', message, maximumSystemDraftDirectionLabelLength, invalidModelOutputContext),
+      mechanismType: readConflictCoreMechanismType(record.mechanismType, message),
+      premise: readText(record, 'premise', message, maximumSystemDraftFieldLength, invalidModelOutputContext),
+      tradeoff: readText(record, 'tradeoff', message, maximumSystemDraftFieldLength, invalidModelOutputContext),
+    } satisfies SystemDraftDirection
+  })
+
+  return directions
+}
+
+function assertSystemConflictCoreDraft(idea: string, seed: StorySeed, draft: StoryConflictCoreSystemDraft) {
+  const normalizedValues = [draft.goal, draft.stake, draft.constraint].map(normalizeGoalText)
   if (new Set(normalizedValues).size !== normalizedValues.length) {
     throw new AppError('系统暂定设定没有区分目标、代价和限制，请重试。', 502, 'INVALID_MODEL_OUTPUT')
   }
 
-  if (!seed.lockedGoal && !goalReferencesUserSeed(seed, resolvedGoal)) {
+  if (!seed.lockedGoal && !goalReferencesUserSeed(seed, draft.goal)) {
     throw new AppError('系统暂定目标没有锚定原始念头，请重试。', 502, 'INVALID_MODEL_OUTPUT')
   }
+
+  const directions = draft.directions
+  if (!directions || directions.length !== generatedOptionCount) {
+    throw new AppError('系统暂定设定没有规划三条独立冲突方向，请重试。', 502, 'INVALID_MODEL_OUTPUT')
+  }
+
+  const mechanismTypes = directions.map((direction) => direction.mechanismType)
+  if (new Set(mechanismTypes).size !== mechanismTypes.length) {
+    throw new AppError('系统暂定设定的三条冲突方向不能使用同一种机制，请重试。', 502, 'INVALID_MODEL_OUTPUT')
+  }
+
+  const directionTexts = directions.flatMap((direction) => [direction.label, direction.premise, direction.tradeoff])
+    .map(normalizeGoalText)
+  if (new Set(directionTexts).size !== directionTexts.length) {
+    throw new AppError('系统暂定设定的三条冲突方向不能互相重复，请重试。', 502, 'INVALID_MODEL_OUTPUT')
+  }
+
+  assertSystemDraftUsesMinimalAssumptions(idea, seed, draft)
+}
+
+function assertSystemDraftUsesMinimalAssumptions(
+  idea: string,
+  seed: StorySeed,
+  draft: StoryConflictCoreSystemDraft,
+) {
+  const issues = collectSystemDraftMinimalAssumptionIssues(idea, seed, draft)
+  if (issues.length) {
+    throw new AppError(
+      `系统暂定设定需要收紧：${issues.slice(0, 6).join('；')}。请只保留抽象、单一、可编辑的前提。`,
+      502,
+      'INVALID_MODEL_OUTPUT',
+    )
+  }
+}
+
+function collectSystemDraftMinimalAssumptionIssues(
+  idea: string,
+  seed: StorySeed,
+  draft: StoryConflictCoreSystemDraft,
+): string[] {
+  const issues: string[] = []
+  for (const field of getSystemDraftGeneratedFields(seed, draft)) {
+    const structuralIssue = getSystemDraftStructuralIssue(field.value)
+    if (structuralIssue) {
+      issues.push(`${field.label}${structuralIssue}`)
+      continue
+    }
+
+    const unsupportedDetail = findUnsupportedSystemDraftDetail(idea, seed, field.value)
+    if (unsupportedDetail) issues.push(`${field.label}加入了未建立的${unsupportedDetail.label}“${unsupportedDetail.value}”`)
+  }
+  return issues
+}
+
+function getSystemDraftGeneratedFields(
+  seed: Pick<StorySeed, 'lockedGoal'>,
+  draft: StoryConflictCoreSystemDraft,
+): SystemDraftTextField[] {
+  return [
+    ...(!seed.lockedGoal ? [{ label: '共同目标', value: draft.goal }] : []),
+    { label: '共同代价', value: draft.stake },
+    { label: '共同限制', value: draft.constraint },
+    ...(draft.directions ?? []).flatMap((direction, index) => [
+      { label: `第 ${index + 1} 条分支前提`, value: direction.premise },
+      { label: `第 ${index + 1} 条分支取舍`, value: direction.tradeoff },
+    ]),
+  ]
+}
+
+function getSystemDraftStructuralIssue(value: string): string | undefined {
+  const withoutTerminalPunctuation = value.trim().replace(/[。！？]+$/u, '')
+  if (/[\r\n。！？；]/u.test(withoutTerminalPunctuation)) return '包含了多句或多段内容'
+  if (systemDraftMultipleAssumptionsPattern.test(value)) return '叠加了多个设定'
+  return undefined
+}
+
+function findUnsupportedSystemDraftDetail(
+  idea: string,
+  seed: Pick<StorySeed, 'activeSituation' | 'lockedFacts'>,
+  value: string,
+): { label: string, value: string } | undefined {
+  const userEstablishedText = [idea, ...getUserConfirmedSeedSourceTexts(seed)].join('\n')
+  const precision = Array.from(value.matchAll(unestablishedPrecisionPattern))
+    .map((match) => match[0])
+    .find((match) => !hasOriginalTextPhrase(userEstablishedText, match))
+  if (precision) return { label: '精确数值或时限', value: precision }
+
+  for (const rule of systemDraftUnsupportedDetailRules) {
+    const unsupportedMatch = Array.from(value.matchAll(rule.pattern))
+      .map((match) => match[0])
+      .find((match) => !hasOriginalTextPhrase(userEstablishedText, match))
+    if (unsupportedMatch) return { label: rule.label, value: unsupportedMatch }
+  }
+
+  return undefined
 }
 
 function applySystemConflictCoreDraft(seed: StorySeed, draft: StoryConflictCoreSystemDraft): StorySeed {
   return {
     ...seed,
-    systemDraft: {
-      ...draft,
-      goal: seed.lockedGoal ?? draft.goal,
-    },
+    systemDraft: draft,
   }
 }
 
@@ -1693,10 +2756,28 @@ function replaceSessionPredicament(
   core: StoredStoryConflictCore,
   predicament: StoryPredicament,
 ) {
+  session.seed = activateSystemDraftDirection(session.seed, core)
   session.selectedConflictCore = core
   session.selectedPredicament = predicament
   clearSessionApproachAndStoryPath(session)
   commitStorySessionChanges(session)
+}
+
+function activateSystemDraftDirection(
+  seed: StorySeed,
+  core: Pick<StoredStoryConflictCore, 'id'>,
+): StorySeed {
+  const directionIndex = getConflictCoreIndex(core.id)
+  const direction = directionIndex === undefined ? undefined : getSystemDraftDirectionForIndex(seed, directionIndex)
+  if (!seed.systemDraft || !direction) return seed
+
+  return {
+    ...seed,
+    systemDraft: {
+      ...seed.systemDraft,
+      activeDirection: direction,
+    },
+  }
 }
 
 function clearSessionApproachAndStoryPath(session: StorySessionRecord) {
@@ -1960,6 +3041,52 @@ function isRetryableConflictCoreReviewError(error: unknown): boolean {
   return error instanceof AppError && retryableConflictCoreReviewErrorCodes.has(error.code)
 }
 
+function createConflictCoreReviewUnavailableError(error: unknown): AppError {
+  if (error instanceof AppError) {
+    if (error.code === 'QWEN_NOT_CONFIGURED' || error.code === 'QWEN_AUTH_ERROR') {
+      return error
+    }
+
+    if (error.code === 'QWEN_RATE_LIMITED') {
+      return new AppError(
+        '冲突核心质量检查请求受限；当前候选没有被放行，请稍后重试。',
+        429,
+        'CONFLICT_CORE_REVIEW_RATE_LIMITED',
+      )
+    }
+
+    if (error.code === 'QWEN_TIMEOUT') {
+      return new AppError(
+        '冲突核心质量检查响应超时；当前候选没有被放行，请稍后重试。',
+        504,
+        'CONFLICT_CORE_REVIEW_TIMEOUT',
+      )
+    }
+
+    if (error.code === 'QWEN_NETWORK_ERROR' || error.code === 'QWEN_UPSTREAM_ERROR') {
+      return new AppError(
+        '冲突核心质量检查服务暂时不可用；当前候选没有被放行，请稍后重试。',
+        502,
+        'CONFLICT_CORE_REVIEW_UNAVAILABLE',
+      )
+    }
+
+    if (error.code === 'QWEN_REQUEST_ERROR') {
+      return new AppError(
+        '冲突核心质量检查请求被模型服务拒绝，请检查 QWEN_MODEL、接口地址和服务配置。',
+        502,
+        'CONFLICT_CORE_REVIEW_REQUEST_REJECTED',
+      )
+    }
+  }
+
+  return new AppError(
+    '冲突核心质量检查暂时不可用；当前候选没有被放行，请稍后重试。',
+    502,
+    'CONFLICT_CORE_REVIEW_FAILED',
+  )
+}
+
 function expectListOfLength(
   value: unknown,
   length: number,
@@ -2036,13 +3163,27 @@ const conflictCoreContractReviewSystemPrompt = `你是一位严格的中文故�
 
 introducesNoUnestablishedFacts 只有在核心没有把 unknowns 或未提及信息断言为事实时才为 true。要检查所有新增背景、身份、关系、责任、规则、资源、权限、心理状态和外部结果。第一层不允许用普通临时场景条件放行新人物、物品、动作、过去对白或外部事件；它们应在第二层具体困境中才出现。unestablishedClaims 必须列出候选中每一项不受种子支持的断言；若没有则返回空数组，不能为了让 introducesNoUnestablishedFacts 为 true 而省略。variationAxisFitsMechanism 只有在轴确实概括障碍机制时才为 true；时间轴必须有真实的时机或窗口压力，关系轴必须基于输入已建立的人际边界，资源轴必须基于输入已存在且对目标必要的条件，承诺轴必须基于输入已建立的承诺或责任。未建立的心理状态不能伪装成任意冲突轴。三条可以使用同一轴，不能因为轴重复而判错。forcesProtagonistDecision 只有在 decisionFocus 确实让主角必须主动选择，而不是等别人解决、单纯躲避或执行唯一正确答案时才为 true。supportsSustainedDevelopment 只有在任选一个合理起点后，仍可自然推进至少三步有后果的行动而不立刻解决时才为 true。hasEscalationPath 只有在不新增另一主冲突的前提下，当前阻碍可因选择、拖延或代价继续加压时才为 true。canSupportBalancedApproaches 只有在 decisionFocus 可生成两条并列、各有真实代价且没有明显更优的应对起点时才为 true。usesDistinctMechanism 只有在先去掉人物、物品、地点、画面和情绪后，这条核心的“目标为什么无法继续”仍与另外两条不同才为 true；若只是用不同表面载体重述同一种回避、等待或外部打断，必须为 false。候选核心不得写死精确秒数、步数、距离、路线、倒数、必须先后经过的完整行动、已经发生的回应或确定结局。`
 
+const systemDraftConflictCoreGroundingReviewSystemPrompt = `你是一位只做事实归因核对的中文编辑。用户主动选择了系统暂定路线；你的唯一任务是找出第一层候选冲突核心中超出该候选“允许事实源”的断言。不评价故事好坏，不提出改写建议，也不因为候选写了 evidence 就默认它成立。
+
+必须严格返回 JSON 对象，不要 Markdown，不要解释，不要代码块。用户提示会按 conflictCoreId 给出唯一允许事实源：userConfirmed 来自用户原文或用户确认，systemDraftCommon 是本次路线共享的系统暂定前提，systemDraftBranch 是当前候选独有的系统暂定分支。后两者不是用户原话，但在本次候选中是允许的事实前提；不能仅因它们不在原始念头中就列为 unestablishedClaims，也不能把它们归因给用户。每条候选只能使用自己对应的 systemDraftBranch，不能借用其他编号的分支。
+
+逐条检查 preservedGoal、obstacle、tradeoff、decisionFocus 和 mechanism。把每个不在该候选允许事实源中、或把允许前提扩写成额外背景、人物、关系、规则、资源、行动、位置、距离、时间、外部结果或他人态度的断言列入 unestablishedClaims，使用简短、可定位的原句或断言。evidence 只能证明它逐字引用了什么，不能让候选从一小段允许前提推导出新的动作、态度、环境或因果链。
+
+抽象地描述“信息未明”“边界已被触发”等机制，只有在其完整因果链由当前候选允许事实源或允许的直接语义蕴含支持时才可放行；不能把未建立的具体情绪、动作、程序、关系或结果当作支撑。${conflictCoreDirectInferenceRules}\n\n若一条核心完全没有新增断言，unestablishedClaims 返回空数组。conflictCoreId 必须照抄输入，恰好覆盖本次输入中的全部候选。`
+
+function getConflictCoreGroundingReviewSystemPrompt(seed: Pick<StorySeed, 'systemDraft'>): string {
+  return seed.systemDraft
+    ? systemDraftConflictCoreGroundingReviewSystemPrompt
+    : conflictCoreGroundingReviewSystemPrompt
+}
+
 const conflictCoreGroundingReviewSystemPrompt = `你是一位只做事实归因核对的中文编辑。你的唯一任务是找出第一层候选冲突核心中没有被用户原始念头明确建立的断言；不评价故事好坏，不提出改写建议，也不因为候选写了 evidence 就默认它成立。
 
 必须严格返回 JSON 对象，不要 Markdown，不要解释，不要代码块。原始念头是唯一的事实来源；故事种子只帮助定位原文，不能为原始念头中不存在的内容补充事实。逐条检查 preservedGoal、obstacle、tradeoff、decisionFocus 和 mechanism。把每个不受原文明确支持、却被候选当作已成立的事实或因果前提列入 unestablishedClaims，使用简短、可定位的原句或断言。
 
 重点审查候选是否新增了人物、关系状态、地点、物品、现场动作、位置、顺序、距离、时间、外部事件、过去对白、他人的态度/意图/反应、主角的内在状态、既有责任、规则、资源、权限或已经发生的结果。即使这些内容看似符合常识，只要原文没有建立，也必须列出。evidence 只能证明它逐字引用了什么，不能让候选从一小段原文推导出额外的动作、态度、环境或因果链。
 
-抽象地描述“信息未明”“边界已被触发”等机制，也只有在其完整因果链由原文或允许的直接语义蕴含支持时才可放行；不能把未建立的具体情绪、动作、程序、关系或结果当作支撑。\n\n${conflictCoreDirectInferenceRules}\n\n若一条核心完全没有新增断言，unestablishedClaims 返回空数组。conflictCoreId 必须照抄输入，恰好覆盖三条。`
+抽象地描述“信息未明”“边界已被触发”等机制，也只有在其完整因果链由原文或允许的直接语义蕴含支持时才可放行；不能把未建立的具体情绪、动作、程序、关系或结果当作支撑。\n\n${conflictCoreDirectInferenceRules}\n\n若一条核心完全没有新增断言，unestablishedClaims 返回空数组。conflictCoreId 必须照抄输入，恰好覆盖本次输入中的全部候选。`
 
 const predicamentExpansionSystemPrompt = `你是一位擅长互动短篇故事的中文编辑。用户已经选定一个冲突核心；现在只把它展开为一个可进入故事的具体困境。
 
@@ -2052,9 +3193,11 @@ const storySeedSystemPrompt = `你是一位严谨的中文故事编辑。请把�
 
 必须严格返回 JSON 对象，不要 Markdown，不要解释，不要代码块。输出内容使用简体中文。只能提取用户已经说出的信息，不能补写姓名以外的身份、年龄、职业、家庭关系、病史、过去经历或题材。lockedGoal 只在用户给出了明确想做、必须做、想去、想找、想说等具体行动时填写；否则返回 null。lockedGoal 和每条 lockedFacts 都必须是从用户原文连续逐字摘取的短语，不能改写、补全或倒装；lockedFacts 只能保留 1 至 3 条不可替换的核心锚点，优先人物或关系、关键事件、明确目标或时间限制；不要把同一个事件拆成重复碎片。unknowns 应列出仍未建立、后续不能作为关键因果依据的设定类别；它们不是禁止普通场景细节的清单。`
 
-const systemConflictCoreDraftSystemPrompt = `你是一位擅长把模糊念头发展成故事起点的中文编辑。用户已经明确选择“让系统先给一版”；你的任务是提出一组清楚标为系统暂定设定的最小前提，让后续可以生成有分量的冲突核心。
+const systemConflictCoreDraftSystemPrompt = `你是一位擅长把模糊念头发展成故事起点的中文编辑。用户已经明确选择“让系统先给一版”；你的任务是提出一个共同故事起点，以及三条彼此独立、清楚标为系统暂定设定的冲突分支，让后续稳定生成三条有分量的冲突核心。
 
-必须严格返回 JSON 对象，不要 Markdown，不要解释，不要代码块。输出内容使用简体中文。输入中的锁定目标和锁定事实来自用户，绝不能改写或反过来声称为系统发明；你补出的 goal、stake、constraint 不是用户原文，必须只作为本次故事的可修改暂定设定。goal 是主角此刻可主动完成的一件具体行动；若已有锁定目标，必须逐字照抄它。stake 是继续或放弃这件事会失去、守住或承受的直接代价。constraint 是让主角不能直接完成目标的一组当前条件。三项必须彼此因果相关，能支持不同冲突方向，但不要补写人物履历、精确时间、具体地点、完整行动步骤、他人的既定态度、外部结果或结局。`
+必须严格返回 JSON 对象，不要 Markdown，不要解释，不要代码块。输出内容使用简体中文。输入中的锁定目标和锁定事实来自用户，绝不能改写或反过来声称为系统发明；你补出的 goal、stake、constraint 以及 directions 中的 premise、tradeoff 不是用户原文，必须只作为本次故事的可修改暂定设定。若输入已有锁定目标，服务端会直接把它保留为 goal；此时只生成 stake、constraint 和 directions，不要输出或改写 goal。若没有锁定目标，goal 才是主角此刻可主动完成的一件具体行动，且必须保留原始念头中的主体、对象或关键事件。stake 是继续或放弃这件事会失去、守住或承受的直接代价。constraint 是三条分支共享的最小当前起点。directions 必须恰好有三条，每条使用不同的 mechanismType，并各自提出一项独立的最小前提和对应取舍；三条前提是互斥的创作分支，不是同一个故事中同时成立的事实。
+
+每个 stake、constraint、premise 和 tradeoff 都只能是一句话、一个条件或一个取舍，不能同时塞入背景、原因、操作和结果。优先从原始目标、事件、时限或承诺中找出不同机制；共同 stake 和 constraint 不得以原始信息为由新增资源状态。除非用户原文已明确写出，否则禁止补入精确数字、钟点或倒计时，账号密码、设备接口、网络电量等技术细节，文书条款、机构流程，或者他人的既定状态和过去事件。不得把主角自己的承诺改写成他人已经拒绝或禁止联系的边界；不得把内容未知改写成他人的偏好、意愿或期待；不得补写主角的心理动机或关系结论。可接受的抽象粒度是“信息尚无法确认”“已有边界会被触碰”“可用窗口正在收窄”“继续行动要承担一项代价”；只说明机制，不补出造成它的设备、规则、人员或流程。不要补写人物履历、具体地点、完整行动步骤、外部结果或结局。`
 
 const headTailSystemPrompt = `你是一位擅长短篇故事结构的中文编辑。根据已经确认的故事基础，提出能驱动后续创作的开场、关键行动与结尾组合。
 
@@ -2267,9 +3410,29 @@ const storySeedResponseSchema = `{
 
 const systemConflictCoreDraftResponseSchema = `{
   "systemDraft": {
-    "goal": "系统暂定的主角当前具体行动，不超过 120 字",
-    "stake": "系统暂定的直接代价或想守住的事，不超过 120 字",
-    "constraint": "系统暂定的当前阻碍条件，不超过 120 字"
+    "goal": "系统暂定的主角当前具体行动，只写一个行动，不超过 64 字",
+    "stake": "系统暂定的直接代价或想守住的事，只写一个条件或取舍，不超过 64 字",
+    "constraint": "系统暂定的共同起点限制，只写一个条件，不超过 64 字",
+    "directions": [
+      {
+        "label": "不超过 16 字的分支名称",
+        "mechanismType": "information-gap、boundary-conflict、meaning-commitment、initiation-block、window-pressure、resource-constraint 或 commitment-conflict",
+        "premise": "仅属于这一分支的系统暂定前提，只写一个条件，不超过 64 字",
+        "tradeoff": "这一分支继续目标时必须接受的暂定取舍，只写一个取舍，不超过 64 字"
+      },
+      {
+        "label": "不超过 16 字的分支名称",
+        "mechanismType": "与上一条不同的机制类型",
+        "premise": "第二条独立的系统暂定前提，只写一个条件，不超过 64 字",
+        "tradeoff": "第二条对应的暂定取舍，只写一个取舍，不超过 64 字"
+      },
+      {
+        "label": "不超过 16 字的分支名称",
+        "mechanismType": "与前两条不同的机制类型",
+        "premise": "第三条独立的系统暂定前提，只写一个条件，不超过 64 字",
+        "tradeoff": "第三条对应的暂定取舍，只写一个取舍，不超过 64 字"
+      }
+    ]
   }
 }`
 
@@ -2291,10 +3454,26 @@ const conflictCoreResponseSchema = `{
 
 重要：恰好生成 3 条；三条要靠“阻碍如何卡住同一目标”的实质机制不同来区分，variationAxis 可以重复，不能把不同 axis 当作配额。先去掉人物、物品、地点、画面和情绪后，三条的“目标为什么无法继续”必须仍然不同；只替换表面载体不算不同。每条都必须有清楚的 tradeoff、decisionFocus、mechanism、mechanismType 和 evidence。mechanismType 必须准确描述因果来源，且三条不能重复；如果同一个稀薄事实不能支持三种不同类型，就不要虚构条件来凑数。mechanism 必须是可复述的因果差异，evidence 必须逐字来自故事种子。decisionFocus、mechanism、mechanismType 和 evidence 是服务端内部字段，不会展示给用户。obstacle 不得新增画面、现场动作、人物状态、具体规则、精确时间、步数、路线、完整行动或结局。只有 title、variationAxis、preservedGoal、obstacle 和 tradeoff 会进入第一层用户界面。`
 
-const conflictCoreReviewResponseSchema = `{
-  "reviews": [
-    {
-      "conflictCoreId": "conflict-core-1",
+const conflictCoreReplacementResponseSchema = `{
+  "core": {
+    "title": "不超过 12 个字的冲突标题",
+    "variationAxis": "只能填 time、resource、relationship 或 commitment",
+    "preservedGoal": "逐字使用指定的共同目标",
+    "obstacle": "只描述已建立事实构成的单一核心阻碍",
+    "tradeoff": "继续该目标必须接受或暂时无法兼得的原始条件",
+    "decisionFocus": "只在目标和已建立证据之间的主动选择焦点",
+    "mechanism": "不新增事实的目标受阻因果短语",
+    "mechanismType": "information-gap、boundary-conflict、meaning-commitment、initiation-block、window-pressure、resource-constraint 或 commitment-conflict",
+    "evidence": ["逐字摘取支持 mechanism 的原文或明确系统暂定设定"]
+  }
+}`
+
+function getConflictCoreReviewResponseSchema(
+  cores: readonly Pick<StoredStoryConflictCore, 'id'>[],
+): string {
+  const reviews = cores
+    .map((core) => `    {
+      "conflictCoreId": "${core.id}",
       "preservesLockedFacts": true,
       "preservesLockedGoal": true,
       "obstacleThreatensGoal": true,
@@ -2314,18 +3493,15 @@ const conflictCoreReviewResponseSchema = `{
       "unestablishedClaims": [],
       "variationAxisFitsMechanism": true,
       "staysWithinScope": true
-    }
-  ]
-}`
+    }`)
+    .join(',\n')
 
-const conflictCoreGroundingReviewResponseSchema = `{
+  return `{
   "reviews": [
-    {
-      "conflictCoreId": "conflict-core-1",
-      "unestablishedClaims": ["候选中未由原始念头建立的一项具体断言"]
-    }
+${reviews}
   ]
 }`
+}
 
 const predicamentExpansionResponseSchema = `{
   "predicament": {
@@ -2372,17 +3548,32 @@ const predicamentExpansionResponseSchema = `{
 4. action.preconditions 必须引用上面 facts 数组中存在的、非 unknown 的 fact id
 5. action.effects 必须引用上面 facts 数组中存在的、mutability 为 changeable 的 fact id`
 
-function buildStorySeedPrompt(idea: string): string {
+function buildStorySeedPrompt(idea: string, repairMessage?: string): string {
+  const repair = repairMessage
+    ? `\n上一版未通过结构检查：${repairMessage} 请只修正该问题，不要补写任何原文没有的信息。`
+    : ''
+
   return `用户的原始念头：
 ---
 ${idea}
 ---
 
-请提取 1 到 3 条彼此独立的核心 lockedFacts。每条 lockedFacts 与非空 lockedGoal 都必须是用户原文中连续出现的逐字短语，不能改写、补全、合并或颠倒语序；它们应覆盖最不可替换的信息，不要把同一个事件拆成多个近义短语。activeSituation 要沿用用户关键措辞；worldMode 只有用户明确写出了非现实类型或规则时才是 user-specified。不要把 unknowns 填成虚构事实。contextPrefill 只用于补充设定表单：goal、stake、constraint 各自只能逐字摘取用户原文中已经明确出现的连续短语；无法诚实归类时必须填 null，绝不能根据人物关系、常识或情绪推断补写。只要 lockedGoal 非空，contextPrefill.goal 也必须非空，并优先照抄该目标的完整动作短语。严格使用以下 JSON 结构：
+请提取 1 到 3 条彼此独立的核心 lockedFacts。每条 lockedFacts 与非空 lockedGoal 都必须是用户原文中连续出现的逐字短语，不能改写、补全、合并或颠倒语序；它们应覆盖最不可替换的信息，不要把同一个事件拆成多个近义短语。activeSituation 要沿用用户关键措辞；worldMode 只有用户明确写出了非现实类型或规则时才是 user-specified。不要把 unknowns 填成虚构事实。contextPrefill 只用于补充设定表单：goal、stake、constraint 各自只能逐字摘取用户原文中已经明确出现的连续短语；无法诚实归类时必须填 null，绝不能根据人物关系、常识或情绪推断补写。只要 lockedGoal 非空，contextPrefill.goal 也必须非空，并优先照抄该目标的完整动作短语。${repair}\n\n严格使用以下 JSON 结构：
 ${storySeedResponseSchema}`
 }
 
-function buildSystemConflictCoreDraftPrompt(idea: string, seed: StorySeed): string {
+function buildSystemConflictCoreDraftPrompt(
+  idea: string,
+  seed: StorySeed,
+  repairMessage?: string,
+): string {
+  const goalInstruction = seed.lockedGoal
+    ? `用户已确认目标“${seed.lockedGoal}”。服务端会直接保留它；请只生成 stake 和 constraint，不要返回 goal。`
+    : '用户尚未确认具体行动目标。请生成 goal，并逐字保留原始念头中的主体、对象或关键事件。'
+  const repair = repairMessage
+    ? `\n上一版未通过结构检查：${repairMessage}。请只修正这一问题，仍然不要补写新的背景或结果。`
+    : ''
+
   return `用户的原始念头：
 ---
 ${idea}
@@ -2391,8 +3582,65 @@ ${idea}
 已从原文提取的故事种子：
 ${formatStorySeed(seed)}
 
-用户选择让系统先给一版。请只补一组能让故事启动的暂定设定，不要把它写成用户已经说过的事实；保留所有原始信息，不要用具体人物、地点、时间、结果或复杂小剧情硬凑戏剧性。goal、stake、constraint 共同构成一个可继续发展的起点。严格使用以下 JSON：
-${systemConflictCoreDraftResponseSchema}`
+用户选择让系统先给一版。请提出一个共同故事起点，并在其中规划恰好三条彼此独立的创作分支。不要把系统暂定内容写成用户已经说过的事实；保留所有原始信息，不要用具体人物、地点、时间、结果或复杂小剧情硬凑戏剧性。${goalInstruction} stake 和 constraint 共同构成三条分支共享的起点；directions 中每一条 premise 和 tradeoff 只属于自己的分支，是用户可选择的系统暂定前提。三条 mechanismType 必须不同，且每条都要能单独支撑一条冲突核心。${repair}\n\n粒度必须保持最小：stake、constraint、每条 premise、每条 tradeoff 各只写一句，且只表达一个条件或一个取舍。优先从原始目标、事件、时限或承诺中得到三个不同机制；共同 stake 和 constraint 不得凭原始信息新增资源或操作状态。除非原始念头明确给出，否则不要写精确数字或钟点、账号密码、设备故障或接口、网络电量、文书条款、机构流程、他人的既定状态或过去事件；也不要把主角自己的承诺改写成他人已经拒绝或禁止联系的边界，不要把内容未知改写成他人的偏好、意愿或期待，不要补写主角心理动机或关系结论，也不要写“先做什么再做什么”的操作流程。可用“信息尚未确认”“已有承诺会被触碰”“可用窗口收窄”“继续会承担一项代价”这类抽象机制表达。\n\n每条 directions 都必须保留共同目标，只提出一项最小、可编辑的分支前提，明确目标为什么会因此受阻以及继续时要接受什么取舍；不要把另外两条分支的前提混进来，也不要把三条分支写成同一故事中同时成立的事实。严格使用以下 JSON：
+${getSystemConflictCoreDraftResponseSchema(seed)}`
+}
+
+function buildSystemConflictCoreDraftRepairPrompt(
+  idea: string,
+  seed: StorySeed,
+  candidate: StoryConflictCoreSystemDraft,
+  repairMessage: string,
+): string {
+  const goalInstruction = seed.lockedGoal
+    ? `共同目标必须继续使用已锁定目标“${seed.lockedGoal}”，不要改写 goal。`
+    : 'goal 必须保留原始念头中的主体、对象或关键事件。'
+  return `用户的原始念头：
+---
+${idea}
+---
+
+已确认的故事种子：
+${formatStorySeed(seed)}
+
+上一版系统暂定设定（只修正不合格的地方，仍需返回完整 JSON）：
+${JSON.stringify(candidate)}
+
+上一版检查结果：${repairMessage}
+
+请重写整份 systemDraft。${goalInstruction} 每个 stake、constraint、premise、tradeoff 只能是一句、一个条件或一个取舍；删除所有精确数字、钟点、技术/设备状态、资源操作状态、文书流程、机构信息、他人既定态度、未建立的心理结论和完整行动链。不要把“她答应过不再打扰”改写成对方明确拒绝或禁止联系；不要把未知内容改写成对方的期待或意愿。优先使用抽象且可编辑的表达，例如“信息尚无法确认”“已有承诺会被触碰”“可用窗口正在收窄”。三条 directions 必须恰好存在、mechanismType 互不相同、彼此互斥，并且每条只保留一个最小前提和一个取舍。不要解释，只返回以下 JSON：
+${getSystemConflictCoreDraftResponseSchema(seed)}`
+}
+
+function getSystemConflictCoreDraftResponseSchema(seed: Pick<StorySeed, 'lockedGoal'>): string {
+  if (!seed.lockedGoal) return systemConflictCoreDraftResponseSchema
+
+  return `{
+  "systemDraft": {
+    "stake": "系统暂定的直接代价或想守住的事，只写一个条件或取舍，不超过 64 字",
+    "constraint": "系统暂定的共同起点限制，只写一个条件，不超过 64 字",
+    "directions": [
+      {
+        "label": "不超过 16 字的分支名称",
+        "mechanismType": "information-gap、boundary-conflict、meaning-commitment、initiation-block、window-pressure、resource-constraint 或 commitment-conflict",
+        "premise": "仅属于这一分支的系统暂定前提，只写一个条件，不超过 64 字",
+        "tradeoff": "这一分支继续目标时必须接受的暂定取舍，只写一个取舍，不超过 64 字"
+      },
+      {
+        "label": "不超过 16 字的分支名称",
+        "mechanismType": "与上一条不同的机制类型",
+        "premise": "第二条独立的系统暂定前提，只写一个条件，不超过 64 字",
+        "tradeoff": "第二条对应的暂定取舍，只写一个取舍，不超过 64 字"
+      },
+      {
+        "label": "不超过 16 字的分支名称",
+        "mechanismType": "与前两条不同的机制类型",
+        "premise": "第三条独立的系统暂定前提，只写一个条件，不超过 64 字",
+        "tradeoff": "第三条对应的暂定取舍，只写一个取舍，不超过 64 字"
+      }
+    ]
+  }
+}`
 }
 
 function buildConflictCorePrompt(
@@ -2403,7 +3651,94 @@ function buildConflictCorePrompt(
   const repair = repairContext
     ? `\n上一批核心未通过检查：${formatConflictCoreRepairContext(repairContext)}。请只修正这些结构问题，仍然只输出第一层信息。${getConflictCoreRepairGuidance(repairContext)}`
     : ''
-  return `用户的模糊想法：\n---\n${request.idea}\n---\n\n${formatStorySeed(seed)}\n\n${getConflictCoreGoalInstruction(seed)}${getSparseSeedConflictCoreInstruction(seed)}\n\n扩展尺度：${getExpansionScopeInstruction(request.expansionScope ?? 'keep-scale')}\n${request.preference ? `用户偏好：${request.preference}` : ''}\n${request.excludedTitles?.length ? `请避免重复标题：${request.excludedTitles.join('、')}` : ''}${repair}\n\n第一层对用户只回答三件事：“主角想完成什么？现在被什么卡住？为了继续必须放弃、冒险失去或暂时无法兼得什么？”。保留原始目标，目标必须锚定故事种子中的对象、事件或动作；核心阻碍要直接威胁它，且只写已建立事实构成的因果卡点；tradeoff 只能表达核心取舍。另输出一条仅供后续使用的 decisionFocus，用来约束主角随后必须作出的主动选择；它不进入用户界面。不要写具体画面、现场动作、路线、金额、人物帮助、精确时间、步数、完整行动或结局。严格使用以下 JSON：\n${conflictCoreResponseSchema}`
+  const directionInstructions = !seed.systemDraft?.activeDirection
+    && seed.systemDraft?.directions?.length === generatedOptionCount
+    ? `\n\n系统已规划三个互斥分支。cores[0] 必须只使用分支 1，cores[1] 必须只使用分支 2，cores[2] 必须只使用分支 3；每条 mechanismType 必须逐字等于对应分支的 mechanismType，且 evidence 必须逐字引用对应分支的 premise 或 tradeoff。不得交换、合并或借用分支前提。\n${seed.systemDraft.directions.map((direction, index) => (
+      `分支 ${index + 1}：名称「${direction.label}」；机制「${direction.mechanismType}」；暂定前提「${direction.premise}」；暂定取舍「${direction.tradeoff}」`
+    )).join('\n')}`
+    : ''
+  return `用户的模糊想法：\n---\n${request.idea}\n---\n\n${formatStorySeed(seed)}\n\n${getConflictCoreGoalInstruction(seed)}${getSparseSeedConflictCoreInstruction(seed)}${directionInstructions}\n\n扩展尺度：${getExpansionScopeInstruction(request.expansionScope ?? 'keep-scale')}\n${request.preference ? `用户偏好：${request.preference}` : ''}\n${request.excludedTitles?.length ? `请避免重复标题：${request.excludedTitles.join('、')}` : ''}${repair}\n\n第一层对用户只回答三件事：“主角想完成什么？现在被什么卡住？为了继续必须放弃、冒险失去或暂时无法兼得什么？”。保留原始目标，目标必须锚定故事种子中的对象、事件或动作；核心阻碍要直接威胁它，且只写已建立事实构成的因果卡点；tradeoff 只能表达核心取舍。另输出一条仅供后续使用的 decisionFocus，用来约束主角随后必须作出的主动选择；它不进入用户界面。不要写具体画面、现场动作、路线、金额、人物帮助、精确时间、步数、完整行动或结局。严格使用以下 JSON：\n${conflictCoreResponseSchema}`
+}
+
+function buildConflictCoreBranchPrompt(
+  request: StoryDirectionsRequest,
+  seed: StorySeed,
+  direction: SystemDraftDirection,
+  index: number,
+  repairMessage: string,
+): string {
+  const excludedTitles = request.excludedTitles?.length
+    ? `\n请不要使用这些已淘汰标题：${request.excludedTitles.join('、')}。`
+    : ''
+
+  return `用户的模糊想法：
+---
+${request.idea}
+---
+
+${formatStorySeed(seed)}
+
+这是系统暂定设定中的第 ${index + 1} 条互斥创作分支。系统暂定分支名称：「${direction.label}」
+分支机制类型：${direction.mechanismType}
+分支暂定前提：「${direction.premise}」
+分支暂定取舍：「${direction.tradeoff}」
+
+只生成这一条分支的冲突核心，不要生成其他分支，也不要把其他分支的前提带入本条。preservedGoal 必须使用共同目标；mechanismType 必须逐字为「${direction.mechanismType}」；evidence 至少逐字引用分支暂定前提或分支暂定取舍。系统暂定前提不是用户原话，但用户已选择系统先给一版，因此可以作为本分支的可编辑创作假设，不能扩写成新的背景、人物、规则、结果或完整行动过程。${repairMessage}
+
+  ${excludedTitles}
+
+  严格使用以下 JSON（只返回 core 对象）：
+${conflictCoreReplacementResponseSchema}`
+}
+
+function buildConflictCoreReplacementPrompt(
+  request: StoryDirectionsRequest,
+  seed: StorySeed,
+  target: StoredStoryConflictCore,
+  retainedCores: readonly StoredStoryConflictCore[],
+  violation: ConflictCoreContractViolation,
+): string {
+  const sharedGoal = seed.lockedGoal ?? retainedCores[0]?.preservedGoal ?? target.preservedGoal
+  const retainedMechanismTypes = retainedCores
+    .map((core) => core.mechanismType)
+    .filter((type): type is ConflictCoreMechanismType => type !== undefined)
+  const excludedTitles = request.excludedTitles?.length
+    ? `不要复用这些已淘汰标题：${request.excludedTitles.join('、')}。`
+    : ''
+  const retainedGuidance = retainedCores.length
+    ? `以下核心已经保留，绝不能改写：\n${JSON.stringify(retainedCores)}`
+    : '本轮没有可保留的核心；仍必须生成一个能与后续核心形成不同机制的候选。'
+  const repairContext = { violations: [violation] }
+  const failedDetails = formatConflictCoreRepairContext(repairContext)
+  const repairGuidance = getConflictCoreRepairGuidance(repairContext)
+  const directionIndex = getConflictCoreIndex(target.id)
+  const direction = directionIndex === undefined ? undefined : getSystemDraftDirectionForIndex(seed, directionIndex)
+  const directionGuidance = direction
+    ? `\n该位置绑定系统暂定分支：名称「${direction.label}」；mechanismType 必须逐字为「${direction.mechanismType}」；暂定前提「${direction.premise}」；暂定取舍「${direction.tradeoff}」。evidence 必须逐字引用这条分支的 premise 或 tradeoff；不能使用其他分支的前提。`
+    : ''
+
+  return `用户的原始念头：
+---
+${request.idea}
+---
+
+${formatStorySeed(seed)}
+
+${getConflictCoreGoalInstruction(seed)}${getSparseSeedConflictCoreInstruction(seed)}
+
+扩展尺度：${getExpansionScopeInstruction(request.expansionScope ?? 'keep-scale')}
+${request.preference ? `用户偏好：${request.preference}` : ''}
+
+现在只替换一个未通过审核的冲突核心。原候选：
+${JSON.stringify(target)}
+
+未通过原因：${failedDetails}。请只修正这些问题，仍然只输出第一层信息。${repairGuidance}
+
+共同目标必须逐字为：“${sharedGoal}”。${retainedGuidance}${directionGuidance}
+已保留机制类型：${retainedMechanismTypes.join('、') || '无'}。新候选的 mechanismType 必须不同于已保留类型，并且不能用未建立的事实、场景或结果凑出差异。${excludedTitles}
+
+只生成替换候选，不返回 cores 数组，不修改任何保留候选。严格使用以下 JSON：
+${conflictCoreReplacementResponseSchema}`
 }
 
 function formatConflictCoreRepairContext({ violations }: ConflictCoreRepairContext): string {
@@ -2461,20 +3796,32 @@ function buildConflictCoreReviewPrompt(
   idea: string,
   seed: StorySeed,
   expansionScope: StoryExpansionScope,
-  cores: StoredStoryConflictCores,
+  cores: readonly StoredStoryConflictCore[],
+  repairMessage?: string,
+  comparisonCores: readonly StoredStoryConflictCore[] = cores,
 ): string {
   const evidenceSourceDescription = getConflictCoreEvidenceSourceDescription(seed)
-  return `原始念头：\n---\n${idea}\n---\n\n${formatStorySeed(seed)}\n\n扩展尺度：${getExpansionScopeInstruction(expansionScope)}\n\n候选冲突核心：\n${JSON.stringify(cores)}\n\n请逐条审查目标连续性、目标威胁、单一阻碍、真正两难、主角主动决定、可持续推进和升级空间；再横向比较三条是否拥有不同的阻碍机制。审查 goalAnchoredToSeed 时，必须把 preservedGoal 对照 activeSituation 和 lockedFacts，确认目标保留了原始对象、事件或动作，而不是仅凭“应对/处理/解决”这样的动词通过。先检查每条 mechanism 是否准确概括 obstacle 的因果原因，再检查 evidence 是否逐字出现在 ${evidenceSourceDescription}；evidence 不能让候选凭空增加事实。系统暂定设定若存在，只可作为用户主动选择的本次路径前提，不得标成原文。审查 usesDistinctMechanism 时，先抽象出每条“目标无法继续的原因”，忽略人物、道具、地点和画面，再比较原因是否真的不同。候选核心不得写死精确秒数、步数、距离、路线、倒数、固定先后动作、已经发生的回应和确定结局。只审查第一层字段和内部 decisionFocus、mechanism、evidence，不要求具体场景。conflictCoreId 必须照抄输入，恰好覆盖三条。严格使用：\n${conflictCoreReviewResponseSchema}`
+  const allowedSources = seed.systemDraft
+    ? `\n\n每条候选唯一允许使用的事实源（按 conflictCoreId 严格对应）：\n${formatConflictCoreAllowedSourcesForReview(seed, cores)}`
+    : ''
+  const repair = repairMessage ? `\n${repairMessage}` : ''
+  const comparison = comparisonCores.length !== cores.length
+    ? `\n横向比较参考（只用于判断机制差异和共同目标，不要为这些参考候选返回 review）：\n${JSON.stringify(comparisonCores)}`
+    : ''
+  return `原始念头：\n---\n${idea}\n---\n\n${formatStorySeed(seed)}\n\n扩展尺度：${getExpansionScopeInstruction(expansionScope)}${allowedSources}\n\n待审核候选冲突核心：\n${JSON.stringify(cores)}${comparison}\n\n请逐条审查目标连续性、目标威胁、单一阻碍、真正两难、主角主动决定、可持续推进和升级空间；再横向比较待审核候选是否拥有不同的阻碍机制。审查 goalAnchoredToSeed 时，必须把 preservedGoal 对照 activeSituation 和 lockedFacts，确认目标保留了原始对象、事件或动作，而不是仅凭“应对/处理/解决”这样的动词通过。先检查每条 mechanism 是否准确概括 obstacle 的因果原因，再检查 evidence 是否逐字出现在 ${evidenceSourceDescription}；evidence 不能让候选凭空增加事实。系统暂定设定若存在，只可作为用户主动选择的本次路径前提，不得标成原文，并且每条只能使用上方对应编号的 systemDraftBranch。审查 usesDistinctMechanism 时，先抽象出每条“目标无法继续的原因”，忽略人物、道具、地点和画面，再比较原因是否真的不同。候选核心不得写死精确秒数、步数、距离、路线、倒数、固定先后动作、已经发生的回应和确定结局。只审查第一层字段和内部 decisionFocus、mechanism、evidence，不要求具体场景。conflictCoreId 必须照抄待审核输入，恰好覆盖 ${cores.length} 条。${repair}\n严格使用：\n${getConflictCoreReviewResponseSchema(cores)}`
 }
 
 function buildConflictCoreGroundingReviewPrompt(
   idea: string,
   seed: StorySeed,
-  cores: StoredStoryConflictCores,
+  cores: readonly StoredStoryConflictCore[],
+  repairMessage?: string,
 ): string {
   const systemDraftContext = seed.systemDraft
-    ? '系统暂定设定由系统给出，不是用户原文；但用户选择用它生成当前路径，因此候选可在这三项的字面范围内使用，不能继续补全、扩大或归因给用户。'
+    ? '系统暂定设定由系统给出，不是用户原文；但用户选择用它生成当前路径，因此每个候选可使用共同起点及其同编号分支的 premise、tradeoff，不能继续补全、扩大或归因给用户，也不能借用其他分支的前提。'
     : '没有系统暂定设定，候选只能以用户原文或用户确认的设定作为事实基础。'
+  const allowedSources = formatConflictCoreAllowedSourcesForReview(seed, cores)
+  const repair = repairMessage ? `\n${repairMessage}` : ''
   return `用户原始念头：
 ---
 ${idea}
@@ -2485,11 +3832,33 @@ ${idea}
 故事种子：
 ${formatStorySeed(seed)}
 
+每条候选唯一允许使用的事实源（按 conflictCoreId 严格对应）：
+${allowedSources}
+
 待核对的第一层候选：
 ${JSON.stringify(cores)}
 
-请逐条核对每个候选的 preservedGoal、obstacle、tradeoff、decisionFocus 和 mechanism。只列出没有被用户原始念头明确建立、却被候选写成已成立事实或因果前提的断言；不要评价结构，不要重述所有正确内容。尤其不能因为 evidence 引用了一个宽泛片段，就认可该片段之外的动作、位置、距离、视线、态度、过去经历、规则或结果。若只是把原文中的对象、事件或动作组织成一个尚未发生的最小“决定是否/如何回应”目标，不要将这种必要组织本身列为新增事实。每条候选都必须返回 unestablishedClaims 数组；没有问题时返回空数组。conflictCoreId 必须照抄输入，恰好覆盖三条。严格使用：
-${conflictCoreGroundingReviewResponseSchema}`
+请逐条核对每个候选的 preservedGoal、obstacle、tradeoff、decisionFocus 和 mechanism。只列出没有被该候选允许事实源建立、却被候选写成已成立事实或因果前提的断言；不要评价结构，不要重述所有正确内容。systemDraftCommon 和 systemDraftBranch 是明确允许的系统暂定前提，不能仅因它们不在原始念头中就列为 unestablishedClaims；但候选仍不能把它们扩写成新的动作、位置、距离、视线、态度、过去经历、规则或结果。尤其不能因为 evidence 引用了一个宽泛片段，就认可该片段之外的断言。若只是把允许事实源中的对象、事件或动作组织成一个尚未发生的最小“决定是否/如何回应”目标，不要将这种必要组织本身列为新增事实。每条候选都必须返回 unestablishedClaims 数组；没有问题时返回空数组。conflictCoreId 必须照抄输入，并且只覆盖以上 ${cores.length} 条候选。${repair}
+
+严格使用：
+${getConflictCoreGroundingReviewResponseSchema(cores)}`
+}
+
+function getConflictCoreGroundingReviewResponseSchema(
+  cores: readonly Pick<StoredStoryConflictCore, 'id'>[],
+): string {
+  const reviews = cores
+    .map((core) => `    {
+      "conflictCoreId": "${core.id}",
+      "unestablishedClaims": []
+    }`)
+    .join(',\n')
+
+  return `{
+  "reviews": [
+${reviews}
+  ]
+}`
 }
 
 function buildPredicamentExpansionPrompt(
@@ -2503,7 +3872,9 @@ function buildPredicamentExpansionPrompt(
 
 function formatStorySeed(seed: StorySeed): string {
   const systemDraft = seed.systemDraft
-    ? `\n- 系统暂定设定（用户选择系统先给一版；不是用户原文，可作为本次路径的可调整前提）：目标「${seed.systemDraft.goal}」；代价「${seed.systemDraft.stake}」；限制「${seed.systemDraft.constraint}」`
+    ? `\n- 系统暂定共同起点（用户选择系统先给一版；不是用户原文，可作为本次路径的可调整前提）：目标「${seed.systemDraft.goal}」；代价「${seed.systemDraft.stake}」；限制「${seed.systemDraft.constraint}」${seed.systemDraft.activeDirection
+      ? formatSystemDraftDirections([seed.systemDraft.activeDirection])
+      : formatSystemDraftDirections(seed.systemDraft.directions)}`
     : ''
   return `用户确认的故事种子（锁定目标与锁定事实均来自用户原文或用户补充确认，必须逐字保留）：
 - 主体：${seed.subject}
@@ -2515,15 +3886,62 @@ ${systemDraft}
 - 仍未知且不得作为关键因果依据：${seed.unknowns.join('、') || '未给出的背景信息'}；不影响选择与后果的临时场景细节可以自然补写。`
 }
 
+function formatSystemDraftDirections(
+  directions: StoryConflictCoreSystemDraft['directions'],
+): string {
+  if (!directions?.length) return ''
+
+  const label = directions.length === 1 ? '；当前选定分支：' : '；三条互斥分支：'
+  return `${label}${directions.map((direction, index) => (
+    `${index + 1})「${direction.label}」/${direction.mechanismType}：前提「${direction.premise}」；取舍「${direction.tradeoff}」`
+  )).join('；')}`
+}
+
+function getConflictCoreAllowedSourceRule(seed: Pick<StorySeed, 'systemDraft'>): string {
+  if (!seed.systemDraft) {
+    return '允许事实源规则：本次没有系统暂定设定。所有关键因果与 evidence 只能来自 activeSituation 或 lockedFacts；任何额外的背景、关系、规则、资源、行动或结果都必须拒绝。'
+  }
+
+  return '允许事实源规则（优先于前文所有“仅原文”表述）：用户主动选择了系统暂定路线。每个候选的事实源只能是用户原文摘录、系统暂定共同起点，以及与该候选同编号的系统暂定分支 premise、tradeoff。系统暂定内容是本次可编辑的路线前提，不是用户原话；不得把它归因给用户，也不得补写、扩大或借用其他分支的事实。'
+}
+
+function formatConflictCoreAllowedSourcesForReview(
+  seed: StorySeed,
+  cores: readonly Pick<StoredStoryConflictCore, 'id'>[],
+): string {
+  const userConfirmed = getUserConfirmedSeedSourceTexts(seed)
+  const commonSystemDraft = seed.systemDraft
+    ? [seed.systemDraft.goal, seed.systemDraft.stake, seed.systemDraft.constraint]
+    : undefined
+
+  return JSON.stringify(cores.map((core) => {
+    const directionIndex = getConflictCoreIndex(core.id)
+    const direction = directionIndex === undefined
+      ? seed.systemDraft?.activeDirection
+      : getSystemDraftDirection(seed, directionIndex)
+
+    return {
+      conflictCoreId: core.id,
+      userConfirmed,
+      ...(commonSystemDraft ? { systemDraftCommon: commonSystemDraft } : {}),
+      ...(direction ? { systemDraftBranch: [direction.premise, direction.tradeoff] } : {}),
+    }
+  }))
+}
+
 function getSystemDraftPromptSupplement(seed: Pick<StorySeed, 'systemDraft'>): string {
   if (!seed.systemDraft) return ''
 
-  return '\n\n当前种子包含“系统暂定设定”。这是用户主动选择“让系统先给一版”后采用的本次路径前提，不是用户原文。对于这一明确标出的系统路线，本段优先于前文关于“只能使用原文”的一般表述：evidence 和因果依据可以逐字引用其中的目标、代价、限制，但绝不能把它们写成用户说过的事实，也不能在它们之外补写新的背景、人物、规则或结果。'
+  const activeDirection = seed.systemDraft.activeDirection
+  const branchRule = activeDirection
+    ? '后续已选定一条分支；只允许使用该分支的 premise、tradeoff，不得再引用其他方向。'
+    : '三条分支是互斥备选，不得把其他分支的 premise 当作当前候选的事实。'
+  return `\n\n当前种子包含“系统暂定设定”。这是用户主动选择“让系统先给一版”后采用的本次路径前提，不是用户原文。对于这一明确标出的系统路线，本段优先于前文关于“只能使用原文”的一般表述：evidence 和因果依据可以逐字引用共同起点或当前候选所属分支的 premise、tradeoff，但绝不能把它们写成用户说过的事实，也不能在所属分支之外补写新的背景、人物、规则或结果。${branchRule}`
 }
 
 function getConflictCoreEvidenceSourceDescription(seed: Pick<StorySeed, 'systemDraft'>): string {
   return seed.systemDraft
-    ? 'activeSituation、lockedFacts 或系统暂定设定中'
+    ? 'activeSituation、lockedFacts、系统暂定共同起点或当前候选所属的系统暂定分支中'
     : 'activeSituation 或 lockedFacts 中'
 }
 
@@ -2541,7 +3959,7 @@ function getConflictCoreGoalInstruction(seed: StorySeed): string {
 
 function getSparseSeedConflictCoreInstruction(seed: StorySeed): string {
   if (seed.systemDraft) {
-    return '\n系统暂定设定使用规则：三条机制可用其目标、代价和限制作为逐字证据；它们只解释当前路径为什么会卡住，不能被扩写为用户既有背景、他人态度、具体行动过程或结局。'
+    return '\n系统暂定设定使用规则：每条候选必须绑定 directions 中同索引的分支前提，只能使用共同起点和该分支的 premise、tradeoff 作为逐字证据；其他分支的前提不得混入。它们只解释当前分支为什么会卡住，不能被扩写为用户既有背景、他人态度、具体行动过程或结局。'
   }
 
   if (!isSingleSituationSeed(seed)) return ''
@@ -3180,13 +4598,11 @@ function parseStorySeedContextPrefill(
   seed: StorySeedDraft,
 ): StoryConflictCoreContextPrefill {
   const fallback = getConflictCoreContextPrefill(seed)
-  if (value === undefined || value === null) return fallback
+  if (!isPlainRecord(value)) return fallback
 
-  const message = '模型没有识别出可确认的原始念头设定，请重试。'
-  const record = expectRecord(value, message, invalidModelOutputContext)
-  const goal = readNullableText(record, 'goal', message, maximumConflictCoreContextLength, invalidModelOutputContext)
-  const stake = readNullableText(record, 'stake', message, maximumConflictCoreContextLength, invalidModelOutputContext)
-  const constraint = readNullableText(record, 'constraint', message, maximumConflictCoreContextLength, invalidModelOutputContext)
+  const goal = readOptionalGeneratedText(value.goal, maximumConflictCoreContextLength)
+  const stake = readOptionalGeneratedText(value.stake, maximumConflictCoreContextLength)
+  const constraint = readOptionalGeneratedText(value.constraint, maximumConflictCoreContextLength)
 
   return {
     ...fallback,
@@ -3228,7 +4644,7 @@ function parseStorySeedFields(
 
 function parseConflictCoreReviews(
   value: unknown,
-  cores: StoredStoryConflictCores,
+  cores: readonly StoredStoryConflictCore[],
 ): ConflictCoreContractReview[] {
   const message = '模型没有完成冲突核心的质量检查，请重试。'
   return parseCompleteReviewSet(
@@ -3266,7 +4682,7 @@ function parseConflictCoreReviews(
 
 function parseConflictCoreGroundingReviews(
   value: unknown,
-  cores: StoredStoryConflictCores,
+  cores: readonly StoredStoryConflictCore[],
 ): ConflictCoreGroundingReview[] {
   const message = '模型没有完成冲突核心的事实核对，请重试。'
   return parseCompleteReviewSet(

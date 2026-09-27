@@ -1,12 +1,17 @@
 import { useState } from 'react'
 import { StoryApiError } from './storyApi'
-import type { GenerationStatus, StoryConflictCoreContextPrefill } from './types'
+import type {
+  GenerationStatus,
+  StoryConflictCoreContextPrefill,
+  StoryConflictCoreSystemDraft,
+} from './types'
 
 export interface StoryStageRequest {
   stageStatus: GenerationStatus
   stageError: string | undefined
   stageErrorCode: string | undefined
   stageErrorContextPrefill: StoryConflictCoreContextPrefill | undefined
+  stageErrorSystemDraftPrefill: StoryConflictCoreSystemDraft | undefined
   clearStageFeedback: () => void
   runStageRequest: <Result>(
     request: () => Promise<Result>,
@@ -14,17 +19,30 @@ export interface StoryStageRequest {
   ) => Promise<void>
 }
 
+interface StageErrorDetails {
+  message: string
+  code: string | undefined
+  conflictCoreContextPrefill: StoryConflictCoreContextPrefill | undefined
+  systemDraftPrefill: StoryConflictCoreSystemDraft | undefined
+}
+
 export function useStoryStageRequest(): StoryStageRequest {
   const [stageStatus, setStageStatus] = useState<GenerationStatus>('idle')
   const [stageError, setStageError] = useState<string>()
   const [stageErrorCode, setStageErrorCode] = useState<string>()
   const [stageErrorContextPrefill, setStageErrorContextPrefill] = useState<StoryConflictCoreContextPrefill>()
+  const [stageErrorSystemDraftPrefill, setStageErrorSystemDraftPrefill] = useState<StoryConflictCoreSystemDraft>()
 
-  const clearStageFeedback = () => {
-    setStageStatus('idle')
+  const clearStageErrors = () => {
     setStageError(undefined)
     setStageErrorCode(undefined)
     setStageErrorContextPrefill(undefined)
+    setStageErrorSystemDraftPrefill(undefined)
+  }
+
+  const clearStageFeedback = () => {
+    setStageStatus('idle')
+    clearStageErrors()
   }
 
   const runStageRequest = async <Result>(
@@ -32,18 +50,18 @@ export function useStoryStageRequest(): StoryStageRequest {
     applyResult: (result: Result) => void,
   ) => {
     setStageStatus('loading')
-    setStageError(undefined)
-    setStageErrorCode(undefined)
-    setStageErrorContextPrefill(undefined)
+    clearStageErrors()
 
     try {
       applyResult(await request())
       clearStageFeedback()
     } catch (error) {
+      const details = getStageErrorDetails(error)
       setStageStatus('error')
-      setStageError(getStageErrorMessage(error))
-      setStageErrorCode(getStageErrorCode(error))
-      setStageErrorContextPrefill(getStageErrorContextPrefill(error))
+      setStageError(details.message)
+      setStageErrorCode(details.code)
+      setStageErrorContextPrefill(details.conflictCoreContextPrefill)
+      setStageErrorSystemDraftPrefill(details.systemDraftPrefill)
     }
   }
 
@@ -52,19 +70,26 @@ export function useStoryStageRequest(): StoryStageRequest {
     stageError,
     stageErrorCode,
     stageErrorContextPrefill,
+    stageErrorSystemDraftPrefill,
     clearStageFeedback,
     runStageRequest,
   }
 }
 
-function getStageErrorMessage(error: unknown): string {
-  return error instanceof StoryApiError ? error.message : '生成没有完成，请稍后重试。'
-}
+function getStageErrorDetails(error: unknown): StageErrorDetails {
+  if (error instanceof StoryApiError) {
+    return {
+      message: error.message,
+      code: error.code,
+      conflictCoreContextPrefill: error.conflictCoreContextPrefill,
+      systemDraftPrefill: error.systemDraftPrefill,
+    }
+  }
 
-function getStageErrorCode(error: unknown): string | undefined {
-  return error instanceof StoryApiError ? error.code : undefined
-}
-
-function getStageErrorContextPrefill(error: unknown): StoryConflictCoreContextPrefill | undefined {
-  return error instanceof StoryApiError ? error.conflictCoreContextPrefill : undefined
+  return {
+    message: '生成没有完成，请稍后重试。',
+    code: undefined,
+    conflictCoreContextPrefill: undefined,
+    systemDraftPrefill: undefined,
+  }
 }

@@ -1,4 +1,7 @@
-import type { StoryConflictCoreContextPrefill } from '../../shared/story-contract.js'
+import type {
+  StoryConflictCoreContextPrefill,
+  StoryConflictCoreSystemDraft,
+} from '../../shared/story-contract.js'
 
 export class AppError extends Error {
   constructor(
@@ -6,6 +9,8 @@ export class AppError extends Error {
     public readonly statusCode: number,
     public readonly code: string,
     public readonly conflictCoreContextPrefill?: StoryConflictCoreContextPrefill,
+    public readonly systemDraftPrefill?: StoryConflictCoreSystemDraft,
+    public readonly retryAfterMs?: number,
   ) {
     super(message)
     this.name = 'AppError'
@@ -14,6 +19,19 @@ export class AppError extends Error {
 
 const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions'
 const REQUEST_TIMEOUT_MS = 90_000
+const MAX_QWEN_REQUEST_ATTEMPTS = 2
+const QWEN_RETRY_BASE_DELAY_MS = 700
+const QWEN_RETRY_MAX_DELAY_MS = 5_000
+
+const retryableQwenRequestErrorCodes = new Set([
+  'QWEN_EMPTY_RESPONSE',
+  'QWEN_INVALID_JSON',
+  'QWEN_INVALID_RESPONSE',
+  'QWEN_NETWORK_ERROR',
+  'QWEN_RATE_LIMITED',
+  'QWEN_TIMEOUT',
+  'QWEN_UPSTREAM_ERROR',
+])
 
 interface QwenMessage {
   role: 'system' | 'user'
@@ -59,15 +77,41 @@ export async function requestQwenJson({
   }
 
   try {
-    return await sendRequest(request, apiKey)
+    return await sendRequestWithRetry(request, apiKey)
   } catch (error) {
-    if (error instanceof AppError && error.statusCode === 400 && error.message.includes('response_format')) {
+    if (
+      error instanceof AppError
+      && error.code === 'QWEN_REQUEST_ERROR'
+      && /response[_\s-]?format/i.test(error.message)
+    ) {
       const { response_format: _responseFormat, ...fallbackRequest } = request
-      return sendRequest(fallbackRequest, apiKey)
+      return sendRequestWithRetry(fallbackRequest, apiKey)
     }
 
     throw error
   }
+}
+
+async function sendRequestWithRetry(request: QwenRequest, apiKey: string): Promise<unknown> {
+  let lastError: unknown
+
+  for (let attempt = 0; attempt < MAX_QWEN_REQUEST_ATTEMPTS; attempt += 1) {
+    try {
+      return await sendRequest(request, apiKey)
+    } catch (error) {
+      lastError = error
+      if (!isRetryableQwenRequestError(error) || attempt === MAX_QWEN_REQUEST_ATTEMPTS - 1) {
+        throw error
+      }
+
+      const retryDelayMs = getQwenRetryDelayMs(error, attempt)
+      if (retryDelayMs === undefined) throw error
+
+      await waitForRetry(retryDelayMs)
+    }
+  }
+
+  throw lastError ?? new AppError('Qwen 请求没有完成，请稍后重试。', 502, 'QWEN_UPSTREAM_ERROR')
 }
 
 async function sendRequest(request: QwenRequest, apiKey: string): Promise<unknown> {
@@ -87,7 +131,7 @@ async function sendRequest(request: QwenRequest, apiKey: string): Promise<unknow
     const responseBody = await readResponseBody(response)
 
     if (!response.ok) {
-      throw createQwenError(response.status, responseBody)
+      throw createQwenError(response.status, responseBody, getRetryAfterMs(response.headers.get('retry-after')))
     }
 
     return parseModelJson(getMessageContent(responseBody))
@@ -114,17 +158,67 @@ async function readResponseBody(response: Response): Promise<unknown> {
   }
 }
 
-function createQwenError(statusCode: number, responseBody: unknown): AppError {
+function createQwenError(statusCode: number, responseBody: unknown, retryAfterMs?: number): AppError {
   if (statusCode === 401 || statusCode === 403) {
     return new AppError('Qwen API Key 无效或没有调用权限。', 502, 'QWEN_AUTH_ERROR')
   }
 
   if (statusCode === 429) {
-    return new AppError('Qwen 当前请求较多，请稍后重试。', 429, 'QWEN_RATE_LIMITED')
+    return new AppError(
+      'Qwen 当前请求较多，请稍后重试。',
+      429,
+      'QWEN_RATE_LIMITED',
+      undefined,
+      undefined,
+      retryAfterMs,
+    )
   }
 
   const upstreamMessage = getErrorMessage(responseBody)
-  return new AppError(upstreamMessage || 'Qwen 暂时无法生成内容，请稍后重试。', 502, 'QWEN_UPSTREAM_ERROR')
+  if (statusCode === 408 || statusCode === 409 || statusCode >= 500) {
+    return new AppError(
+      upstreamMessage || 'Qwen 暂时无法生成内容，请稍后重试。',
+      502,
+      'QWEN_UPSTREAM_ERROR',
+      undefined,
+      undefined,
+      retryAfterMs,
+    )
+  }
+
+  return new AppError(
+    upstreamMessage || 'Qwen 拒绝了本次请求，请检查模型和服务配置。',
+    502,
+    'QWEN_REQUEST_ERROR',
+  )
+}
+
+function isRetryableQwenRequestError(error: unknown): error is AppError {
+  return error instanceof AppError && retryableQwenRequestErrorCodes.has(error.code)
+}
+
+function getQwenRetryDelayMs(error: AppError, attempt: number): number | undefined {
+  if (typeof error.retryAfterMs === 'number') {
+    return error.retryAfterMs <= QWEN_RETRY_MAX_DELAY_MS ? Math.max(error.retryAfterMs, 0) : undefined
+  }
+
+  return Math.min(QWEN_RETRY_BASE_DELAY_MS * 2 ** attempt, QWEN_RETRY_MAX_DELAY_MS)
+}
+
+function getRetryAfterMs(value: string | null): number | undefined {
+  if (!value) return undefined
+
+  const seconds = Number(value)
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000
+
+  const retryAt = Date.parse(value)
+  if (Number.isNaN(retryAt)) return undefined
+
+  return Math.max(retryAt - Date.now(), 0)
+}
+
+function waitForRetry(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs))
 }
 
 function getMessageContent(responseBody: unknown): string {

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type {
   GeneratedStory,
   StoryHeadTailOption,
@@ -16,6 +16,7 @@ import type {
   StoryTurnOption,
   StoryView,
 } from './types'
+import { getInitialStoryIdeaExample, rememberStoryIdeaExample } from './storyIdeaExamples'
 
 export type StoryPlanResetPoint = 'conflict-core' | 'predicament' | 'head-tail'
 
@@ -76,7 +77,7 @@ export interface StorySessionState {
 
 export function useStorySessionState(): StorySessionState {
   const [view, setView] = useState<StoryView>('opening')
-  const [idea, setIdea] = useState('')
+  const [idea, setIdea] = useState(getInitialStoryIdeaExample)
   const [seed, setSeed] = useState<StorySeed>()
   const [conflictCores, setConflictCores] = useState<StoryConflictCores | []>([])
   const [conflictCoreContext, setConflictCoreContext] = useState<StoryConflictCoreContext>({})
@@ -96,6 +97,10 @@ export function useStorySessionState(): StorySessionState {
   const [revision, setRevision] = useState(0)
 
   const trimmedIdea = idea.trim()
+
+  useEffect(() => {
+    rememberStoryIdeaExample(idea)
+  }, [])
   const selectedConflictCore = useMemo(
     () => conflictCores.find((core) => core.id === selectedConflictCoreId),
     [conflictCores, selectedConflictCoreId],

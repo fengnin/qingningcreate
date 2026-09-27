@@ -35,6 +35,8 @@ import type {
 } from '../story/types'
 import type { StorySession } from '../story/useStorySession'
 
+const maximumStoryIdeaLength = 120
+
 const journeyStages: { step: StoryStep; label: string; detail: string }[] = [
   { step: 1, label: '冲突核心', detail: '先确定它卡在哪里' },
   { step: 2, label: '具体困境', detail: '再落到当前局面' },
@@ -86,12 +88,12 @@ export function OpeningScreen({ session }: { session: StorySession }) {
           <textarea
             value={session.idea}
             onChange={(event) => session.updateIdea(event.target.value)}
-            placeholder="例如：李明第一天自己去上学。"
-            maxLength={60}
+            placeholder="例如：毕业前最后一晚，林夏在社团仓库整理器材时发现一台借来的相机。"
+            maxLength={maximumStoryIdeaLength}
           />
           <span className="field-footer">
             <button className="text-action" type="button" onClick={session.useExample}><RefreshCcw size={15} /> 换个示例</button>
-            <small>{session.idea.length} / 60</small>
+            <small>{session.idea.length} / {maximumStoryIdeaLength}</small>
           </span>
         </label>
         <button className="primary-action opening-action" type="button" onClick={() => void session.openConflictCorePicker()} disabled={!session.trimmedIdea}>
@@ -110,10 +112,21 @@ export function ConflictCorePickerScreen({ session }: { session: StorySession })
   const [hasEnteredContextRoute, setHasEnteredContextRoute] = useState(false)
   const [isSystemDraftEditorOpen, setIsSystemDraftEditorOpen] = useState(false)
   const systemDraft = session.seed?.systemDraft
+  const hasSystemDraftGenerationFailure = session.stageErrorCode === 'SYSTEM_DRAFT_GENERATION_FAILED'
+  const hasSystemDraftConflictCoreFailure = session.stageErrorCode === 'SYSTEM_DRAFT_CONFLICT_CORE_RETRY_EXHAUSTED'
+  const systemDraftPrefill = hasSystemDraftGenerationFailure
+    ? session.stageErrorSystemDraftPrefill
+    : undefined
+  const isSystemDraftFallbackEditorOpen = contextRouteView === undefined && Boolean(systemDraftPrefill)
   const isContextChoiceVisible = contextRouteView === 'choice'
-    || (contextRouteView === undefined && session.stageErrorCode === 'CONFLICT_CORE_NEEDS_CONTEXT')
+    || (contextRouteView === undefined && (
+      session.stageErrorCode === 'CONFLICT_CORE_NEEDS_CONTEXT'
+      || (hasSystemDraftGenerationFailure && !isSystemDraftFallbackEditorOpen)
+    ))
   const isManualContextFormOpen = contextRouteView === 'manual'
-  const isContextRecoveryVisible = isContextChoiceVisible || isManualContextFormOpen
+  const isContextRecoveryVisible = isContextChoiceVisible
+    || isManualContextFormOpen
+    || isSystemDraftFallbackEditorOpen
 
   const showContextRouteChoice = () => {
     setIsSystemDraftEditorOpen(false)
@@ -137,14 +150,15 @@ export function ConflictCorePickerScreen({ session }: { session: StorySession })
     await session.applyConflictCoreContext(context)
   }
   const retryConflictCoreStage = () => {
-    if (session.stageErrorCode === 'SYSTEM_DRAFT_GENERATION_FAILED') {
-      void session.generateSystemDraft()
+    if (hasSystemDraftGenerationFailure || hasSystemDraftConflictCoreFailure) {
+      generateSystemDraft()
       return
     }
 
     void session.retryCurrentStage()
   }
   const shouldReturnToContextChoice = isManualContextFormOpen
+    || isSystemDraftFallbackEditorOpen
     || isSystemDraftEditorOpen
     || (hasEnteredContextRoute && !isContextChoiceVisible)
   const goBackFromConflictCore = () => {
@@ -173,6 +187,9 @@ export function ConflictCorePickerScreen({ session }: { session: StorySession })
           session={session}
           disabled={isLoading}
           isManualContextFormOpen={isManualContextFormOpen}
+          isSystemDraftFallbackEditorOpen={isSystemDraftFallbackEditorOpen}
+          hasSystemDraftGenerationFailure={hasSystemDraftGenerationFailure}
+          systemDraftPrefill={systemDraftPrefill}
           onGenerateSystemDraft={generateSystemDraft}
           onChooseManualContext={chooseManualContext}
           onApplyContext={applyManualContext}
@@ -181,6 +198,7 @@ export function ConflictCorePickerScreen({ session }: { session: StorySession })
         <GenerationError
           message={session.stageError}
           onRetry={retryConflictCoreStage}
+          retryLabel={hasSystemDraftConflictCoreFailure ? '重新生成系统暂定分支' : undefined}
         />
       ) : null}
       {!isLoading && !isContextRecoveryVisible && hasConflictCores && (
@@ -219,6 +237,7 @@ export function ConflictCorePickerScreen({ session }: { session: StorySession })
             {session.conflictCores.map((core, index) => (
               <ConflictCoreOption
                 core={core}
+                branchPremise={systemDraft?.directions?.length === 3 ? systemDraft.directions[index]?.premise : undefined}
                 index={index}
                 key={core.id}
                 selected={core.id === session.selectedConflictCoreId}
@@ -247,6 +266,9 @@ function ConflictCoreContextRecovery({
   session,
   disabled,
   isManualContextFormOpen,
+  isSystemDraftFallbackEditorOpen,
+  hasSystemDraftGenerationFailure,
+  systemDraftPrefill,
   onGenerateSystemDraft,
   onChooseManualContext,
   onApplyContext,
@@ -254,10 +276,31 @@ function ConflictCoreContextRecovery({
   session: StorySession
   disabled: boolean
   isManualContextFormOpen: boolean
+  isSystemDraftFallbackEditorOpen: boolean
+  hasSystemDraftGenerationFailure: boolean
+  systemDraftPrefill: StoryConflictCoreSystemDraft | undefined
   onGenerateSystemDraft: () => void
   onChooseManualContext: () => void
   onApplyContext: (context: StoryConflictCoreContext) => Promise<void>
 }) {
+  if (isSystemDraftFallbackEditorOpen && systemDraftPrefill) {
+    return (
+      <ConflictCoreContextForm
+        idea={session.trimmedIdea}
+        initialContext={mergeConflictCoreContext(
+          systemDraftPrefill,
+          session.stageErrorContextPrefill,
+          session.conflictCoreContext,
+        )}
+        prefill={session.stageErrorContextPrefill}
+        systemDraft={systemDraftPrefill}
+        isSystemDraftRecovery
+        disabled={disabled}
+        onApplyContext={onApplyContext}
+      />
+    )
+  }
+
   if (isManualContextFormOpen) {
     return (
       <ConflictCoreContextForm
@@ -274,6 +317,7 @@ function ConflictCoreContextRecovery({
     <ConflictCoreContextChoice
       idea={session.trimmedIdea}
       disabled={disabled}
+      hasSystemDraftGenerationFailure={hasSystemDraftGenerationFailure}
       onGenerateSystemDraft={onGenerateSystemDraft}
       onChooseManualContext={onChooseManualContext}
     />
@@ -298,7 +342,24 @@ function SystemDraftSummary({
         <div><dt>代价</dt><dd>{draft.stake}</dd></div>
         <div><dt>限制</dt><dd>{draft.constraint}</dd></div>
       </dl>
-      <p>这组前提由系统提出，不是原始念头；当前冲突核心会以它为基础继续展开。</p>
+      {draft.directions?.length === 3 && (
+        <ol className="system-draft-directions" aria-label="系统暂定冲突方向">
+          {draft.directions.map((direction, index) => (
+            <li key={`${direction.mechanismType}-${direction.label}`}>
+              <span>{String(index + 1).padStart(2, '0')}</span>
+              <div>
+                <strong>{direction.label}</strong>
+                <p>{direction.premise}</p>
+                <p className="system-draft-direction-tradeoff"><small>取舍</small>{direction.tradeoff}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+      <p>{draft.directions?.length === 3
+        ? '三条前提是互斥的系统暂定分支；选中一条后，只有该方向会进入后续故事。'
+        : '这组前提由系统提出，不是原始念头；当前冲突核心会以它为基础继续展开。'}
+      </p>
     </section>
   )
 }
@@ -640,7 +701,19 @@ function StageActions({ onRegenerate, onNext, nextLabel, disabled }: {
   )
 }
 
-function ConflictCoreOption({ core, index, selected, onSelect }: { core: StoryConflictCore; index: number; selected: boolean; onSelect: (id: string) => void }) {
+function ConflictCoreOption({
+  core,
+  branchPremise,
+  index,
+  selected,
+  onSelect,
+}: {
+  core: StoryConflictCore
+  branchPremise?: string
+  index: number
+  selected: boolean
+  onSelect: (id: string) => void
+}) {
   return (
     <button
       className={`conflict-core-option ${selected ? 'is-selected' : ''}`}
@@ -655,6 +728,7 @@ function ConflictCoreOption({ core, index, selected, onSelect }: { core: StoryCo
       </span>
       <span className="conflict-core-option-content">
         <strong className="conflict-core-option-title">{core.title}</strong>
+        {branchPremise && <span className="conflict-core-option-premise"><small>本方向暂定</small><b>{branchPremise}</b></span>}
         <span className="conflict-core-option-obstacle">
           <small>核心阻碍</small>
           <b>{core.obstacle}</b>
@@ -1016,9 +1090,10 @@ function GenerationNotice({ label, detail }: { label: string; detail: string }) 
   return <div className="generation-notice" role="status"><span className="generation-spinner" aria-hidden="true" /><div><strong>{label}</strong><p>{detail}</p></div></div>
 }
 
-function GenerationError({ message, onRetry }: {
+function GenerationError({ message, onRetry, retryLabel = '再试一次' }: {
   message: string
   onRetry: () => void
+  retryLabel?: string
 }) {
   return (
     <div className="generation-error" role="alert">
@@ -1026,7 +1101,7 @@ function GenerationError({ message, onRetry }: {
       <div>
         <strong>这一步没有生成成功</strong>
         <p>{message}</p>
-        <button className="text-action" type="button" onClick={onRetry}><RefreshCcw size={14} /> 再试一次</button>
+        <button className="text-action" type="button" onClick={onRetry}><RefreshCcw size={14} /> {retryLabel}</button>
       </div>
     </div>
   )

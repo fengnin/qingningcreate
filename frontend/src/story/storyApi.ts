@@ -4,6 +4,8 @@ import type {
   StoryConflict,
   StoryConflictCore,
   StoryConflictCoreContextPrefill,
+  StoryConflictCoreMechanismType,
+  StoryConflictCoreSystemDraft,
   StoryBeat,
   StoryDirectionsRequest,
   StoryDirectionsResponse,
@@ -37,6 +39,7 @@ export class StoryApiError extends Error {
     message: string,
     public readonly code?: string,
     public readonly conflictCoreContextPrefill?: StoryConflictCoreContextPrefill,
+    public readonly systemDraftPrefill?: StoryConflictCoreSystemDraft,
   ) {
     super(message)
     this.name = 'StoryApiError'
@@ -93,6 +96,7 @@ async function postJson<T>(
       error?.error.message ?? '生成没有完成，请稍后重试。',
       error?.error.code,
       error?.error.conflictCoreContextPrefill,
+      error?.error.systemDraftPrefill,
     )
   }
 
@@ -189,11 +193,52 @@ function parseSystemConflictCoreDraft(value: unknown): StorySeed['systemDraft'] 
   if (value === undefined || value === null) return undefined
 
   const record = expectRecord(value)
+  const directions = parseSystemDraftDirections(record.directions)
+  const activeDirection = parseSystemDraftDirection(record.activeDirection)
   return {
     goal: readText(record, 'goal'),
     stake: readText(record, 'stake'),
     constraint: readText(record, 'constraint'),
+    ...(directions ? { directions } : {}),
+    ...(activeDirection ? { activeDirection } : {}),
   }
+}
+
+function parseSystemDraftDirections(
+  value: unknown,
+): StoryConflictCoreSystemDraft['directions'] {
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value) || (value.length !== 1 && value.length !== GENERATED_OPTION_COUNT)) throwInvalidResponse()
+
+  return value.map((item) => parseSystemDraftDirection(item)!)
+}
+
+function parseSystemDraftDirection(
+  value: unknown,
+): StoryConflictCoreSystemDraft['activeDirection'] {
+  if (value === undefined || value === null) return undefined
+  const record = expectRecord(value)
+  return {
+    label: readText(record, 'label'),
+    mechanismType: readSystemDraftMechanismType(record.mechanismType),
+    premise: readText(record, 'premise'),
+    tradeoff: readText(record, 'tradeoff'),
+  }
+}
+
+function readSystemDraftMechanismType(value: unknown): StoryConflictCoreMechanismType {
+  if (
+    value === 'information-gap'
+    || value === 'boundary-conflict'
+    || value === 'meaning-commitment'
+    || value === 'initiation-block'
+    || value === 'window-pressure'
+    || value === 'resource-constraint'
+    || value === 'commitment-conflict'
+  ) {
+    return value
+  }
+  throwInvalidResponse()
 }
 
 function parseStoryPredicament(value: unknown): StoryPredicament {
@@ -543,11 +588,13 @@ function parseApiErrorResponse(value: unknown): ApiErrorResponse | undefined {
   if (typeof code !== 'string' || !code || typeof message !== 'string' || !message) return undefined
 
   const conflictCoreContextPrefill = parseConflictCoreContextPrefill(value.error.conflictCoreContextPrefill)
+  const systemDraftPrefill = parseSystemDraftPrefill(value.error.systemDraftPrefill)
   return {
     error: {
       code,
       message,
       ...(conflictCoreContextPrefill ? { conflictCoreContextPrefill } : {}),
+      ...(systemDraftPrefill ? { systemDraftPrefill } : {}),
     },
   }
 }
@@ -564,6 +611,33 @@ function parseConflictCoreContextPrefill(value: unknown): StoryConflictCoreConte
     ...(goal ? { goal } : {}),
     ...(stake ? { stake } : {}),
     ...(constraint ? { constraint } : {}),
+  }
+}
+
+function parseSystemDraftPrefill(value: unknown): StoryConflictCoreSystemDraft | undefined {
+  if (!isRecord(value)) return undefined
+
+  const goal = readErrorPrefillText(value.goal)
+  const stake = readErrorPrefillText(value.stake)
+  const constraint = readErrorPrefillText(value.constraint)
+  if (!goal || !stake || !constraint) return undefined
+
+  let directions: StoryConflictCoreSystemDraft['directions']
+  let activeDirection: StoryConflictCoreSystemDraft['activeDirection']
+  try {
+    directions = parseSystemDraftDirections(value.directions)
+    activeDirection = parseSystemDraftDirection(value.activeDirection)
+  } catch {
+    // Optional recovery data must never hide the server's actionable error.
+    directions = undefined
+    activeDirection = undefined
+  }
+  return {
+    goal,
+    stake,
+    constraint,
+    ...(directions ? { directions } : {}),
+    ...(activeDirection ? { activeDirection } : {}),
   }
 }
 

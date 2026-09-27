@@ -10,6 +10,7 @@ import type {
   StoryConflictCores,
   StoryConflictCoreContext,
   StoryConflictCoreContextPrefill,
+  StoryConflictCoreSystemDraft,
   StoryPredicament,
   StoryPredicamentApproach,
   StorySeed,
@@ -45,6 +46,7 @@ export interface StorySession extends StorySessionActions {
   stageError: string | undefined
   stageErrorCode: string | undefined
   stageErrorContextPrefill: StoryConflictCoreContextPrefill | undefined
+  stageErrorSystemDraftPrefill: StoryConflictCoreSystemDraft | undefined
   generatedStory: GeneratedStory | undefined
 }
 
@@ -79,6 +81,7 @@ export function useStorySession(): StorySession {
     stageError: stage.stageError,
     stageErrorCode: stage.stageErrorCode,
     stageErrorContextPrefill: stage.stageErrorContextPrefill,
+    stageErrorSystemDraftPrefill: stage.stageErrorSystemDraftPrefill,
     generatedStory: state.generatedStory,
     ...actions,
   }
