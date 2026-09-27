@@ -1,5 +1,6 @@
 import { AppError, requestQwenJson } from './qwen.js'
 import { createNarrativeStateMachine, type StoryValidationContext } from './storyState.js'
+import { formatStoryRealityContractContext, storyRealityContractInstruction } from './storyRealityContract.js'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
@@ -154,14 +155,21 @@ const conflictCoreMechanismVariationAxis: Record<ConflictCoreMechanismType, Stor
 
 const unestablishedPrecisionPattern = /(?:\d+(?:\.\d+)?\s*(?:%|秒|分钟|小时|天|周|月|年|步|米|公里|点(?:钟)?|时|分)|(?<!下)[零〇一二两三四五六七八九十百千万亿半]+\s*(?:%|秒|分钟|小时|天|周|月|年|步|米|公里|点钟|时|分)|倒数|第(?:\d+|[零〇一二两三四五六七八九十百千万亿半]+)(?:步|次))/gu
 const systemDraftMultipleAssumptionsPattern = /(?:、|同时|另外|此外|并且|以及|还需|还要|先[\s\S]{0,24}?再|不仅[\s\S]{0,24}?还)/u
-const systemDraftUnsupportedDetailRules: ReadonlyArray<{ label: string, pattern: RegExp }> = [
-  { label: '技术实施细节', pattern: /(?:USB|Wi-?Fi|账号|密码|验证码|登录|接口|电量|序列号|存储卡|硬盘|芯片|故障|损坏|失灵|断网)/giu },
-  { label: '资源或操作状态', pattern: /(?:尚未导出|无法导出|正在传输|已上传|已下载|已备份|未备份|格式损坏|无法预览|无法播放)/gu },
+const unsupportedGeneratedDetailRules: ReadonlyArray<{ label: string, pattern: RegExp }> = [
+  { label: '技术实施细节', pattern: /(?:USB|Wi-?Fi|账号|密码|验证码|登录|接口|电量|序列号|存储卡|硬盘|芯片|邮箱|垃圾邮件|故障|损坏|失灵|断网)/giu },
+  { label: '资源或操作状态', pattern: /(?:尚未导出|无法导出|正在传输|已上传|已下载|已备份|未备份|格式损坏|无法预览|无法播放|自动删除|自动存档|隐私保护|尚未离开|仍在[^，。！？；\n]{0,10}(?:设备|相机|手机|电脑)|设备状态)/gu },
   { label: '文书或程序细节', pattern: /(?:借条|条款|承诺书|手写|签字|复印件|合同|申请表|审批|登记|手续|校规)/gu },
   { label: '外部身份或机构', pattern: /(?:校方|部门|机构|平台|客服|管理员|工作人员)/gu },
   { label: '他人的既定状态', pattern: /(?:已经断联|拒绝(?:回复|见面|配合)?|不愿(?:回复|见面|配合)?|不再接收|未设置公开联系方式|已经离开|已经到达|已经删除|已经封锁|已读|未读)/gu },
-  { label: '他人边界或历史', pattern: /(?:对方(?:明确)?(?:拒绝|禁止|要求不再)|不再接收|不再联系|对方已(?:删除|封锁|拉黑))/gu },
-  { label: '心理或关系结论', pattern: /(?:尚未厘清|犹豫|害怕|期待|希望|后悔|在意|无法面对|纠结|担心|觉得|认为|感到|解释或告别|告别还是挽留|自我定义|沉默式容忍|真实意愿|期待看到|关系二次伤害|默认隔离状态|有限清醒时间)/gu },
+  { label: '他人边界或历史', pattern: /(?:对方(?:明确)?(?:拒绝|禁止|要求不再)|不再接收|不再联系|对方已(?:删除|封锁|拉黑)|断联边界|(?:已|曾|明确)?设(?:定|置)的边界|边界)/gu },
+  { label: '未经建立的承诺或关系结论', pattern: /(?:承诺|答应|约定|保证|发誓|义务|责任|不再主动联系|不再打扰|不再联系)/gu },
+  { label: '未经建立的绝对结果', pattern: /(?:永久|永远|封存|彻底失去|无法挽回|一定|必然)/gu },
+  { label: '未经建立的状态或关联判断', pattern: /(?:当前生活状态|生活状态|生活节奏|关联性|联系间隔|可发送状态|发送状态|不合时宜|合时宜|可察觉变动|近期[^，。！？；\n]{0,12}(?:状态|变化)|已有沉默状态|沉默状态|缓冲期|不可逆(?:变化|转变)?|默认接受|单方面改变|长期未被触碰|压缩[^，。！？；\n]{0,12}(?:时间|窗口))/gu },
+  { label: '未经建立的他人态度或反应', pattern: /(?:对方|朋友|他|她)(?:已经|已|曾|明确|默认|可能|或许)?[^，。！？；\n]{0,20}(?:不适|压力|受伤|生气|介意|期待|希望|愿意|意愿|不想|拒绝|不愿|接受|同意|设置|设定|要求|会|将|可能)/gu },
+  { label: '未经建立的关系结果', pattern: /(?:关系|这段关系|两人关系)[^，。！？；\n]{0,20}(?:已经|已|曾|默认|恶化|破裂|恢复|结束|疏远|二次伤害)/gu },
+  { label: '未经建立的接触或处理动作', pattern: /(?:主动联系|联系对方|见面|打电话|回复|沟通|解释|挽留)/gu },
+  { label: '未经建立的外部结果', pattern: /(?:引发|导致|造成|意味着|错过|无法按时|重划|跨越|违背|误解|伤害|风险)/gu },
+  { label: '心理或关系结论', pattern: /(?:尚未厘清|犹豫|害怕|期待|希望|后悔|在意|无法面对|纠结|担心|觉得|认为|感到|不适|难受|受伤|尴尬|生气|介意|解释或告别|告别还是挽留|自我定义|沉默式容忍|真实意愿|期待看到|关系二次伤害|默认隔离状态|有限清醒时间)/gu },
   { label: '完整行动流程', pattern: /(?:先[\s\S]{0,24}?再|随后|接着)/gu },
 ]
 
@@ -730,13 +738,17 @@ function createDeterministicSystemConflictCoreDraft(
   seed: Pick<StorySeed, 'activeSituation' | 'lockedGoal' | 'systemDraft'>,
   fallbackReason: string,
 ): StoryConflictCoreSystemDraft {
-  const goal = getSystemDeliveryGoal(idea, seed)
-  const directions = getSystemDraftDirectionsForDelivery(seed, goal)
+  // A delivery fallback must not inherit an unreviewed model premise. The
+  // model draft may be the very thing that caused the failure, so rebuild all
+  // tentative fields from the raw idea and the user-confirmed goal only.
+  const goal = getDeterministicFallbackGoal(idea, seed)
+  const directions = createDeterministicSystemDraftDirections(goal)
+  const goalLabel = limitDeterministicText(stripDeterministicQuotes(goal), 24)
 
   return {
     goal,
-    stake: getNonEmptySystemDraftText(seed.systemDraft?.stake, '继续这件事会牺牲一项仍在权衡的东西'),
-    constraint: getNonEmptySystemDraftText(seed.systemDraft?.constraint, '关键条件仍有一处未确认'),
+    stake: limitDeterministicText(`围绕「${goalLabel}」作出选择会牺牲一项仍在权衡的东西`, maximumSystemDraftFieldLength),
+    constraint: limitDeterministicText(`围绕「${goalLabel}」作出选择仍有一项关键条件未确认`, maximumSystemDraftFieldLength),
     directions,
     activeDirection: undefined,
     origin: 'deterministic-fallback',
@@ -751,6 +763,17 @@ function getSystemDeliveryGoal(
   const derivedGoal = deriveDeterministicSystemGoal(idea, seed.activeSituation)
   return getNonEmptySystemDraftText(
     seed.lockedGoal ?? seed.systemDraft?.goal ?? derivedGoal,
+    derivedGoal || '围绕这条念头作出选择',
+  )
+}
+
+function getDeterministicFallbackGoal(
+  idea: string,
+  seed: Pick<StorySeed, 'lockedGoal'>,
+): string {
+  const derivedGoal = deriveDeterministicSystemGoal(idea, '')
+  return getNonEmptySystemDraftText(
+    seed.lockedGoal,
     derivedGoal || '围绕这条念头作出选择',
   )
 }
@@ -791,42 +814,58 @@ function deriveDeterministicSystemGoal(idea: string, activeSituation: string): s
   const activeText = typeof activeSituation === 'string' ? activeSituation.trim() : ''
   const ideaText = typeof idea === 'string' ? idea.trim() : ''
   const source = activeText || ideaText
-  const patterns = [
-    /(?:要不要|是否)([^，。！？；\n]{2,48})/u,
-    /(?:想|希望|决定|准备|打算|需要|必须)(?:在[^，。！？；\n]{0,16})?([^，。！？；\n]{2,48})/u,
-  ]
-
-  for (const pattern of patterns) {
-    const match = pattern.exec(source)
-    const candidate = match?.[1]?.trim()
-    if (candidate) return limitDeterministicText(candidate, maximumSystemDraftFieldLength)
+  const decisionMatch = /(?:要不要|是否)\s*([^，。！？；\n]{1,48})/u.exec(source)
+  if (decisionMatch) {
+    return limitDeterministicText(decisionMatch[0].trim(), maximumSystemDraftFieldLength)
   }
 
-  return limitDeterministicText(source, maximumSystemDraftFieldLength)
+  const actionMatch = /(?:想|希望|决定|准备|打算|需要|必须)(?:在[^，。！？；\n]{0,16})?([^，。！？；\n]{2,48})/u.exec(source)
+  const action = actionMatch?.[1]?.trim()
+  if (action) return limitDeterministicText(action, maximumSystemDraftFieldLength)
+
+  const anchoredEvent = limitDeterministicText(source, 42)
+  return limitDeterministicText(`决定如何回应「${anchoredEvent}」`, maximumSystemDraftFieldLength)
 }
 
 function createDeterministicSystemDraftDirections(goal: string): SystemDraftDirection[] {
-  const goalLabel = limitDeterministicText(goal.replace(/[。！？；]+$/u, ''), 28)
+  const goalLabel = limitDeterministicText(stripDeterministicQuotes(goal).replace(/[。！？；]+$/u, ''), 28)
+  const goalAction = getDeterministicGoalAction(goalLabel)
   return [
     {
       label: '信息未明',
       mechanismType: 'information-gap',
-      premise: '暂定：关键事实仍有一处未确认',
-      tradeoff: limitDeterministicText(`在信息未明时继续${goalLabel}，还是暂缓决定`, maximumSystemDraftFieldLength),
+      premise: '暂定：完成目标所需的一项信息尚未确认',
+      tradeoff: limitDeterministicText(`在信息尚未确认时${goalAction}，还是暂不继续`, maximumSystemDraftFieldLength),
     },
     {
-      label: '边界触碰',
-      mechanismType: 'boundary-conflict',
-      premise: '暂定：继续目标会触及一项已有承诺',
-      tradeoff: limitDeterministicText(`坚持${goalLabel}，还是先守住这项承诺`, maximumSystemDraftFieldLength),
+      label: '启动受阻',
+      mechanismType: 'initiation-block',
+      premise: '暂定：目标行动的启动条件尚未确认',
+      tradeoff: limitDeterministicText(`在启动条件未确认时${goalAction}，还是先暂缓`, maximumSystemDraftFieldLength),
     },
     {
-      label: '意义取舍',
+      label: '取向取舍',
       mechanismType: 'meaning-commitment',
-      premise: '暂定：继续目标会改变这件事的原本意义',
-      tradeoff: limitDeterministicText(`完成${goalLabel}，还是保留原本的承诺含义`, maximumSystemDraftFieldLength),
+      premise: '暂定：作出这个决定会改变行动的取向',
+      tradeoff: limitDeterministicText(`${goalAction}，还是暂缓以保留选择空间`, maximumSystemDraftFieldLength),
     },
   ]
+}
+
+function getDeterministicGoalAction(goal: string): string {
+  const label = stripDeterministicQuotes(goal)
+  if (/^决定(?:是否|如何)/u.test(label)) return label
+  return `决定是否${getDeterministicGoalTarget(label)}`
+}
+
+function getDeterministicGoalTarget(goal: string): string {
+  const label = stripDeterministicQuotes(goal)
+  const decision = /^(?:要不要|是否)\s*(.+)$/u.exec(label)
+  return decision ? decision[1].trim() : label
+}
+
+function stripDeterministicQuotes(value: string): string {
+  return value.replace(/[「」]/gu, '')
 }
 
 function getSystemDraftDirectionsForDelivery(
@@ -934,15 +973,17 @@ function createDeterministicSystemConflictCore(
     seed.systemDraft?.goal ?? seed.lockedGoal,
     '围绕这条念头作出选择',
   )
-  const goalLabel = limitDeterministicText(goal.replace(/[。！？；]+$/u, ''), 36)
+  const goalLabel = limitDeterministicText(stripDeterministicQuotes(goal).replace(/[。！？；]+$/u, ''), 36)
+  const goalAction = getDeterministicGoalAction(goalLabel)
+  const goalTarget = getDeterministicGoalTarget(goalLabel)
   return {
     id: `conflict-core-${index + 1}`,
     title: direction.label,
     variationAxis: conflictCoreMechanismVariationAxis[direction.mechanismType],
     preservedGoal: goal,
-    obstacle: `在「${direction.premise}」下，${goalLabel}暂时无法直接继续`,
+    obstacle: `在「${direction.premise}」下，${goalAction}暂时无法直接继续`,
     tradeoff: direction.tradeoff,
-    decisionFocus: `决定是否在「${direction.premise}」下继续${goalLabel}`,
+    decisionFocus: `决定是否在「${direction.premise}」下推进「${goalTarget}」`,
     mechanism: direction.premise,
     mechanismType: direction.mechanismType,
     evidence: [direction.premise],
@@ -1240,6 +1281,7 @@ async function generateConflictCoreBatch(
     'INVALID_CONFLICT_CORE_OUTPUT',
   )
   const cores = parseGeneratedOptionTuple(values, parseModelConflictCore)
+  cores.forEach((core) => assertConflictCoreUsesSupportedDetails(request.idea, seed, core))
   assertConflictCoreBatchMatchesSystemDraft(seed, cores)
   return cores
 }
@@ -1318,6 +1360,7 @@ async function generateConflictCoreBranch(
       ? record.cores[0]
       : record
   const core = parseModelConflictCore(value, index)
+  assertConflictCoreUsesSupportedDetails(request.idea, seed, core)
   if (core.mechanismType !== direction.mechanismType) {
     throw new AppError(`第 ${index + 1} 条分支没有沿用规划的冲突机制，请重试。`, 502, 'INVALID_CONFLICT_CORE_OUTPUT')
   }
@@ -1451,6 +1494,7 @@ async function generateConflictCoreReplacement(
           ? record.cores[0]
           : record
       const replacement = parseModelConflictCore(replacementValue, targetIndex)
+      assertConflictCoreUsesSupportedDetails(request.idea, seed, replacement)
       const direction = getSystemDraftDirection(seed, targetIndex)
       if (direction && replacement.mechanismType !== direction.mechanismType) {
         throw new AppError(
@@ -1495,7 +1539,7 @@ async function generatePredicamentForCore(
   for (let attempt = 0; attempt < maxPredicamentGenerationAttempts; attempt += 1) {
     try {
       const record = await requestModelRecord({
-        systemPrompt: predicamentExpansionSystemPrompt,
+        systemPrompt: `${predicamentExpansionSystemPrompt}\n\n${storyRealityContractInstruction}`,
         userPrompt: buildPredicamentExpansionPrompt(session.idea, seed, core, repairMessage),
         temperature: attempt === 0 ? 0.68 : 0.5,
         maxTokens: 2_000,
@@ -1506,15 +1550,131 @@ async function generatePredicamentForCore(
         '模型返回的具体困境不完整，请重试。',
         'predicament-1',
       )
+      assertPredicamentCriticalDetails(session.idea, seed, core, predicament)
       assertPredicamentMatchesConflictCore(predicament, core)
       return predicament
     } catch (error) {
-      if (!(error instanceof AppError) || error.statusCode !== invalidModelOutputContext.statusCode) throw error
+      if (!isRetryablePredicamentGenerationError(error)) {
+        // A system-led route may still deliver its clearly labelled scaffold
+        // when the model service is unavailable (auth, configuration, or an
+        // upstream request failure). User-confirmed routes remain strict.
+        if (seed.systemDraft && isSystemDeliveryFallbackError(error)) {
+          console.warn(`Predicament generation unavailable; using system-route scaffold: ${getErrorIdentifier(error)}`)
+          break
+        }
+        throw error
+      }
       repairMessage = error.message
     }
   }
 
+  if (seed.systemDraft) {
+    console.warn('Predicament generation fell back to a deterministic system-route scaffold.')
+    return createDeterministicPredicamentFallback(core)
+  }
+
   throw new AppError('具体困境连续生成失败，请返回上一步重新选择冲突核心。', 502, 'PREDICAMENT_EXPANSION_FAILED')
+}
+
+function isRetryablePredicamentGenerationError(error: unknown): error is AppError {
+  return error instanceof AppError
+    && (retryableModelOutputErrorCodes.has(error.code) || transientQwenErrorCodes.has(error.code))
+}
+
+function createDeterministicPredicamentFallback(core: StoredStoryConflictCore): StoryPredicament {
+  const goalLabel = stripDeterministicQuotes(core.preservedGoal).replace(/[。！？；]+$/u, '')
+  const goalAction = getDeterministicGoalAction(limitDeterministicText(goalLabel, 48))
+  const goalTarget = getDeterministicGoalTarget(limitDeterministicText(goalLabel, 42))
+  const goalChoice = /^决定(?:是否|如何)/u.test(goalLabel)
+    ? goalAction
+    : `决定是否推进「${goalTarget}」`
+
+  return {
+    id: 'predicament-1',
+    title: limitDeterministicText(`暂定：${core.title}`, 40),
+    variationAxis: core.variationAxis,
+    preservedGoal: core.preservedGoal,
+    immediateSituation: '主角正面对当前阻碍，尚未作出选择。',
+    obstacle: core.obstacle,
+    tradeoff: core.tradeoff,
+    urgency: '现在需要在继续与暂缓之间作出选择。',
+    choice: goalChoice,
+    plausibleCost: '继续与暂缓都会改变后续推进方式。',
+    approaches: [
+      {
+        id: 'approach-1',
+        intent: goalAction,
+        cost: `继续推进会直接面对「${core.tradeoff}」。`,
+      },
+      {
+        id: 'approach-2',
+        intent: '暂缓这个决定并保留选择',
+        cost: `「${goalTarget}」会继续处于未决定状态。`,
+      },
+    ],
+    facts: [
+      {
+        id: 'fact-1',
+        statement: `当前阻碍：${core.obstacle}`,
+        source: 'predicament',
+        mutability: 'fixed',
+      },
+      {
+        id: 'fact-2',
+        statement: `主角尚未就「${goalTarget}」作出决定`,
+        source: 'predicament',
+        mutability: 'changeable',
+      },
+    ],
+    actions: [
+      {
+        id: 'action-1',
+        intent: goalAction,
+        preconditions: ['fact-1'],
+        effects: ['fact-2'],
+        source: 'user-choice',
+      },
+    ],
+  }
+}
+
+function assertPredicamentCriticalDetails(
+  idea: string,
+  seed: StorySeed,
+  core: StoredStoryConflictCore,
+  predicament: StoryPredicament,
+) {
+  const sourceTexts = [
+    idea,
+    ...getConflictCoreEvidenceSourceTexts(seed),
+    core.preservedGoal,
+    core.obstacle,
+    core.tradeoff,
+  ]
+  const fields: SystemDraftTextField[] = [
+    { label: '困境标题', value: predicament.title },
+    { label: '当前情境', value: predicament.immediateSituation },
+    { label: '当前压力', value: predicament.urgency },
+    { label: '选择焦点', value: predicament.choice },
+    { label: '共同代价', value: predicament.plausibleCost },
+    ...predicament.facts.map((fact, index) => ({ label: `第 ${index + 1} 条暂定事实`, value: fact.statement })),
+    ...predicament.approaches.flatMap((approach, index) => [
+      { label: `第 ${index + 1} 条应对方向`, value: approach.intent },
+      { label: `第 ${index + 1} 条应对代价`, value: approach.cost },
+    ]),
+    ...predicament.actions.map((action, index) => ({ label: `第 ${index + 1} 个行动意图`, value: action.intent })),
+  ]
+  const issue = fields
+    .map((field) => ({ field, detail: findUnsupportedGeneratedDetail(sourceTexts, field.value) }))
+    .find((entry) => entry.detail)
+
+  if (issue?.detail) {
+    throw new AppError(
+      `具体困境${issue.field.label}加入了未建立的${issue.detail.label}“${issue.detail.value}”，请重试。`,
+      invalidModelOutputContext.statusCode,
+      'INVALID_MODEL_OUTPUT',
+    )
+  }
 }
 
 function getStorySeedForConflictCore(
@@ -2441,20 +2601,115 @@ function findUnsupportedSystemDraftDetail(
   seed: Pick<StorySeed, 'activeSituation' | 'lockedFacts'>,
   value: string,
 ): { label: string, value: string } | undefined {
-  const userEstablishedText = [idea, ...getUserConfirmedSeedSourceTexts(seed)].join('\n')
+  return findUnsupportedGeneratedDetail(
+    [idea, ...getUserConfirmedSeedSourceTexts(seed)],
+    value,
+  )
+}
+
+function findUnsupportedGeneratedDetail(
+  establishedSourceTexts: readonly string[],
+  value: string,
+): { label: string, value: string } | undefined {
+  const establishedText = establishedSourceTexts.join('\n')
   const precision = Array.from(value.matchAll(unestablishedPrecisionPattern))
     .map((match) => match[0])
-    .find((match) => !hasOriginalTextPhrase(userEstablishedText, match))
+    .find((match) => !hasOriginalTextPhrase(establishedText, match))
   if (precision) return { label: '精确数值或时限', value: precision }
 
-  for (const rule of systemDraftUnsupportedDetailRules) {
+  for (const rule of unsupportedGeneratedDetailRules) {
     const unsupportedMatch = Array.from(value.matchAll(rule.pattern))
       .map((match) => match[0])
-      .find((match) => !hasOriginalTextPhrase(userEstablishedText, match))
+      .find((match) => !isGeneratedDetailSupported(establishedText, value, match, rule.label))
     if (unsupportedMatch) return { label: rule.label, value: unsupportedMatch }
   }
 
   return undefined
+}
+
+function isGeneratedDetailSupported(
+  establishedText: string,
+  candidateText: string,
+  match: string,
+  label: string,
+): boolean {
+  if (hasOriginalTextPhrase(establishedText, match)) return true
+
+  // A direct commitment can be summarized with a close synonym, but the
+  // committed action itself must still overlap the user's wording. This lets
+  // "答应过不再打扰" become "不再打扰的承诺" while rejecting additions such
+  // as "毕业前不再主动联系" or a newly asserted relationship boundary.
+  if (label === '未经建立的承诺或关系结论' && /(?:承诺|约定|保证)/u.test(match)) {
+    return hasSupportedCommitmentAction(establishedText, candidateText)
+      || (extractCommitmentActionPhrases(candidateText).length === 0 && hasEstablishedCommitment(establishedText))
+  }
+
+  // A user's own confirmed commitment can be described as a boundary or
+  // self-restraint. Do not extend that permission to a newly asserted
+  // boundary belonging to another person.
+  if (label === '他人边界或历史' && match === '边界') {
+    const matchIndex = candidateText.indexOf(match)
+    const nearbyText = matchIndex >= 0 ? candidateText.slice(Math.max(0, matchIndex - 12), matchIndex + match.length) : ''
+    return !/(?:对方|朋友|他|她)/u.test(nearbyText) && hasEstablishedCommitment(establishedText)
+  }
+
+  // "违背自己的承诺" is the direct tradeoff implied by an established
+  // commitment. Other outcome words remain unsupported unless quoted verbatim.
+  return label === '未经建立的外部结果'
+    && match === '违背'
+    && hasSupportedCommitmentAction(establishedText, candidateText)
+}
+
+function hasSupportedCommitmentAction(establishedText: string, candidateText: string): boolean {
+  const candidateActions = extractCommitmentActionPhrases(candidateText)
+  const establishedActions = extractCommitmentActionPhrases(establishedText)
+  return candidateActions.some((candidateAction) => establishedActions.some((establishedAction) => (
+    candidateAction === establishedAction
+      || candidateAction.includes(establishedAction)
+      || establishedAction.includes(candidateAction)
+  )))
+}
+
+function hasEstablishedCommitment(value: string): boolean {
+  return Array.from(value.matchAll(/(?:答应|承诺|约定|保证|发誓)[^，。！？；\n]{0,30}/gu))
+    .some((match) => /(?:不再|不得|不能|必须|要|不(?:打开|公开|透露|泄露|提及|发送|联系|打扰|说|告诉|使用|触碰|查看|分享))/.test(match[0]))
+}
+
+function extractCommitmentActionPhrases(value: string): string[] {
+  return Array.from(value.matchAll(/(?:不再|不得|不能|必须|要|不(?:打开|公开|透露|泄露|提及|发送|联系|打扰|说|告诉|使用|触碰|查看|分享))[^，。！？；\n]{1,18}/gu))
+    .map((match) => match[0]
+      .replace(/(?:的)?(?:承诺|约定|保证|答应).*$/u, '')
+      .replace(/[的之]$/u, '')
+      .trim())
+    .filter((phrase) => phrase.length >= 2)
+}
+
+function assertConflictCoreUsesSupportedDetails(
+  idea: string,
+  seed: StorySeed,
+  core: StoredStoryConflictCore,
+) {
+  const sourceTexts = [idea, ...getConflictCoreEvidenceSourceTextsForCore(seed, core)]
+  const fields: SystemDraftTextField[] = [
+    { label: '标题', value: core.title },
+    { label: '共同目标', value: core.preservedGoal },
+    { label: '核心阻碍', value: core.obstacle },
+    { label: '真正的两难', value: core.tradeoff },
+    { label: '选择焦点', value: core.decisionFocus ?? '' },
+    { label: '阻碍机制', value: core.mechanism ?? '' },
+  ]
+  const issue = fields
+    .filter((field) => field.value.trim())
+    .map((field) => ({ field, detail: findUnsupportedGeneratedDetail(sourceTexts, field.value) }))
+    .find((entry) => entry.detail)
+
+  if (issue?.detail) {
+    throw new AppError(
+      `冲突核心${issue.field.label}加入了未建立的${issue.detail.label}“${issue.detail.value}”，请重试。`,
+      invalidModelOutputContext.statusCode,
+      'INVALID_CONFLICT_CORE_OUTPUT',
+    )
+  }
 }
 
 function applySystemConflictCoreDraft(seed: StorySeed, draft: StoryConflictCoreSystemDraft): StorySeed {
@@ -3481,7 +3736,7 @@ const systemConflictCoreDraftSystemPrompt = `你是一位擅长把模糊念头�
 
 必须严格返回 JSON 对象，不要 Markdown，不要解释，不要代码块。输出内容使用简体中文。输入中的锁定目标和锁定事实来自用户，绝不能改写或反过来声称为系统发明；你补出的 goal、stake、constraint 以及 directions 中的 premise、tradeoff 不是用户原文，必须只作为本次故事的可修改暂定设定。若输入已有锁定目标，服务端会直接把它保留为 goal；此时只生成 stake、constraint 和 directions，不要输出或改写 goal。若没有锁定目标，goal 才是主角此刻可主动完成的一件具体行动，且必须保留原始念头中的主体、对象或关键事件。stake 是继续或放弃这件事会失去、守住或承受的直接代价。constraint 是三条分支共享的最小当前起点。directions 必须恰好有三条，每条使用不同的 mechanismType，并各自提出一项独立的最小前提和对应取舍；三条前提是互斥的创作分支，不是同一个故事中同时成立的事实。
 
-每个 stake、constraint、premise 和 tradeoff 都只能是一句话、一个条件或一个取舍，不能同时塞入背景、原因、操作和结果。优先从原始目标、事件、时限或承诺中找出不同机制；共同 stake 和 constraint 不得以原始信息为由新增资源状态。除非用户原文已明确写出，否则禁止补入精确数字、钟点或倒计时，账号密码、设备接口、网络电量等技术细节，文书条款、机构流程，或者他人的既定状态和过去事件。不得把主角自己的承诺改写成他人已经拒绝或禁止联系的边界；不得把内容未知改写成他人的偏好、意愿或期待；不得补写主角的心理动机或关系结论。可接受的抽象粒度是“信息尚无法确认”“已有边界会被触碰”“可用窗口正在收窄”“继续行动要承担一项代价”；只说明机制，不补出造成它的设备、规则、人员或流程。不要补写人物履历、具体地点、完整行动步骤、外部结果或结局。`
+每个 stake、constraint、premise 和 tradeoff 都只能是一句话、一个条件或一个取舍，不能同时塞入背景、原因、操作和结果。优先从原始目标、事件、时限或承诺中找出不同机制；共同 stake 和 constraint 不得以原始信息为由新增资源状态。除非用户原文已明确写出，否则禁止补入精确数字、钟点或倒计时，账号密码、设备接口、网络电量等技术细节，文书条款、机构流程，或者他人的既定状态和过去事件。不得把主角自己的“答应过不再打扰”改写成“对方设定边界、明确拒绝或承诺不可违背”；不得把“已经断联”改写成对方新的态度、要求或历史；不得把内容未知改写成他人的偏好、意愿或期待；不得补写主角的心理动机或关系结论。可接受的抽象粒度是“信息尚无法确认”“已有边界会被触碰”“可用窗口正在收窄”“继续行动要承担一项代价”；只说明机制，不补出造成它的设备、规则、人员或流程。不要补写人物履历、具体地点、完整行动步骤、外部结果或结局。`
 
 const headTailSystemPrompt = `你是一位擅长短篇故事结构的中文编辑。根据已经确认的故事基础，提出能驱动后续创作的开场、关键行动与结尾组合。
 
@@ -4151,7 +4406,7 @@ function buildPredicamentExpansionPrompt(
   core: StoredStoryConflictCore,
   repairMessage?: string,
 ): string {
-  return `用户最初的想法：\n---\n${idea}\n---\n\n${formatStorySeed(seed)}\n\n已确认的冲突核心（必须逐字保留 variationAxis、preservedGoal、obstacle 和 tradeoff）：\n${JSON.stringify(core)}\n\n内部选择焦点（不能原样写回 JSON）：${getConflictCoreDecisionFocus(core)}\n\n请展开为一个具体困境：补齐 immediateSituation、urgency、facts、恰好 2 条 approaches、choice 和 plausibleCost。choice 与两条 approaches 都必须回应内部选择焦点。用户会选择其中一条 approach，后续头尾与逐步发展必须从该方向实际开始；因此两条都要是主角可主动选择、各有真实代价且没有明显更优的独立起点，不能是连续步骤、等待他人解决或同一办法的改写，也不能在这里预先写定具体回应、转折或结局。具体场景只引入一项临时假设，不能新增第二个核心阻碍。${repairMessage ? `\n上一版未通过结构检查：${repairMessage}。请重写全部具体困境。` : ''}\n\n严格使用以下 JSON：\n${predicamentExpansionResponseSchema}`
+  return `用户最初的想法：\n---\n${idea}\n---\n\n${formatStorySeed(seed)}\n\n${formatStoryRealityContractContext(seed)}\n\n已确认的冲突核心（必须逐字保留 variationAxis、preservedGoal、obstacle 和 tradeoff）：\n${JSON.stringify(core)}\n\n内部选择焦点（不能原样写回 JSON）：${getConflictCoreDecisionFocus(core)}\n\n请展开为一个具体困境：补齐 immediateSituation、urgency、facts、恰好 2 条 approaches、choice 和 plausibleCost。choice 与两条 approaches 都必须回应内部选择焦点。用户会选择其中一条 approach，后续头尾与逐步发展必须从该方向实际开始；因此两条都要是主角可主动选择、各有真实代价且没有明显更优的独立起点，不能是连续步骤、等待他人解决或同一办法的改写，也不能在这里预先写定具体回应、转折或结局。具体场景只引入一项临时假设，不能新增第二个核心阻碍。${repairMessage ? `\n上一版未通过结构检查：${repairMessage}。请重写全部具体困境。` : ''}\n\n严格使用以下 JSON：\n${predicamentExpansionResponseSchema}`
 }
 
 function formatStorySeed(seed: StorySeed): string {
