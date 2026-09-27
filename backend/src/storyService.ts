@@ -2701,8 +2701,9 @@ function assertConflictCoreUsesSupportedDetails(
   core: StoredStoryConflictCore,
 ) {
   const sourceTexts = [idea, ...getConflictCoreEvidenceSourceTextsForCore(seed, core)]
+  // A title is a display label, not a factual or causal assertion. Keep the
+  // grounding contract on fields that can change what the story assumes.
   const fields: SystemDraftTextField[] = [
-    { label: '标题', value: core.title },
     { label: '共同目标', value: core.preservedGoal },
     { label: '核心阻碍', value: core.obstacle },
     { label: '真正的两难', value: core.tradeoff },
