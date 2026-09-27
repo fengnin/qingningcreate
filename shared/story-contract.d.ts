@@ -103,6 +103,14 @@ export interface StoryConflictCoreSystemDraftDirection {
 }
 
 /**
+ * Indicates whether the system-led premise came from a completed model pass
+ * or from the deterministic delivery fallback used when that pass is
+ * unavailable. A fallback is still editable and is never presented as a
+ * user-confirmed fact.
+ */
+export type StoryConflictCoreSystemDraftOrigin = 'model' | 'deterministic-fallback'
+
+/**
  * The system's clearly labelled, editable premise for a sparse idea. It is
  * only present when the user asks the system to draft a first direction.
  */
@@ -110,6 +118,8 @@ export interface StoryConflictCoreSystemDraft {
   goal: string
   stake: string
   constraint: string
+  origin?: StoryConflictCoreSystemDraftOrigin
+  fallbackReason?: string
   /**
    * Three mutually exclusive branch premises. Optional for persisted sessions
    * created before branch planning was introduced.

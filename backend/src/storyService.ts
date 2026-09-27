@@ -285,6 +285,7 @@ interface ConflictCoreGenerationState {
   pendingReplacements?: ConflictCoreContractViolation[]
   readonly hasIndependentSystemBranches: boolean
   readonly branchCores: Map<number, StoredStoryConflictCore>
+  readonly acceptedCoreIndexes: Set<number>
   readonly unreviewedReplacementIndexes: Set<number>
   readonly groundingReviewCache: Map<StoredStoryConflictCore, ConflictCoreGroundingReview>
   readonly retryState: ConflictCoreRetryState
@@ -585,36 +586,52 @@ async function generateConflictCoreSet(
   request: StoryDirectionsRequest,
   existingSeed?: StorySeed,
 ): Promise<{ seed: StorySeed; conflictCores: StoredStoryConflictCores }> {
-  const { seed, contextPrefill } = await prepareConflictCoreGenerationSeed(request, existingSeed)
-  const state = createConflictCoreGenerationState(seed, request.excludedTitles)
+  let prepared: { seed: StorySeed; contextPrefill: StoryConflictCoreContextPrefill }
+  try {
+    prepared = await prepareConflictCoreGenerationSeed(request, existingSeed)
+  } catch (error) {
+    if (!request.generateSystemDraft || !isSystemDeliveryFallbackError(error)) throw error
 
-  for (let attempt = 0; attempt < maxConflictCoreGenerationAttempts; attempt += 1) {
-    const conflictCores = await getConflictCoreCandidatesForAttempt(request, seed, state, attempt)
-    if (!conflictCores) continue
-
-    const evaluation = await evaluateConflictCoreCandidatesForAttempt(request, seed, conflictCores, state, attempt)
-    if (!evaluation) continue
-
-    state.retryState.lastReviewError = undefined
-    state.retryState.lastViolations = evaluation.violations
-
-    if (shouldLogConflictCoreDiagnostics) {
-      console.warn(`Story conflict core reviews: contract=${JSON.stringify(evaluation.contractReviews)}; grounding=${JSON.stringify(evaluation.groundingReviews)}`)
-    }
-
-    if (!evaluation.violations.length) {
-      state.unreviewedReplacementIndexes.clear()
-      return { seed, conflictCores }
-    }
-
-    if (shouldLogConflictCoreDiagnostics) {
-      console.warn(`Story conflict core contract violations (attempt ${attempt + 1}): ${JSON.stringify(evaluation.violations)}; candidates=${JSON.stringify(conflictCores)}`)
-    }
-
-    scheduleConflictCoreReplacements(state, conflictCores, evaluation.violations)
+    return createSystemDeliveryFallbackResult(request, undefined, undefined, error)
   }
 
-  throw createConflictCoreRetryExhaustedError(state.retryState, contextPrefill, seed)
+  const { seed, contextPrefill } = prepared
+  const state = createConflictCoreGenerationState(seed, request.excludedTitles)
+
+  try {
+    for (let attempt = 0; attempt < maxConflictCoreGenerationAttempts; attempt += 1) {
+      const conflictCores = await getConflictCoreCandidatesForAttempt(request, seed, state, attempt)
+      if (!conflictCores) continue
+
+      const evaluation = await evaluateConflictCoreCandidatesForAttempt(request, seed, conflictCores, state, attempt)
+      if (!evaluation) continue
+
+      state.retryState.lastReviewError = undefined
+      state.retryState.lastViolations = evaluation.violations
+      rememberReviewedConflictCoreIndexes(state, conflictCores, evaluation.violations)
+
+      if (shouldLogConflictCoreDiagnostics) {
+        console.warn(`Story conflict core reviews: contract=${JSON.stringify(evaluation.contractReviews)}; grounding=${JSON.stringify(evaluation.groundingReviews)}`)
+      }
+
+      if (!evaluation.violations.length) {
+        state.unreviewedReplacementIndexes.clear()
+        return { seed, conflictCores }
+      }
+
+      if (shouldLogConflictCoreDiagnostics) {
+        console.warn(`Story conflict core contract violations (attempt ${attempt + 1}): ${JSON.stringify(evaluation.violations)}; candidates=${JSON.stringify(conflictCores)}`)
+      }
+
+      scheduleConflictCoreReplacements(state, conflictCores, evaluation.violations)
+    }
+
+    throw createConflictCoreRetryExhaustedError(state.retryState, contextPrefill, seed)
+  } catch (error) {
+    if (!request.generateSystemDraft || !isSystemDeliveryFallbackError(error)) throw error
+
+    return createSystemDeliveryFallbackResult(request, seed, state, error)
+  }
 }
 
 async function prepareConflictCoreGenerationSeed(
@@ -639,14 +656,15 @@ async function prepareConflictCoreGenerationSeed(
     try {
       seed = applySystemConflictCoreDraft(seed, await generateSystemConflictCoreDraft(request.idea, seed))
     } catch (error) {
-      if (!(error instanceof AppError) || error.code !== 'SYSTEM_DRAFT_GENERATION_FAILED') throw error
+      if (!isSystemDeliveryFallbackError(error)) throw error
 
-      throw new AppError(
-        error.message,
-        error.statusCode,
-        error.code,
-        hasConflictCoreContextPrefill(contextPrefill) ? contextPrefill : undefined,
-        error.systemDraftPrefill,
+      seed = applySystemConflictCoreDraft(
+        seed,
+        createDeterministicSystemConflictCoreDraft(
+          request.idea,
+          seed,
+          describeSystemDeliveryFallback(error),
+        ),
       )
     }
   }
@@ -679,6 +697,270 @@ function releaseActiveSystemDraftDirection(
   }
 }
 
+function isSystemDeliveryFallbackError(error: unknown): boolean {
+  if (!(error instanceof AppError)) return false
+
+  const code = error.code
+  // Caller and session errors must remain hard failures; they cannot be
+  // repaired by inventing a story scaffold.
+  if (code === 'INVALID_REQUEST' || code === 'STORY_SESSION_CONFLICT' || code === 'STORY_NOT_FOUND') {
+    return false
+  }
+
+  // The system-led route is explicitly allowed to degrade when the model
+  // layer is unavailable, including configuration/authentication failures.
+  // The returned origin/reason makes that state visible to the user; only
+  // caller/session errors remain hard failures.
+  return code.startsWith('QWEN_')
+    || retryableModelOutputErrorCodes.has(code)
+    || transientQwenErrorCodes.has(code)
+    || code.startsWith('SYSTEM_DRAFT')
+    || code.includes('CONFLICT_CORE')
+}
+
+function describeSystemDeliveryFallback(error: unknown): string {
+  if (!(error instanceof AppError)) return '模型暂时没有返回可用结果'
+  if (error.code.startsWith('QWEN_')) return '模型服务暂时不可用'
+  if (error.code.startsWith('SYSTEM_DRAFT')) return '系统暂定设定未通过质量检查'
+  return '模型候选未通过质量检查'
+}
+
+function createDeterministicSystemConflictCoreDraft(
+  idea: string,
+  seed: Pick<StorySeed, 'activeSituation' | 'lockedGoal' | 'systemDraft'>,
+  fallbackReason: string,
+): StoryConflictCoreSystemDraft {
+  const goal = getSystemDeliveryGoal(idea, seed)
+  const directions = getSystemDraftDirectionsForDelivery(seed, goal)
+
+  return {
+    goal,
+    stake: getNonEmptySystemDraftText(seed.systemDraft?.stake, '继续这件事会牺牲一项仍在权衡的东西'),
+    constraint: getNonEmptySystemDraftText(seed.systemDraft?.constraint, '关键条件仍有一处未确认'),
+    directions,
+    activeDirection: undefined,
+    origin: 'deterministic-fallback',
+    fallbackReason,
+  }
+}
+
+function getSystemDeliveryGoal(
+  idea: string,
+  seed: Pick<StorySeed, 'activeSituation' | 'lockedGoal' | 'systemDraft'>,
+): string {
+  const derivedGoal = deriveDeterministicSystemGoal(idea, seed.activeSituation)
+  return getNonEmptySystemDraftText(
+    seed.lockedGoal ?? seed.systemDraft?.goal ?? derivedGoal,
+    derivedGoal || '围绕这条念头作出选择',
+  )
+}
+
+function getNonEmptySystemDraftText(value: string | null | undefined, fallback: string): string {
+  const trimmed = typeof value === 'string' ? value.trim() : ''
+  return trimmed || fallback
+}
+
+function createSystemDeliveryFallbackResult(
+  request: StoryDirectionsRequest,
+  seed: StorySeed | undefined,
+  state: ConflictCoreGenerationState | undefined,
+  error: unknown,
+): { seed: StorySeed; conflictCores: StoredStoryConflictCores } {
+  console.warn(`System conflict core delivery fallback: ${getErrorIdentifier(error)}; reason=${describeSystemDeliveryFallback(error)}`)
+  const baseSeed = seed ?? {
+    ...createOriginalIdeaFallbackSeed(request.idea, request.context),
+    expansionScope: request.expansionScope ?? 'keep-scale',
+  }
+  const fallbackSeed = applySystemConflictCoreDraft(
+    baseSeed,
+    createDeterministicSystemConflictCoreDraft(
+      request.idea,
+      baseSeed,
+      describeSystemDeliveryFallback(error),
+    ),
+  )
+  const fallbackState = state ?? createConflictCoreGenerationState(fallbackSeed, request.excludedTitles)
+
+  return {
+    seed: fallbackSeed,
+    conflictCores: createGuaranteedSystemConflictCores(fallbackSeed, fallbackState),
+  }
+}
+
+function deriveDeterministicSystemGoal(idea: string, activeSituation: string): string {
+  const activeText = typeof activeSituation === 'string' ? activeSituation.trim() : ''
+  const ideaText = typeof idea === 'string' ? idea.trim() : ''
+  const source = activeText || ideaText
+  const patterns = [
+    /(?:要不要|是否)([^，。！？；\n]{2,48})/u,
+    /(?:想|希望|决定|准备|打算|需要|必须)(?:在[^，。！？；\n]{0,16})?([^，。！？；\n]{2,48})/u,
+  ]
+
+  for (const pattern of patterns) {
+    const match = pattern.exec(source)
+    const candidate = match?.[1]?.trim()
+    if (candidate) return limitDeterministicText(candidate, maximumSystemDraftFieldLength)
+  }
+
+  return limitDeterministicText(source, maximumSystemDraftFieldLength)
+}
+
+function createDeterministicSystemDraftDirections(goal: string): SystemDraftDirection[] {
+  const goalLabel = limitDeterministicText(goal.replace(/[。！？；]+$/u, ''), 28)
+  return [
+    {
+      label: '信息未明',
+      mechanismType: 'information-gap',
+      premise: '暂定：关键事实仍有一处未确认',
+      tradeoff: limitDeterministicText(`在信息未明时继续${goalLabel}，还是暂缓决定`, maximumSystemDraftFieldLength),
+    },
+    {
+      label: '边界触碰',
+      mechanismType: 'boundary-conflict',
+      premise: '暂定：继续目标会触及一项已有承诺',
+      tradeoff: limitDeterministicText(`坚持${goalLabel}，还是先守住这项承诺`, maximumSystemDraftFieldLength),
+    },
+    {
+      label: '意义取舍',
+      mechanismType: 'meaning-commitment',
+      premise: '暂定：继续目标会改变这件事的原本意义',
+      tradeoff: limitDeterministicText(`完成${goalLabel}，还是保留原本的承诺含义`, maximumSystemDraftFieldLength),
+    },
+  ]
+}
+
+function getSystemDraftDirectionsForDelivery(
+  seed: Pick<StorySeed, 'systemDraft'>,
+  goal: string,
+): SystemDraftDirection[] {
+  const existingDirections = seed.systemDraft?.directions
+  if (
+    existingDirections?.length === generatedOptionCount
+    && existingDirections.every(isSystemDraftDirectionUsable)
+    && new Set(existingDirections.map((direction) => direction.mechanismType)).size === generatedOptionCount
+  ) {
+    return existingDirections
+  }
+
+  return createDeterministicSystemDraftDirections(goal)
+}
+
+function isSystemDraftDirectionUsable(value: unknown): value is SystemDraftDirection {
+  if (!isPlainRecord(value)) return false
+  return typeof value.label === 'string'
+    && Boolean(value.label.trim())
+    && typeof value.mechanismType === 'string'
+    && conflictCoreMechanismTypes.includes(value.mechanismType as ConflictCoreMechanismType)
+    && typeof value.premise === 'string'
+    && Boolean(value.premise.trim())
+    && typeof value.tradeoff === 'string'
+    && Boolean(value.tradeoff.trim())
+}
+
+function limitDeterministicText(value: string, maximumLength: number): string {
+  const trimmed = value.trim()
+  if (trimmed.length <= maximumLength) return trimmed
+  return `${trimmed.slice(0, Math.max(1, maximumLength - 1))}…`
+}
+
+function createGuaranteedSystemConflictCores(
+  seed: StorySeed,
+  state: ConflictCoreGenerationState,
+): StoredStoryConflictCores {
+  const goal = getSystemDeliveryGoal(seed.activeSituation, seed)
+  const directions = getSystemDraftDirectionsForDelivery(seed, goal)
+
+  const cores = directions.map((direction, index) => {
+    const retained = getAcceptedSystemConflictCore(state, seed, index)
+    if (retained && isSystemConflictCoreDeliverable(retained, direction, index)) return retained
+    return createDeterministicSystemConflictCore(seed, direction, index)
+  })
+
+  return [cores[0], cores[1], cores[2]]
+}
+
+function isSystemConflictCoreDeliverable(
+  core: StoredStoryConflictCore | undefined,
+  direction: SystemDraftDirection,
+  index: number,
+): core is StoredStoryConflictCore {
+  if (!core) return false
+  return core.id === `conflict-core-${index + 1}`
+    && typeof core.title === 'string'
+    && Boolean(core.title.trim())
+    && core.variationAxis === conflictCoreMechanismVariationAxis[direction.mechanismType]
+    && typeof core.preservedGoal === 'string'
+    && Boolean(core.preservedGoal.trim())
+    && typeof core.obstacle === 'string'
+    && Boolean(core.obstacle.trim())
+    && typeof core.tradeoff === 'string'
+    && Boolean(core.tradeoff.trim())
+    && core.mechanismType === direction.mechanismType
+    && Array.isArray(core.evidence)
+    && core.evidence.some((evidence) => typeof evidence === 'string'
+      && (hasOriginalTextPhrase(direction.premise, evidence)
+        || hasOriginalTextPhrase(direction.tradeoff, evidence)))
+}
+
+function getAcceptedSystemConflictCore(
+  state: ConflictCoreGenerationState,
+  seed: StorySeed,
+  index: number,
+): StoredStoryConflictCore | undefined {
+  if (!state.acceptedCoreIndexes.has(index)) return undefined
+
+  const candidate = state.currentCores?.[index] ?? state.branchCores.get(index)
+  if (!candidate || !isSystemConflictCoreCompatible(seed, candidate, index)) return undefined
+  return candidate
+}
+
+function isSystemConflictCoreCompatible(
+  seed: Pick<StorySeed, 'systemDraft'>,
+  core: StoredStoryConflictCore,
+  index: number,
+): boolean {
+  const direction = seed.systemDraft?.directions?.[index]
+  if (!direction || core.mechanismType !== direction.mechanismType) return false
+  return core.evidence?.some((evidence) => hasOriginalTextPhrase(direction.premise, evidence)
+    || hasOriginalTextPhrase(direction.tradeoff, evidence)) ?? false
+}
+
+function createDeterministicSystemConflictCore(
+  seed: Pick<StorySeed, 'lockedGoal' | 'systemDraft'>,
+  direction: SystemDraftDirection,
+  index: number,
+): StoredStoryConflictCore {
+  const goal = getNonEmptySystemDraftText(
+    seed.systemDraft?.goal ?? seed.lockedGoal,
+    '围绕这条念头作出选择',
+  )
+  const goalLabel = limitDeterministicText(goal.replace(/[。！？；]+$/u, ''), 36)
+  return {
+    id: `conflict-core-${index + 1}`,
+    title: direction.label,
+    variationAxis: conflictCoreMechanismVariationAxis[direction.mechanismType],
+    preservedGoal: goal,
+    obstacle: `在「${direction.premise}」下，${goalLabel}暂时无法直接继续`,
+    tradeoff: direction.tradeoff,
+    decisionFocus: `决定是否在「${direction.premise}」下继续${goalLabel}`,
+    mechanism: direction.premise,
+    mechanismType: direction.mechanismType,
+    evidence: [direction.premise],
+  }
+}
+
+function rememberReviewedConflictCoreIndexes(
+  state: ConflictCoreGenerationState,
+  cores: StoredStoryConflictCores,
+  violations: ConflictCoreContractViolation[],
+) {
+  const failedIds = new Set(violations.map((violation) => violation.conflictCoreId))
+  cores.forEach((core, index) => {
+    if (failedIds.has(core.id)) state.acceptedCoreIndexes.delete(index)
+    else state.acceptedCoreIndexes.add(index)
+  })
+}
+
 function createConflictCoreGenerationState(
   seed: StorySeed,
   excludedTitles: string[] | undefined,
@@ -687,6 +969,7 @@ function createConflictCoreGenerationState(
     hasIndependentSystemBranches: !seed.systemDraft?.activeDirection
       && seed.systemDraft?.directions?.length === generatedOptionCount,
     branchCores: new Map(),
+    acceptedCoreIndexes: new Set(),
     unreviewedReplacementIndexes: new Set(),
     groundingReviewCache: new Map(),
     retryState: { excludedTitles: excludedTitles ?? [] },
@@ -2041,6 +2324,7 @@ function parseSystemConflictCoreDraft(
     goal: lockedGoal ?? readText(record, 'goal', message, maximumSystemDraftFieldLength, invalidModelOutputContext),
     stake: readText(record, 'stake', message, maximumSystemDraftFieldLength, invalidModelOutputContext),
     constraint: readText(record, 'constraint', message, maximumSystemDraftFieldLength, invalidModelOutputContext),
+    origin: 'model',
     ...(directions ? { directions } : {}),
   }
 }

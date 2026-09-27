@@ -331,12 +331,17 @@ function SystemDraftSummary({
   draft: StoryConflictCoreSystemDraft
   onEdit: () => void
 }) {
+  const isDeterministicFallback = draft.origin === 'deterministic-fallback'
+
   return (
     <section className="system-draft-summary" aria-label="系统暂定设定">
       <header>
         <span><Sparkles size={14} /> 系统暂定设定</span>
         <button className="text-action" type="button" onClick={onEdit}>改为自己补充</button>
       </header>
+      {isDeterministicFallback && (
+        <p className="system-draft-fallback-note"><CircleAlert size={14} /> 模型审核暂时不可用；以下是可编辑的确定性草案，不代表原始事实，也不代表审核通过。</p>
+      )}
       <dl>
         <div><dt>目标</dt><dd>{draft.goal}</dd></div>
         <div><dt>代价</dt><dd>{draft.stake}</dd></div>

@@ -195,13 +195,22 @@ function parseSystemConflictCoreDraft(value: unknown): StorySeed['systemDraft'] 
   const record = expectRecord(value)
   const directions = parseSystemDraftDirections(record.directions)
   const activeDirection = parseSystemDraftDirection(record.activeDirection)
+  const origin = parseSystemDraftOrigin(record.origin) ?? 'model'
+  const fallbackReason = readErrorPrefillText(record.fallbackReason)
   return {
     goal: readText(record, 'goal'),
     stake: readText(record, 'stake'),
     constraint: readText(record, 'constraint'),
+    origin,
+    ...(fallbackReason ? { fallbackReason } : {}),
     ...(directions ? { directions } : {}),
     ...(activeDirection ? { activeDirection } : {}),
   }
+}
+
+function parseSystemDraftOrigin(value: unknown): StoryConflictCoreSystemDraft['origin'] {
+  if (value === 'model' || value === 'deterministic-fallback') return value
+  return undefined
 }
 
 function parseSystemDraftDirections(
@@ -632,10 +641,14 @@ function parseSystemDraftPrefill(value: unknown): StoryConflictCoreSystemDraft |
     directions = undefined
     activeDirection = undefined
   }
+  const origin = parseSystemDraftOrigin(value.origin)
+  const fallbackReason = readErrorPrefillText(value.fallbackReason)
   return {
     goal,
     stake,
     constraint,
+    ...(origin ? { origin } : {}),
+    ...(fallbackReason ? { fallbackReason } : {}),
     ...(directions ? { directions } : {}),
     ...(activeDirection ? { activeDirection } : {}),
   }

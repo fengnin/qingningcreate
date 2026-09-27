@@ -1146,6 +1146,18 @@ textarea:focus-visible {
   line-height: 1.6;
 }
 
+.system-draft-summary > .system-draft-fallback-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: #e1a080;
+}
+
+.system-draft-fallback-note svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
 .system-draft-directions {
   display: grid;
   gap: 0;
