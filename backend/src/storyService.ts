@@ -598,7 +598,7 @@ async function generateConflictCoreSet(
   try {
     prepared = await prepareConflictCoreGenerationSeed(request, existingSeed)
   } catch (error) {
-    if (!request.generateSystemDraft || !isSystemDeliveryFallbackError(error)) throw error
+    if (!isSystemDeliveryRoute(request, existingSeed) || !isSystemDeliveryFallbackError(error)) throw error
 
     return createSystemDeliveryFallbackResult(request, undefined, undefined, error)
   }
@@ -636,7 +636,7 @@ async function generateConflictCoreSet(
 
     throw createConflictCoreRetryExhaustedError(state.retryState, contextPrefill, seed)
   } catch (error) {
-    if (!request.generateSystemDraft || !isSystemDeliveryFallbackError(error)) throw error
+    if (!isSystemDeliveryRoute(request, seed, existingSeed) || !isSystemDeliveryFallbackError(error)) throw error
 
     return createSystemDeliveryFallbackResult(request, seed, state, error)
   }
@@ -724,6 +724,17 @@ function isSystemDeliveryFallbackError(error: unknown): boolean {
     || transientQwenErrorCodes.has(code)
     || code.startsWith('SYSTEM_DRAFT')
     || code.includes('CONFLICT_CORE')
+}
+
+function isSystemDeliveryRoute(
+  request: Pick<StoryDirectionsRequest, 'generateSystemDraft'>,
+  seed?: Pick<StorySeed, 'systemDraft'>,
+  existingSeed?: Pick<StorySeed, 'systemDraft'>,
+): boolean {
+  // A session created from the system-led route remains a system route when
+  // the user asks for another comparison set. The follow-up request does not
+  // repeat generateSystemDraft, so the persisted seed is the source of truth.
+  return request.generateSystemDraft || Boolean(seed?.systemDraft) || Boolean(existingSeed?.systemDraft)
 }
 
 function describeSystemDeliveryFallback(error: unknown): string {
