@@ -337,8 +337,12 @@ function validateEffectChanges(
   })
   const changedFactIds = new Set(transition.changedFacts.map((change) => change.factId))
   const changesEveryEffect = action.effects.every((factId) => changedFactIds.has(factId))
+  const leavesEffectUnchanged = transition.changedFacts.some(({ factId, statement }) => {
+    const previous = factsById.get(factId)?.statement
+    return previous !== undefined && normalizeFactStatement(previous) === normalizeFactStatement(statement)
+  })
 
-  if (!changesOnlyDeclaredEffects || !changesEveryEffect) {
+  if (!changesOnlyDeclaredEffects || !changesEveryEffect || leavesEffectUnchanged) {
     throwValidationError(context, message, 'transition.changedFacts 必须只更新 narrativeAction.effects，并覆盖每一个 effect。')
   }
 }

@@ -272,6 +272,7 @@ function parseStoryPredicament(value: unknown): StoryPredicament {
 
 function parseStoryConflictCore(value: unknown): StoryConflictCore {
   const record = expectRecord(value)
+  const storyHook = readOptionalGeneratedText(record.storyHook, 96)
   return {
     id: readIdentifier(record, 'id'),
     title: readText(record, 'title'),
@@ -279,6 +280,7 @@ function parseStoryConflictCore(value: unknown): StoryConflictCore {
     preservedGoal: readText(record, 'preservedGoal'),
     obstacle: readText(record, 'obstacle'),
     tradeoff: readText(record, 'tradeoff'),
+    ...(storyHook ? { storyHook } : {}),
   }
 }
 

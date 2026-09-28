@@ -44,7 +44,7 @@ export interface StorySessionActions {
   continueToPredicament: () => Promise<void>
   regeneratePredicament: () => Promise<void>
   selectPredicamentApproach: (id: string) => void
-  continueToHeadTail: () => Promise<void>
+  continueToHeadTail: () => void
   regenerateHeadTail: () => Promise<void>
   selectHeadTail: (id: string) => void
   continueToStorySpine: () => Promise<void>
@@ -191,10 +191,9 @@ function createStoryPlanningActions(
   | 'selectHeadTail'
   | 'continueToStorySpine'
 > {
-  const continueToHeadTail = async () => {
-    if (!state.seed || !state.predicament || !state.selectedApproach || !state.storyId) return
+  const continueToHeadTail = () => {
+    if (!state.seed || !state.predicament || !state.storyId) return
     state.setView('head-tail')
-    if (!state.headTailOptions.length) await loaders.loadHeadTail(state.predicament, state.seed, state.selectedApproach)
   }
 
   const selectHeadTail = (id: string) => {

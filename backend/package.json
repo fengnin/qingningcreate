@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
+    "test:system-draft": "tsc -p tsconfig.json && node --test dist/storyService.test.js",
     "start": "node dist/server.js",
     "request:directions": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/request-story-directions.ps1"
   },

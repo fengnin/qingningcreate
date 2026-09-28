@@ -104,9 +104,8 @@ export interface StoryConflictCoreSystemDraftDirection {
 
 /**
  * Indicates whether the system-led premise came from a completed model pass
- * or from the deterministic delivery fallback used when that pass is
- * unavailable. A fallback is still editable and is never presented as a
- * user-confirmed fact.
+ * or from the legacy deterministic fallback retained for persisted sessions.
+ * A fallback is editable and is never presented as a user-confirmed fact.
  */
 export type StoryConflictCoreSystemDraftOrigin = 'model' | 'deterministic-fallback'
 
@@ -130,8 +129,9 @@ export interface StoryConflictCoreSystemDraft {
 }
 
 /**
- * The first-layer choice. It names the preserved goal, the single obstacle,
- * and the thing the protagonist cannot keep while continuing.
+ * The first-layer choice. It names the common goal, the single obstacle, and
+ * the thing the protagonist cannot keep while continuing. storyHook is only
+ * a short reading hook; it is not a confirmed scene fact.
  */
 export interface StoryConflictCore {
   id: string
@@ -140,6 +140,7 @@ export interface StoryConflictCore {
   preservedGoal: string
   obstacle: string
   tradeoff: string
+  storyHook?: string
 }
 
 export type StoryConflictCores = [StoryConflictCore, StoryConflictCore, StoryConflictCore]

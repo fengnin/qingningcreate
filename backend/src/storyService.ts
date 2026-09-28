@@ -133,6 +133,16 @@ type ConflictCoreGoalForm = 'explicit-goal' | 'action' | 'decision' | 'event-or-
 
 type ConflictCoreMechanismType = StoryConflictCoreMechanismType
 
+interface UnsupportedDetailRule {
+  label: string
+  pattern: RegExp
+}
+
+interface UnsupportedDetailIssue {
+  label: string
+  value: string
+}
+
 const conflictCoreMechanismTypes: readonly ConflictCoreMechanismType[] = [
   'information-gap',
   'boundary-conflict',
@@ -154,9 +164,20 @@ const conflictCoreMechanismVariationAxis: Record<ConflictCoreMechanismType, Stor
 }
 
 const unestablishedPrecisionPattern = /(?:\d+(?:\.\d+)?\s*(?:%|秒|分钟|小时|天|周|月|年|步|米|公里|点(?:钟)?|时|分)|(?<!下)[零〇一二两三四五六七八九十百千万亿半]+\s*(?:%|秒|分钟|小时|天|周|月|年|步|米|公里|点钟|时|分)|倒数|第(?:\d+|[零〇一二两三四五六七八九十百千万亿半]+)(?:步|次))/gu
-const systemDraftMultipleAssumptionsPattern = /(?:、|同时|另外|此外|并且|以及|还需|还要|先[\s\S]{0,24}?再|不仅[\s\S]{0,24}?还)/u
-const unsupportedGeneratedDetailRules: ReadonlyArray<{ label: string, pattern: RegExp }> = [
+const systemDraftMultipleAssumptionsPattern = /(?:、|同时|另外|此外|并且?|以及|还需|还要|先[\s\S]{0,24}?再|不仅[\s\S]{0,24}?还|，(?=[^，。！？；\n]{1,16}(?:必须|只能|不得|会|将|并|且)))/u
+// These are semantic claims that can look harmless in a provisional branch,
+// but become false facts once later candidates use that branch as evidence.
+const semanticUnsupportedDetailRules: readonly UnsupportedDetailRule[] = [
+  { label: '权限或交付结论', pattern: /(?:未经许可|未经同意|未被邀请|未获(?:许可|同意|允许|邀请)|没有被允许|自主选择权|选择权|交付方式|交付渠道|授权|权限|越界|越过边界)/gu },
+  { label: '现场或过去经历', pattern: /(?:当面|面对面|亲口|口头|现场)/gu },
+  { label: '心理或归属判断', pattern: /(?:未放下|放不下|错认主人|认错主人|(?:物品|东西|物件|礼物)?主人(?!公)|所有者|归属(?:未知|不明|尚无|未确认)|(?:主人|所有者)[^，。！？；\n]{0,12}(?:未知|不明|尚未确认|未确认|不清楚|不确定)|(?:主人|所有者|对方|朋友|他人)[^，。！？；\n]{0,12}(?:需要|想要|愿意|意愿|期待|希望|是否仍|不需要|不想))/gu },
+  { label: '必要处理条件', pattern: /(?:必须|只能|不得)[^，。！？；\n]{1,24}(?:处理|归还|送回|交付|联系|接触|决定)/gu },
+  { label: '资源或暂存状态', pattern: /(?:无法久留|无处存放|无法保管|即将被(?:带走|转交|处理))/gu },
+]
+const unsupportedGeneratedDetailRules: readonly UnsupportedDetailRule[] = [
+  ...semanticUnsupportedDetailRules,
   { label: '技术实施细节', pattern: /(?:USB|Wi-?Fi|账号|密码|验证码|登录|接口|电量|序列号|存储卡|硬盘|芯片|邮箱|垃圾邮件|故障|损坏|失灵|断网)/giu },
+  { label: '未经建立的工具或服务', pattern: /(?:第三方[^，。！？；\n]{0,12}(?:工具|服务|软件)|应用商店|下载[^，。！？；\n]{0,18}(?:工具|软件|应用)|安装[^，。！？；\n]{0,18}(?:工具|软件|应用))/gu },
   { label: '资源或操作状态', pattern: /(?:尚未导出|无法导出|正在传输|已上传|已下载|已备份|未备份|格式损坏|无法预览|无法播放|自动删除|自动存档|隐私保护|尚未离开|仍在[^，。！？；\n]{0,10}(?:设备|相机|手机|电脑)|设备状态)/gu },
   { label: '文书或程序细节', pattern: /(?:借条|条款|承诺书|手写|签字|复印件|合同|申请表|审批|登记|手续|校规)/gu },
   { label: '外部身份或机构', pattern: /(?:校方|部门|机构|平台|客服|管理员|工作人员)/gu },
@@ -164,14 +185,64 @@ const unsupportedGeneratedDetailRules: ReadonlyArray<{ label: string, pattern: R
   { label: '他人边界或历史', pattern: /(?:对方(?:明确)?(?:拒绝|禁止|要求不再)|不再接收|不再联系|对方已(?:删除|封锁|拉黑)|断联边界|(?:已|曾|明确)?设(?:定|置)的边界|边界)/gu },
   { label: '未经建立的承诺或关系结论', pattern: /(?:承诺|答应|约定|保证|发誓|义务|责任|不再主动联系|不再打扰|不再联系)/gu },
   { label: '未经建立的绝对结果', pattern: /(?:永久|永远|封存|彻底失去|无法挽回|一定|必然)/gu },
-  { label: '未经建立的状态或关联判断', pattern: /(?:当前生活状态|生活状态|生活节奏|关联性|联系间隔|可发送状态|发送状态|不合时宜|合时宜|可察觉变动|近期[^，。！？；\n]{0,12}(?:状态|变化)|已有沉默状态|沉默状态|缓冲期|不可逆(?:变化|转变)?|默认接受|单方面改变|长期未被触碰|压缩[^，。！？；\n]{0,12}(?:时间|窗口))/gu },
+  { label: '未经建立的状态或关联判断', pattern: /(?:当前生活状态|生活状态|生活节奏|关联性|联系间隔|可发送状态|发送状态|不合时宜|合时宜|可察觉变动|近期[^，。！？；\n]{0,12}(?:状态|变化)|已有沉默状态|沉默状态|缓冲期|不可逆的?(?:关系|联系|状态|变化|转变|后果|结果|损失)|默认接受|单方面改变|长期未被触碰|压缩[^，。！？；\n]{0,12}(?:时间|窗口))/gu },
   { label: '未经建立的他人态度或反应', pattern: /(?:对方|朋友|他|她)(?:已经|已|曾|明确|默认|可能|或许)?[^，。！？；\n]{0,20}(?:不适|压力|受伤|生气|介意|期待|希望|愿意|意愿|不想|拒绝|不愿|接受|同意|设置|设定|要求|会|将|可能)/gu },
   { label: '未经建立的关系结果', pattern: /(?:关系|这段关系|两人关系)[^，。！？；\n]{0,20}(?:已经|已|曾|默认|恶化|破裂|恢复|结束|疏远|二次伤害)/gu },
   { label: '未经建立的接触或处理动作', pattern: /(?:主动联系|联系对方|见面|打电话|回复|沟通|解释|挽留)/gu },
-  { label: '未经建立的外部结果', pattern: /(?:引发|导致|造成|意味着|错过|无法按时|重划|跨越|违背|误解|伤害|风险)/gu },
+  // Causal connectives such as "导致" are not facts by themselves. Keep
+  // concrete outcomes here so an abstract mechanism can survive grounding,
+  // while an asserted consequence (for example, "导致关系破裂") is still
+  // rejected by the more specific rules above.
+  { label: '未经建立的外部结果', pattern: /(?:错过|无法按时|重划|跨越|违背|误解|伤害|风险|被[^，。！？；\n]{0,8}(?:转交|带走|处理|公开|泄露)|(?:转交|交由|交给)[^，。！？；\n]{0,12}(?:他人|别人|某人|其他(?:团队|部门|人))|随[^，。！？；\n]{0,12}(?:一同|一起)[^，。！？；\n]{0,8}(?:转交|带走|处理))/gu },
+  { label: '未经建立的外部结果', pattern: /(?:引发|导致|造成|意味着)[^，。！？；\n]{1,18}(?:被|将|会|无法|失去|错过|破裂|恶化|拒绝|受伤|泄露|暴露|转交|带走)/gu },
   { label: '心理或关系结论', pattern: /(?:尚未厘清|犹豫|害怕|期待|希望|后悔|在意|无法面对|纠结|担心|觉得|认为|感到|不适|难受|受伤|尴尬|生气|介意|解释或告别|告别还是挽留|自我定义|沉默式容忍|真实意愿|期待看到|关系二次伤害|默认隔离状态|有限清醒时间)/gu },
   { label: '完整行动流程', pattern: /(?:先[\s\S]{0,24}?再|随后|接着)/gu },
 ]
+
+// The second layer may establish a small current scene, but anything that
+// becomes a durable fact, route prerequisite, or stated consequence needs a
+// source. These patterns cover common ways a model turns an ordinary scene
+// into an invented capability, history, or psychological conclusion.
+const predicamentUnsupportedDetailRules: readonly UnsupportedDetailRule[] = [
+  ...unsupportedGeneratedDetailRules,
+  {
+    label: '未经建立的通讯设备或渠道',
+    pattern: /(?:一次性|虚拟|匿名)[^，。！？；\n]{0,10}(?:号码|账号|信箱|短信|渠道)|(?:打开|查看|翻找|使用|发送)[^，。！？；\n]{0,12}(?:手机|电话|通讯录|号码|短信|邮箱|社交账号)|(?:手边|身边|带着|拥有)[^，。！？；\n]{0,20}(?:手机|电话|电脑|网络|账号|号码)|(?:已开机|有信号|可用|已登录|可发送)[^，。！？；\n]{0,20}(?:手机|电话|电脑|网络|账号|号码)|(?:手机|电话|电脑|网络|账号|号码)[^，。！？；\n]{0,12}(?:已开机|有信号|可用|已登录|可发送)/gu,
+  },
+  {
+    label: '未经建立的随身物品或容器',
+    pattern: /(?:随身|手边|包里|口袋里)[^，。！？；\n]{0,12}(?:小盒|首饰盒|收纳盒|备用袋)/gu,
+  },
+  {
+    label: '未经建立的过往关系细节',
+    pattern: /(?:毕业|入学|离校|从前|以前|那年|当年|小时候|童年)[^，。！？；\n]{0,24}(?:送|给|赠|答应|约定|说|见|离开)/gu,
+  },
+  {
+    label: '未经建立的内在结论',
+    pattern: /(?:厘清|确认|看清|证明)[^，。！？；\n]{0,10}(?:心意|真心|感情|内心)|(?:牵扯|消耗|耗尽|扰乱)[^，。！？；\n]{0,12}(?:心神|情绪|心绪|精力)|(?:松动|动摇)[^，。！？；\n]{0,12}(?:承诺|边界)/gu,
+  },
+]
+
+// A route may propose ordinary contact or handling; those are choices rather
+// than claims that the channel, permission, or outcome already exists.
+const predicamentProposalUnsupportedDetailRules = predicamentUnsupportedDetailRules
+  .filter((rule) => ![
+    '未经建立的接触或处理动作',
+    '必要处理条件',
+    '完整行动流程',
+  ].includes(rule.label))
+
+// The model review still verifies every first-layer claim against the source.
+// This smaller local guard only blocks concrete invented facts. Abstract
+// causal language is reviewed semantically instead of by a single word match.
+const conflictCoreUnsupportedDetailRules = unsupportedGeneratedDetailRules.filter((rule) => ![
+  '权限或交付结论',
+  '他人边界或历史',
+  '未经建立的状态或关联判断',
+  '未经建立的接触或处理动作',
+  '未经建立的外部结果',
+  '心理或关系结论',
+].includes(rule.label))
 
 const conflictCoreContractPartLabel: Record<ConflictCoreContractPart, string> = {
   lockedFacts: '保留原始事实',
@@ -258,9 +329,19 @@ interface ConflictCoreRepairContext {
 
 type SystemDraftDirection = NonNullable<StoryConflictCoreSystemDraft['directions']>[number]
 
-interface SystemDraftTextField {
+interface GeneratedTextField {
   label: string
   value: string
+}
+
+interface GeneratedFieldGroundingCheck {
+  field: GeneratedTextField
+  rules: readonly UnsupportedDetailRule[]
+}
+
+interface GeneratedFieldGroundingIssue {
+  field: GeneratedTextField
+  detail: UnsupportedDetailIssue
 }
 
 interface ConflictCoreCandidateEvaluation {
@@ -282,18 +363,11 @@ interface ConflictCoreRetryState {
   lastReviewError?: string
 }
 
-/**
- * Mutable state for one conflict-core generation request. Keeping this state
- * together makes the retry loop's ownership explicit: accepted branches,
- * unreviewed replacements, and review cache are all retained independently.
- */
+/** Mutable state for one batch conflict-core generation request. */
 interface ConflictCoreGenerationState {
   currentCores?: StoredStoryConflictCores
   repairContext?: ConflictCoreRepairContext
   pendingReplacements?: ConflictCoreContractViolation[]
-  readonly hasIndependentSystemBranches: boolean
-  readonly branchCores: Map<number, StoredStoryConflictCore>
-  readonly acceptedCoreIndexes: Set<number>
   readonly unreviewedReplacementIndexes: Set<number>
   readonly groundingReviewCache: Map<StoredStoryConflictCore, ConflictCoreGroundingReview>
   readonly retryState: ConflictCoreRetryState
@@ -594,52 +668,37 @@ async function generateConflictCoreSet(
   request: StoryDirectionsRequest,
   existingSeed?: StorySeed,
 ): Promise<{ seed: StorySeed; conflictCores: StoredStoryConflictCores }> {
-  let prepared: { seed: StorySeed; contextPrefill: StoryConflictCoreContextPrefill }
-  try {
-    prepared = await prepareConflictCoreGenerationSeed(request, existingSeed)
-  } catch (error) {
-    if (!isSystemDeliveryRoute(request, existingSeed) || !isSystemDeliveryFallbackError(error)) throw error
+  const { seed, contextPrefill } = await prepareConflictCoreGenerationSeed(request, existingSeed)
+  const state = createConflictCoreGenerationState(request.excludedTitles)
 
-    return createSystemDeliveryFallbackResult(request, undefined, undefined, error)
-  }
+  for (let attempt = 0; attempt < maxConflictCoreGenerationAttempts; attempt += 1) {
+    const conflictCores = await getConflictCoreCandidatesForAttempt(request, seed, state, attempt)
+    if (!conflictCores) continue
 
-  const { seed, contextPrefill } = prepared
-  const state = createConflictCoreGenerationState(seed, request.excludedTitles)
+    const evaluation = await evaluateConflictCoreCandidatesForAttempt(request, seed, conflictCores, state, attempt)
+    if (!evaluation) continue
 
-  try {
-    for (let attempt = 0; attempt < maxConflictCoreGenerationAttempts; attempt += 1) {
-      const conflictCores = await getConflictCoreCandidatesForAttempt(request, seed, state, attempt)
-      if (!conflictCores) continue
-
-      const evaluation = await evaluateConflictCoreCandidatesForAttempt(request, seed, conflictCores, state, attempt)
-      if (!evaluation) continue
-
-      state.retryState.lastReviewError = undefined
-      state.retryState.lastViolations = evaluation.violations
-      rememberReviewedConflictCoreIndexes(state, conflictCores, evaluation.violations)
-
-      if (shouldLogConflictCoreDiagnostics) {
-        console.warn(`Story conflict core reviews: contract=${JSON.stringify(evaluation.contractReviews)}; grounding=${JSON.stringify(evaluation.groundingReviews)}`)
-      }
-
-      if (!evaluation.violations.length) {
-        state.unreviewedReplacementIndexes.clear()
-        return { seed, conflictCores }
-      }
-
-      if (shouldLogConflictCoreDiagnostics) {
-        console.warn(`Story conflict core contract violations (attempt ${attempt + 1}): ${JSON.stringify(evaluation.violations)}; candidates=${JSON.stringify(conflictCores)}`)
-      }
-
-      scheduleConflictCoreReplacements(state, conflictCores, evaluation.violations)
+    state.retryState.lastReviewError = undefined
+    state.retryState.lastViolations = evaluation.violations
+    if (shouldLogConflictCoreDiagnostics) {
+      console.warn(`Story conflict core reviews: contract=${JSON.stringify(evaluation.contractReviews)}; grounding=${JSON.stringify(evaluation.groundingReviews)}`)
     }
 
-    throw createConflictCoreRetryExhaustedError(state.retryState, contextPrefill, seed)
-  } catch (error) {
-    if (!isSystemDeliveryRoute(request, seed, existingSeed) || !isSystemDeliveryFallbackError(error)) throw error
+    if (!evaluation.violations.length) {
+      state.unreviewedReplacementIndexes.clear()
+      return { seed, conflictCores }
+    }
 
-    return createSystemDeliveryFallbackResult(request, seed, state, error)
+    if (shouldLogConflictCoreDiagnostics) {
+      console.warn(`Story conflict core contract violations (attempt ${attempt + 1}): ${JSON.stringify(evaluation.violations)}; candidates=${JSON.stringify(conflictCores)}`)
+    }
+
+    scheduleConflictCoreReplacements(state, conflictCores, evaluation.violations)
   }
+
+  // A generic three-card scaffold makes the UI look successful while losing
+  // the actual story choices. Surface the retryable generation error instead.
+  throw createConflictCoreRetryExhaustedError(state.retryState, contextPrefill, seed)
 }
 
 async function prepareConflictCoreGenerationSeed(
@@ -656,6 +715,17 @@ async function prepareConflictCoreGenerationSeed(
   let seed = releaseActiveSystemDraftDirection(resolvedSeed.seed, existingSeed, request)
   const { contextPrefill } = resolvedSeed
 
+  const existingSystemDraft = seed.systemDraft
+  if (!request.generateSystemDraft && existingSystemDraft && existingSystemDraft.origin !== 'deterministic-fallback') {
+    try {
+      validateSystemConflictCoreDraft(request.idea, seed, existingSystemDraft)
+    } catch (error) {
+      if (!(error instanceof AppError)) throw error
+      console.warn(`Discarding rejected system draft and generating concrete story hooks directly: ${getErrorIdentifier(error)}`)
+      seed = withoutSystemConflictCoreDraft(seed)
+    }
+  }
+
   if (resolvedSeed.usesOriginalIdeaFallback && !request.context && !request.generateSystemDraft) {
     throw createConflictCoreContextRequiredError(contextPrefill)
   }
@@ -664,20 +734,20 @@ async function prepareConflictCoreGenerationSeed(
     try {
       seed = applySystemConflictCoreDraft(seed, await generateSystemConflictCoreDraft(request.idea, seed))
     } catch (error) {
-      if (!isSystemDeliveryFallbackError(error)) throw error
-
-      seed = applySystemConflictCoreDraft(
-        seed,
-        createDeterministicSystemConflictCoreDraft(
-          request.idea,
-          seed,
-          describeSystemDeliveryFallback(error),
-        ),
-      )
+      if (!(error instanceof AppError)) throw error
+      // A rejected setup used to be replaced by abstract labels. Generate the
+      // concrete three-hook comparison directly from the original seed.
+      console.warn(`System draft unavailable; generating concrete story hooks directly: ${getErrorIdentifier(error)}`)
+      seed = withoutSystemConflictCoreDraft(seed)
     }
   }
 
   return { seed, contextPrefill }
+}
+
+function withoutSystemConflictCoreDraft(seed: StorySeed): StorySeed {
+  const { systemDraft: _systemDraft, ...seedWithoutSystemDraft } = seed
+  return seedWithoutSystemDraft
 }
 
 function releaseActiveSystemDraftDirection(
@@ -705,323 +775,8 @@ function releaseActiveSystemDraftDirection(
   }
 }
 
-function isSystemDeliveryFallbackError(error: unknown): boolean {
-  if (!(error instanceof AppError)) return false
-
-  const code = error.code
-  // Caller and session errors must remain hard failures; they cannot be
-  // repaired by inventing a story scaffold.
-  if (code === 'INVALID_REQUEST' || code === 'STORY_SESSION_CONFLICT' || code === 'STORY_NOT_FOUND') {
-    return false
-  }
-
-  // The system-led route is explicitly allowed to degrade when the model
-  // layer is unavailable, including configuration/authentication failures.
-  // The returned origin/reason makes that state visible to the user; only
-  // caller/session errors remain hard failures.
-  return code.startsWith('QWEN_')
-    || retryableModelOutputErrorCodes.has(code)
-    || transientQwenErrorCodes.has(code)
-    || code.startsWith('SYSTEM_DRAFT')
-    || code.includes('CONFLICT_CORE')
-}
-
-function isSystemDeliveryRoute(
-  request: Pick<StoryDirectionsRequest, 'generateSystemDraft'>,
-  seed?: Pick<StorySeed, 'systemDraft'>,
-  existingSeed?: Pick<StorySeed, 'systemDraft'>,
-): boolean {
-  // A session created from the system-led route remains a system route when
-  // the user asks for another comparison set. The follow-up request does not
-  // repeat generateSystemDraft, so the persisted seed is the source of truth.
-  return request.generateSystemDraft || Boolean(seed?.systemDraft) || Boolean(existingSeed?.systemDraft)
-}
-
-function describeSystemDeliveryFallback(error: unknown): string {
-  if (!(error instanceof AppError)) return '模型暂时没有返回可用结果'
-  if (error.code.startsWith('QWEN_')) return '模型服务暂时不可用'
-  if (error.code.startsWith('SYSTEM_DRAFT')) return '系统暂定设定未通过质量检查'
-  return '模型候选未通过质量检查'
-}
-
-function createDeterministicSystemConflictCoreDraft(
-  idea: string,
-  seed: Pick<StorySeed, 'activeSituation' | 'lockedGoal' | 'systemDraft'>,
-  fallbackReason: string,
-): StoryConflictCoreSystemDraft {
-  // A delivery fallback must not inherit an unreviewed model premise. The
-  // model draft may be the very thing that caused the failure, so rebuild all
-  // tentative fields from the raw idea and the user-confirmed goal only.
-  const goal = getDeterministicFallbackGoal(idea, seed)
-  const directions = createDeterministicSystemDraftDirections(goal)
-  const goalLabel = limitDeterministicText(stripDeterministicQuotes(goal), 24)
-
+function createConflictCoreGenerationState(excludedTitles: string[] | undefined): ConflictCoreGenerationState {
   return {
-    goal,
-    stake: limitDeterministicText(`围绕「${goalLabel}」作出选择会牺牲一项仍在权衡的东西`, maximumSystemDraftFieldLength),
-    constraint: limitDeterministicText(`围绕「${goalLabel}」作出选择仍有一项关键条件未确认`, maximumSystemDraftFieldLength),
-    directions,
-    activeDirection: undefined,
-    origin: 'deterministic-fallback',
-    fallbackReason,
-  }
-}
-
-function getSystemDeliveryGoal(
-  idea: string,
-  seed: Pick<StorySeed, 'activeSituation' | 'lockedGoal' | 'systemDraft'>,
-): string {
-  const derivedGoal = deriveDeterministicSystemGoal(idea, seed.activeSituation)
-  return getNonEmptySystemDraftText(
-    seed.lockedGoal ?? seed.systemDraft?.goal ?? derivedGoal,
-    derivedGoal || '围绕这条念头作出选择',
-  )
-}
-
-function getDeterministicFallbackGoal(
-  idea: string,
-  seed: Pick<StorySeed, 'lockedGoal'>,
-): string {
-  const derivedGoal = deriveDeterministicSystemGoal(idea, '')
-  return getNonEmptySystemDraftText(
-    seed.lockedGoal,
-    derivedGoal || '围绕这条念头作出选择',
-  )
-}
-
-function getNonEmptySystemDraftText(value: string | null | undefined, fallback: string): string {
-  const trimmed = typeof value === 'string' ? value.trim() : ''
-  return trimmed || fallback
-}
-
-function createSystemDeliveryFallbackResult(
-  request: StoryDirectionsRequest,
-  seed: StorySeed | undefined,
-  state: ConflictCoreGenerationState | undefined,
-  error: unknown,
-): { seed: StorySeed; conflictCores: StoredStoryConflictCores } {
-  console.warn(`System conflict core delivery fallback: ${getErrorIdentifier(error)}; reason=${describeSystemDeliveryFallback(error)}`)
-  const baseSeed = seed ?? {
-    ...createOriginalIdeaFallbackSeed(request.idea, request.context),
-    expansionScope: request.expansionScope ?? 'keep-scale',
-  }
-  const fallbackSeed = applySystemConflictCoreDraft(
-    baseSeed,
-    createDeterministicSystemConflictCoreDraft(
-      request.idea,
-      baseSeed,
-      describeSystemDeliveryFallback(error),
-    ),
-  )
-  const fallbackState = state ?? createConflictCoreGenerationState(fallbackSeed, request.excludedTitles)
-
-  return {
-    seed: fallbackSeed,
-    conflictCores: createGuaranteedSystemConflictCores(fallbackSeed, fallbackState),
-  }
-}
-
-function deriveDeterministicSystemGoal(idea: string, activeSituation: string): string {
-  const activeText = typeof activeSituation === 'string' ? activeSituation.trim() : ''
-  const ideaText = typeof idea === 'string' ? idea.trim() : ''
-  const source = activeText || ideaText
-  const decisionMatch = /(?:要不要|是否)\s*([^，。！？；\n]{1,48})/u.exec(source)
-  if (decisionMatch) {
-    return limitDeterministicText(decisionMatch[0].trim(), maximumSystemDraftFieldLength)
-  }
-
-  const actionMatch = /(?:想|希望|决定|准备|打算|需要|必须)(?:在[^，。！？；\n]{0,16})?([^，。！？；\n]{2,48})/u.exec(source)
-  const action = actionMatch?.[1]?.trim()
-  if (action) return limitDeterministicText(action, maximumSystemDraftFieldLength)
-
-  const anchoredEvent = limitDeterministicText(source, 42)
-  return limitDeterministicText(`决定如何回应「${anchoredEvent}」`, maximumSystemDraftFieldLength)
-}
-
-function createDeterministicSystemDraftDirections(goal: string): SystemDraftDirection[] {
-  const goalLabel = limitDeterministicText(stripDeterministicQuotes(goal).replace(/[。！？；]+$/u, ''), 28)
-  const goalAction = getDeterministicGoalAction(goalLabel)
-  return [
-    {
-      label: '信息未明',
-      mechanismType: 'information-gap',
-      premise: '暂定：完成目标所需的一项信息尚未确认',
-      tradeoff: limitDeterministicText(`在信息尚未确认时${goalAction}，还是暂不继续`, maximumSystemDraftFieldLength),
-    },
-    {
-      label: '启动受阻',
-      mechanismType: 'initiation-block',
-      premise: '暂定：目标行动的启动条件尚未确认',
-      tradeoff: limitDeterministicText(`在启动条件未确认时${goalAction}，还是先暂缓`, maximumSystemDraftFieldLength),
-    },
-    {
-      label: '取向取舍',
-      mechanismType: 'meaning-commitment',
-      premise: '暂定：作出这个决定会改变行动的取向',
-      tradeoff: limitDeterministicText(`${goalAction}，还是暂缓以保留选择空间`, maximumSystemDraftFieldLength),
-    },
-  ]
-}
-
-function getDeterministicGoalAction(goal: string): string {
-  const label = stripDeterministicQuotes(goal)
-  if (/^决定(?:是否|如何)/u.test(label)) return label
-  return `决定是否${getDeterministicGoalTarget(label)}`
-}
-
-function getDeterministicGoalTarget(goal: string): string {
-  const label = stripDeterministicQuotes(goal)
-  const decision = /^(?:要不要|是否)\s*(.+)$/u.exec(label)
-  return decision ? decision[1].trim() : label
-}
-
-function stripDeterministicQuotes(value: string): string {
-  return value.replace(/[「」]/gu, '')
-}
-
-function getSystemDraftDirectionsForDelivery(
-  seed: Pick<StorySeed, 'systemDraft'>,
-  goal: string,
-): SystemDraftDirection[] {
-  const existingDirections = seed.systemDraft?.directions
-  if (
-    existingDirections?.length === generatedOptionCount
-    && existingDirections.every(isSystemDraftDirectionUsable)
-    && new Set(existingDirections.map((direction) => direction.mechanismType)).size === generatedOptionCount
-  ) {
-    return existingDirections
-  }
-
-  return createDeterministicSystemDraftDirections(goal)
-}
-
-function isSystemDraftDirectionUsable(value: unknown): value is SystemDraftDirection {
-  if (!isPlainRecord(value)) return false
-  return typeof value.label === 'string'
-    && Boolean(value.label.trim())
-    && typeof value.mechanismType === 'string'
-    && conflictCoreMechanismTypes.includes(value.mechanismType as ConflictCoreMechanismType)
-    && typeof value.premise === 'string'
-    && Boolean(value.premise.trim())
-    && typeof value.tradeoff === 'string'
-    && Boolean(value.tradeoff.trim())
-}
-
-function limitDeterministicText(value: string, maximumLength: number): string {
-  const trimmed = value.trim()
-  if (trimmed.length <= maximumLength) return trimmed
-  return `${trimmed.slice(0, Math.max(1, maximumLength - 1))}…`
-}
-
-function createGuaranteedSystemConflictCores(
-  seed: StorySeed,
-  state: ConflictCoreGenerationState,
-): StoredStoryConflictCores {
-  const goal = getSystemDeliveryGoal(seed.activeSituation, seed)
-  const directions = getSystemDraftDirectionsForDelivery(seed, goal)
-
-  const cores = directions.map((direction, index) => {
-    const retained = getAcceptedSystemConflictCore(state, seed, index)
-    if (retained && isSystemConflictCoreDeliverable(retained, direction, index)) return retained
-    return createDeterministicSystemConflictCore(seed, direction, index)
-  })
-
-  return [cores[0], cores[1], cores[2]]
-}
-
-function isSystemConflictCoreDeliverable(
-  core: StoredStoryConflictCore | undefined,
-  direction: SystemDraftDirection,
-  index: number,
-): core is StoredStoryConflictCore {
-  if (!core) return false
-  return core.id === `conflict-core-${index + 1}`
-    && typeof core.title === 'string'
-    && Boolean(core.title.trim())
-    && core.variationAxis === conflictCoreMechanismVariationAxis[direction.mechanismType]
-    && typeof core.preservedGoal === 'string'
-    && Boolean(core.preservedGoal.trim())
-    && typeof core.obstacle === 'string'
-    && Boolean(core.obstacle.trim())
-    && typeof core.tradeoff === 'string'
-    && Boolean(core.tradeoff.trim())
-    && core.mechanismType === direction.mechanismType
-    && Array.isArray(core.evidence)
-    && core.evidence.some((evidence) => typeof evidence === 'string'
-      && (hasOriginalTextPhrase(direction.premise, evidence)
-        || hasOriginalTextPhrase(direction.tradeoff, evidence)))
-}
-
-function getAcceptedSystemConflictCore(
-  state: ConflictCoreGenerationState,
-  seed: StorySeed,
-  index: number,
-): StoredStoryConflictCore | undefined {
-  if (!state.acceptedCoreIndexes.has(index)) return undefined
-
-  const candidate = state.currentCores?.[index] ?? state.branchCores.get(index)
-  if (!candidate || !isSystemConflictCoreCompatible(seed, candidate, index)) return undefined
-  return candidate
-}
-
-function isSystemConflictCoreCompatible(
-  seed: Pick<StorySeed, 'systemDraft'>,
-  core: StoredStoryConflictCore,
-  index: number,
-): boolean {
-  const direction = seed.systemDraft?.directions?.[index]
-  if (!direction || core.mechanismType !== direction.mechanismType) return false
-  return core.evidence?.some((evidence) => hasOriginalTextPhrase(direction.premise, evidence)
-    || hasOriginalTextPhrase(direction.tradeoff, evidence)) ?? false
-}
-
-function createDeterministicSystemConflictCore(
-  seed: Pick<StorySeed, 'lockedGoal' | 'systemDraft'>,
-  direction: SystemDraftDirection,
-  index: number,
-): StoredStoryConflictCore {
-  const goal = getNonEmptySystemDraftText(
-    seed.systemDraft?.goal ?? seed.lockedGoal,
-    '围绕这条念头作出选择',
-  )
-  const goalLabel = limitDeterministicText(stripDeterministicQuotes(goal).replace(/[。！？；]+$/u, ''), 36)
-  const goalAction = getDeterministicGoalAction(goalLabel)
-  const goalTarget = getDeterministicGoalTarget(goalLabel)
-  return {
-    id: `conflict-core-${index + 1}`,
-    title: direction.label,
-    variationAxis: conflictCoreMechanismVariationAxis[direction.mechanismType],
-    preservedGoal: goal,
-    obstacle: `在「${direction.premise}」下，${goalAction}暂时无法直接继续`,
-    tradeoff: direction.tradeoff,
-    decisionFocus: `决定是否在「${direction.premise}」下推进「${goalTarget}」`,
-    mechanism: direction.premise,
-    mechanismType: direction.mechanismType,
-    evidence: [direction.premise],
-  }
-}
-
-function rememberReviewedConflictCoreIndexes(
-  state: ConflictCoreGenerationState,
-  cores: StoredStoryConflictCores,
-  violations: ConflictCoreContractViolation[],
-) {
-  const failedIds = new Set(violations.map((violation) => violation.conflictCoreId))
-  cores.forEach((core, index) => {
-    if (failedIds.has(core.id)) state.acceptedCoreIndexes.delete(index)
-    else state.acceptedCoreIndexes.add(index)
-  })
-}
-
-function createConflictCoreGenerationState(
-  seed: StorySeed,
-  excludedTitles: string[] | undefined,
-): ConflictCoreGenerationState {
-  return {
-    hasIndependentSystemBranches: !seed.systemDraft?.activeDirection
-      && seed.systemDraft?.directions?.length === generatedOptionCount,
-    branchCores: new Map(),
-    acceptedCoreIndexes: new Set(),
     unreviewedReplacementIndexes: new Set(),
     groundingReviewCache: new Map(),
     retryState: { excludedTitles: excludedTitles ?? [] },
@@ -1035,55 +790,16 @@ async function getConflictCoreCandidatesForAttempt(
   attempt: number,
 ): Promise<StoredStoryConflictCores | undefined> {
   if (state.pendingReplacements?.length) {
-    const replacementCores = state.hasIndependentSystemBranches
-      ? await replaceIndependentConflictCoreCandidates(request, seed, state, attempt)
-      : await replaceBatchConflictCoreCandidates(request, seed, state, attempt)
+    const replacementCores = await replaceBatchConflictCoreCandidates(request, seed, state, attempt)
     if (replacementCores) state.currentCores = replacementCores
     return replacementCores
   }
 
   if (state.currentCores) return state.currentCores
 
-  const generatedCores = state.hasIndependentSystemBranches
-    ? await generateIndependentConflictCoreCandidates(request, seed, state, attempt)
-    : await generateBatchConflictCoreCandidates(request, seed, state, attempt)
+  const generatedCores = await generateBatchConflictCoreCandidates(request, seed, state, attempt)
   if (generatedCores) state.currentCores = generatedCores
   return generatedCores
-}
-
-async function generateIndependentConflictCoreCandidates(
-  request: StoryDirectionsRequest,
-  seed: StorySeed,
-  state: ConflictCoreGenerationState,
-  attempt: number,
-): Promise<StoredStoryConflictCores | undefined> {
-  let generationFailed = false
-
-  // Each accepted branch stays in the map. A later retry requests only the
-  // indexes that are still missing, so a bad B never regenerates A or C.
-  for (const index of getMissingConflictCoreIndexes(state.branchCores)) {
-    try {
-      const core = await generateConflictCoreBranchWithRetry(
-        withConflictCoreExcludedTitles(request, state.retryState),
-        seed,
-        index,
-        state.repairContext,
-        attempt,
-      )
-      state.branchCores.set(index, core)
-    } catch (error) {
-      if (!isRetryableConflictCoreGenerationError(error)) throw error
-
-      generationFailed = true
-      const failure = rememberConflictCoreGenerationFailure(state.retryState, error, `第 ${index + 1} 条分支：`)
-      console.warn(`Story conflict core branch ${index + 1} rejected (attempt ${attempt + 1}): ${failure}`)
-    }
-  }
-
-  if (generationFailed || getMissingConflictCoreIndexes(state.branchCores).length) return undefined
-
-  state.retryState.lastGenerationError = undefined
-  return toConflictCoreTuple(state.branchCores)
 }
 
 async function generateBatchConflictCoreCandidates(
@@ -1108,53 +824,6 @@ async function generateBatchConflictCoreCandidates(
     console.warn(`Story conflict core generation rejected (attempt ${attempt + 1}): ${failure}`)
     return undefined
   }
-}
-
-async function replaceIndependentConflictCoreCandidates(
-  request: StoryDirectionsRequest,
-  seed: StorySeed,
-  state: ConflictCoreGenerationState,
-  attempt: number,
-): Promise<StoredStoryConflictCores | undefined> {
-  const retainedCores = [...state.branchCores.entries()]
-    .filter(([index]) => !state.unreviewedReplacementIndexes.has(index))
-    .map(([, core]) => core)
-  const remainingReplacements: ConflictCoreContractViolation[] = []
-
-  for (const violation of state.pendingReplacements ?? []) {
-    const targetIndex = getConflictCoreIndex(violation.conflictCoreId)
-    const target = targetIndex === undefined ? undefined : state.branchCores.get(targetIndex)
-    if (targetIndex === undefined || !target) {
-      remainingReplacements.push(violation)
-      state.retryState.lastGenerationError = '审核结果没有对应的候选分支。'
-      continue
-    }
-
-    try {
-      const replacement = await generateConflictCoreReplacement(
-        withConflictCoreExcludedTitles(request, state.retryState),
-        seed,
-        target,
-        targetIndex,
-        retainedCores,
-        violation,
-        attempt,
-      )
-      state.branchCores.set(targetIndex, replacement)
-    } catch (error) {
-      if (!isRetryableConflictCoreGenerationError(error)) throw error
-
-      remainingReplacements.push(violation)
-      const failure = rememberConflictCoreGenerationFailure(state.retryState, error)
-      console.warn(`Story conflict core branch ${targetIndex + 1} replacement rejected (attempt ${attempt + 1}): ${failure}`)
-    }
-  }
-
-  state.pendingReplacements = remainingReplacements.length ? remainingReplacements : undefined
-  if (state.pendingReplacements) return undefined
-
-  state.retryState.lastGenerationError = undefined
-  return toConflictCoreTuple(state.branchCores)
 }
 
 async function replaceBatchConflictCoreCandidates(
@@ -1268,20 +937,11 @@ async function generateConflictCoreBatch(
   repairContext: ConflictCoreRepairContext | undefined,
   attempt: number,
 ): Promise<StoredStoryConflictCores> {
-  if (!seed.systemDraft?.activeDirection && seed.systemDraft?.directions?.length === generatedOptionCount) {
-    const cores: StoredStoryConflictCore[] = []
-    for (let index = 0; index < generatedOptionCount; index += 1) {
-      cores.push(await generateConflictCoreBranchWithRetry(request, seed, index, repairContext, attempt))
-    }
-
-    return [cores[0], cores[1], cores[2]]
-  }
-
   const record = await requestModelRecord({
     systemPrompt: `${conflictCoreSystemPrompt}\n\n${conflictCoreGenerationSupplement}\n\n${conflictCoreFieldSeparationSupplement}\n\n${getConflictCoreAllowedSourceRule(seed)}${getSystemDraftPromptSupplement(seed)}`,
     userPrompt: buildConflictCorePrompt(request, seed, repairContext),
     temperature: attempt === 0 ? 0.52 : 0.36,
-    maxTokens: 1_400,
+    maxTokens: 3_000,
   }, '模型没有返回可用的冲突核心，请重试。')
   if (shouldLogConflictCoreDiagnostics) {
     console.warn(`Story conflict core candidate: ${JSON.stringify(record.cores)}`)
@@ -1295,91 +955,6 @@ async function generateConflictCoreBatch(
   cores.forEach((core) => assertConflictCoreUsesSupportedDetails(request.idea, seed, core))
   assertConflictCoreBatchMatchesSystemDraft(seed, cores)
   return cores
-}
-
-function getMissingConflictCoreIndexes(
-  cores: ReadonlyMap<number, StoredStoryConflictCore>,
-): number[] {
-  return Array.from({ length: generatedOptionCount }, (_, index) => index)
-    .filter((index) => !cores.has(index))
-}
-
-function toConflictCoreTuple(
-  cores: ReadonlyMap<number, StoredStoryConflictCore>,
-): StoredStoryConflictCores {
-  const values = getMissingConflictCoreIndexes(cores)
-  if (values.length) {
-    throw new AppError('三个冲突分支尚未全部生成，请重试。', 502, 'INVALID_CONFLICT_CORE_OUTPUT')
-  }
-
-  return [cores.get(0)!, cores.get(1)!, cores.get(2)!]
-}
-
-async function generateConflictCoreBranchWithRetry(
-  request: StoryDirectionsRequest,
-  seed: StorySeed,
-  index: number,
-  repairContext: ConflictCoreRepairContext | undefined,
-  generationRound: number,
-): Promise<StoredStoryConflictCore> {
-  let lastError: unknown
-
-  for (let attempt = 0; attempt < maxConflictCoreGenerationAttempts; attempt += 1) {
-    try {
-      return await generateConflictCoreBranch(request, seed, index, repairContext, generationRound + attempt)
-    } catch (error) {
-      if (!isRetryableConflictCoreGenerationError(error)) throw error
-      lastError = error
-      console.warn(
-        `Story conflict core branch ${index + 1} rejected (round ${generationRound + 1}, attempt ${attempt + 1}): ${describeConflictCoreGenerationFailure(error)}`,
-      )
-    }
-  }
-
-  throw new AppError(
-    `第 ${index + 1} 条冲突分支连续生成失败（${describeConflictCoreGenerationFailure(lastError)}），请重试。`,
-    502,
-    'CONFLICT_CORE_GENERATION_RETRY_EXHAUSTED',
-  )
-}
-
-async function generateConflictCoreBranch(
-  request: StoryDirectionsRequest,
-  seed: StorySeed,
-  index: number,
-  repairContext: ConflictCoreRepairContext | undefined,
-  attempt: number,
-): Promise<StoredStoryConflictCore> {
-  const direction = getSystemDraftDirection(seed, index)
-  if (!direction) {
-    throw new AppError('系统暂定冲突分支不完整，请重新生成。', 502, 'INVALID_CONFLICT_CORE_OUTPUT')
-  }
-
-  const branchViolation = repairContext?.violations.find((violation) => violation.conflictCoreId === `conflict-core-${index + 1}`)
-  const repair = branchViolation
-    ? `\n这一分支上一版未通过审核：${formatConflictCoreRepairContext({ violations: [branchViolation] })}。${getConflictCoreRepairGuidance({ violations: [branchViolation] })}`
-    : ''
-  const record = await requestModelRecord({
-    systemPrompt: `${conflictCoreSystemPrompt}\n\n${conflictCoreGenerationSupplement}\n\n${conflictCoreFieldSeparationSupplement}\n\n${getConflictCoreAllowedSourceRule(seed)}${getSystemDraftPromptSupplement(seed)}`,
-    userPrompt: buildConflictCoreBranchPrompt(request, seed, direction, index, repair),
-    temperature: attempt === 0 ? 0.5 : 0.32,
-    maxTokens: 1_000,
-  }, '模型没有返回可用的分支冲突核心，请重试。')
-  const value = isPlainRecord(record.core)
-    ? record.core
-    : Array.isArray(record.cores) && record.cores.length
-      ? record.cores[0]
-      : record
-  const core = parseModelConflictCore(value, index)
-  assertConflictCoreUsesSupportedDetails(request.idea, seed, core)
-  if (core.mechanismType !== direction.mechanismType) {
-    throw new AppError(`第 ${index + 1} 条分支没有沿用规划的冲突机制，请重试。`, 502, 'INVALID_CONFLICT_CORE_OUTPUT')
-  }
-  if (!core.evidence?.some((evidence) => hasOriginalTextPhrase(direction.premise, evidence)
-    || hasOriginalTextPhrase(direction.tradeoff, evidence))) {
-    throw new AppError(`第 ${index + 1} 条分支没有引用规划前提，请重试。`, 502, 'INVALID_CONFLICT_CORE_OUTPUT')
-  }
-  return core
 }
 
 function getSystemDraftDirection(
@@ -1497,7 +1072,7 @@ async function generateConflictCoreReplacement(
         systemPrompt: `${conflictCoreSystemPrompt}\n\n${conflictCoreGenerationSupplement}\n\n${conflictCoreFieldSeparationSupplement}\n\n${getConflictCoreAllowedSourceRule(seed)}${getSystemDraftPromptSupplement(seed)}`,
         userPrompt: buildConflictCoreReplacementPrompt(request, seed, target, retainedCores, violation),
         temperature: attempt === 0 ? 0.36 : 0.2,
-        maxTokens: 1_000,
+        maxTokens: 1_400,
       }, '模型没有返回可用的替换冲突核心，请重试。')
       const replacementValue = isPlainRecord(record.core)
         ? record.core
@@ -1555,33 +1130,22 @@ async function generatePredicamentForCore(
         temperature: attempt === 0 ? 0.68 : 0.5,
         maxTokens: 2_000,
       }, '模型没有返回可用的具体困境，请重试。')
-      const predicament = parsePredicament(
+      const generatedPredicament = parsePredicament(
         expectRecord(record.predicament, '模型返回的具体困境不完整，请重试。', invalidModelOutputContext),
         invalidModelOutputContext,
         '模型返回的具体困境不完整，请重试。',
         'predicament-1',
       )
-      assertPredicamentCriticalDetails(session.idea, seed, core, predicament)
-      assertPredicamentMatchesConflictCore(predicament, core)
+      const predicament = generatedPredicament
+      validatePredicamentForConflictCore(session.idea, seed, core, predicament)
       return predicament
     } catch (error) {
-      if (!isRetryablePredicamentGenerationError(error)) {
-        // A system-led route may still deliver its clearly labelled scaffold
-        // when the model service is unavailable (auth, configuration, or an
-        // upstream request failure). User-confirmed routes remain strict.
-        if (seed.systemDraft && isSystemDeliveryFallbackError(error)) {
-          console.warn(`Predicament generation unavailable; using system-route scaffold: ${getErrorIdentifier(error)}`)
-          break
-        }
-        throw error
-      }
+      if (!isRetryablePredicamentGenerationError(error)) throw error
       repairMessage = error.message
+      if (shouldLogConflictCoreDiagnostics) {
+        console.warn(`Predicament generation rejected (attempt ${attempt + 1}): ${repairMessage}`)
+      }
     }
-  }
-
-  if (seed.systemDraft) {
-    console.warn('Predicament generation fell back to a deterministic system-route scaffold.')
-    return createDeterministicPredicamentFallback(core)
   }
 
   throw new AppError('具体困境连续生成失败，请返回上一步重新选择冲突核心。', 502, 'PREDICAMENT_EXPANSION_FAILED')
@@ -1592,67 +1156,22 @@ function isRetryablePredicamentGenerationError(error: unknown): error is AppErro
     && (retryableModelOutputErrorCodes.has(error.code) || transientQwenErrorCodes.has(error.code))
 }
 
-function createDeterministicPredicamentFallback(core: StoredStoryConflictCore): StoryPredicament {
-  const goalLabel = stripDeterministicQuotes(core.preservedGoal).replace(/[。！？；]+$/u, '')
-  const goalAction = getDeterministicGoalAction(limitDeterministicText(goalLabel, 48))
-  const goalTarget = getDeterministicGoalTarget(limitDeterministicText(goalLabel, 42))
-  const goalChoice = /^决定(?:是否|如何)/u.test(goalLabel)
-    ? goalAction
-    : `决定是否推进「${goalTarget}」`
+type PredicamentConflictCore = Pick<StoryConflictCore, 'variationAxis' | 'preservedGoal' | 'obstacle' | 'tradeoff'>
 
-  return {
-    id: 'predicament-1',
-    title: limitDeterministicText(`暂定：${core.title}`, 40),
-    variationAxis: core.variationAxis,
-    preservedGoal: core.preservedGoal,
-    immediateSituation: '主角正面对当前阻碍，尚未作出选择。',
-    obstacle: core.obstacle,
-    tradeoff: core.tradeoff,
-    urgency: '现在需要在继续与暂缓之间作出选择。',
-    choice: goalChoice,
-    plausibleCost: '继续与暂缓都会改变后续推进方式。',
-    approaches: [
-      {
-        id: 'approach-1',
-        intent: goalAction,
-        cost: `继续推进会直接面对「${core.tradeoff}」。`,
-      },
-      {
-        id: 'approach-2',
-        intent: '暂缓这个决定并保留选择',
-        cost: `「${goalTarget}」会继续处于未决定状态。`,
-      },
-    ],
-    facts: [
-      {
-        id: 'fact-1',
-        statement: `当前阻碍：${core.obstacle}`,
-        source: 'predicament',
-        mutability: 'fixed',
-      },
-      {
-        id: 'fact-2',
-        statement: `主角尚未就「${goalTarget}」作出决定`,
-        source: 'predicament',
-        mutability: 'changeable',
-      },
-    ],
-    actions: [
-      {
-        id: 'action-1',
-        intent: goalAction,
-        preconditions: ['fact-1'],
-        effects: ['fact-2'],
-        source: 'user-choice',
-      },
-    ],
-  }
+export function validatePredicamentForConflictCore(
+  idea: string,
+  seed: Pick<StorySeed, 'activeSituation' | 'lockedFacts' | 'systemDraft'>,
+  core: PredicamentConflictCore,
+  predicament: StoryPredicament,
+) {
+  assertPredicamentCriticalDetails(idea, seed, core, predicament)
+  assertPredicamentMatchesConflictCore(predicament, core)
 }
 
 function assertPredicamentCriticalDetails(
   idea: string,
-  seed: StorySeed,
-  core: StoredStoryConflictCore,
+  seed: Pick<StorySeed, 'activeSituation' | 'lockedFacts' | 'systemDraft'>,
+  core: PredicamentConflictCore,
   predicament: StoryPredicament,
 ) {
   const sourceTexts = [
@@ -1662,22 +1181,10 @@ function assertPredicamentCriticalDetails(
     core.obstacle,
     core.tradeoff,
   ]
-  const fields: SystemDraftTextField[] = [
-    { label: '困境标题', value: predicament.title },
-    { label: '当前情境', value: predicament.immediateSituation },
-    { label: '当前压力', value: predicament.urgency },
-    { label: '选择焦点', value: predicament.choice },
-    { label: '共同代价', value: predicament.plausibleCost },
-    ...predicament.facts.map((fact, index) => ({ label: `第 ${index + 1} 条暂定事实`, value: fact.statement })),
-    ...predicament.approaches.flatMap((approach, index) => [
-      { label: `第 ${index + 1} 条应对方向`, value: approach.intent },
-      { label: `第 ${index + 1} 条应对代价`, value: approach.cost },
-    ]),
-    ...predicament.actions.map((action, index) => ({ label: `第 ${index + 1} 个行动意图`, value: action.intent })),
-  ]
-  const issue = fields
-    .map((field) => ({ field, detail: findUnsupportedGeneratedDetail(sourceTexts, field.value) }))
-    .find((entry) => entry.detail)
+  const issue = findFirstUnsupportedGeneratedField(
+    sourceTexts,
+    getPredicamentFieldGroundingChecks(predicament),
+  )
 
   if (issue?.detail) {
     throw new AppError(
@@ -1686,6 +1193,41 @@ function assertPredicamentCriticalDetails(
       'INVALID_MODEL_OUTPUT',
     )
   }
+}
+
+function getPredicamentFieldGroundingChecks(
+  predicament: StoryPredicament,
+): GeneratedFieldGroundingCheck[] {
+  return [
+    ...createFieldGroundingChecks(
+      getPredicamentFactualFields(predicament),
+      predicamentUnsupportedDetailRules,
+    ),
+    ...createFieldGroundingChecks(
+      getPredicamentProposalFields(predicament),
+      predicamentProposalUnsupportedDetailRules,
+    ),
+  ]
+}
+
+function getPredicamentFactualFields(predicament: StoryPredicament): GeneratedTextField[] {
+  return [
+    { label: '当前场景', value: predicament.immediateSituation },
+    { label: '当前压力', value: predicament.urgency },
+    { label: '选择焦点', value: predicament.choice },
+    { label: '共同风险', value: predicament.plausibleCost },
+    ...predicament.facts.map((fact, index) => ({ label: `第 ${index + 1} 条暂定事实`, value: fact.statement })),
+  ]
+}
+
+function getPredicamentProposalFields(predicament: StoryPredicament): GeneratedTextField[] {
+  return [
+    ...predicament.approaches.flatMap((approach, index) => [
+      { label: `第 ${index + 1} 条应对方向`, value: approach.intent },
+      { label: `第 ${index + 1} 条应对代价`, value: approach.cost },
+    ]),
+    ...predicament.actions.map((action, index) => ({ label: `第 ${index + 1} 个行动意图`, value: action.intent })),
+  ]
 }
 
 function getStorySeedForConflictCore(
@@ -1708,7 +1250,7 @@ function getStorySeedForConflictCore(
 
 function assertPredicamentMatchesConflictCore(
   predicament: StoryPredicament,
-  core: StoredStoryConflictCore,
+  core: PredicamentConflictCore,
 ) {
   if (
     predicament.variationAxis !== core.variationAxis
@@ -2156,7 +1698,9 @@ function getSystemDraftSourceTexts(seed: Pick<StorySeed, 'systemDraft'>): string
   ]
 }
 
-function getConflictCoreEvidenceSourceTexts(seed: StorySeed): string[] {
+function getConflictCoreEvidenceSourceTexts(
+  seed: Pick<StorySeed, 'activeSituation' | 'lockedFacts' | 'systemDraft'>,
+): string[] {
   return [...getUserConfirmedSeedSourceTexts(seed), ...getSystemDraftSourceTexts(seed)]
 }
 
@@ -2198,7 +1742,7 @@ function hasOriginalTextPhrase(source: string, phrase: string): boolean {
 
 function containsUnestablishedPrecision(seed: StorySeed, core: StoredStoryConflictCore): boolean {
   const establishedText = getConflictCoreEvidenceSourceTextsForCore(seed, core).join('')
-  const candidateText = [core.obstacle, core.tradeoff, core.decisionFocus ?? '', core.mechanism ?? ''].join('')
+  const candidateText = [core.obstacle, core.tradeoff, core.storyHook ?? '', core.decisionFocus ?? '', core.mechanism ?? ''].join('')
   return (candidateText.match(unestablishedPrecisionPattern) ?? [])
     .some((match) => !establishedText.includes(match))
 }
@@ -2450,7 +1994,7 @@ async function generateSystemConflictCoreDraft(
       if (shouldLogConflictCoreDiagnostics) {
         console.warn(`System conflict core draft candidate (attempt ${attempt + 1}): ${JSON.stringify(draft)}`)
       }
-      assertSystemConflictCoreDraft(idea, seed, draft)
+      validateSystemConflictCoreDraft(idea, seed, draft)
       return draft
     } catch (error) {
       if (!isRetryableSystemDraftGenerationError(error)) throw error
@@ -2522,7 +2066,11 @@ function parseSystemDraftDirections(
   return directions
 }
 
-function assertSystemConflictCoreDraft(idea: string, seed: StorySeed, draft: StoryConflictCoreSystemDraft) {
+export function validateSystemConflictCoreDraft(
+  idea: string,
+  seed: Pick<StorySeed, 'activeSituation' | 'lockedGoal' | 'lockedFacts'>,
+  draft: StoryConflictCoreSystemDraft,
+) {
   const normalizedValues = [draft.goal, draft.stake, draft.constraint].map(normalizeGoalText)
   if (new Set(normalizedValues).size !== normalizedValues.length) {
     throw new AppError('系统暂定设定没有区分目标、代价和限制，请重试。', 502, 'INVALID_MODEL_OUTPUT')
@@ -2553,7 +2101,7 @@ function assertSystemConflictCoreDraft(idea: string, seed: StorySeed, draft: Sto
 
 function assertSystemDraftUsesMinimalAssumptions(
   idea: string,
-  seed: StorySeed,
+  seed: Pick<StorySeed, 'activeSituation' | 'lockedGoal' | 'lockedFacts'>,
   draft: StoryConflictCoreSystemDraft,
 ) {
   const issues = collectSystemDraftMinimalAssumptionIssues(idea, seed, draft)
@@ -2568,7 +2116,7 @@ function assertSystemDraftUsesMinimalAssumptions(
 
 function collectSystemDraftMinimalAssumptionIssues(
   idea: string,
-  seed: StorySeed,
+  seed: Pick<StorySeed, 'activeSituation' | 'lockedGoal' | 'lockedFacts'>,
   draft: StoryConflictCoreSystemDraft,
 ): string[] {
   const issues: string[] = []
@@ -2588,7 +2136,7 @@ function collectSystemDraftMinimalAssumptionIssues(
 function getSystemDraftGeneratedFields(
   seed: Pick<StorySeed, 'lockedGoal'>,
   draft: StoryConflictCoreSystemDraft,
-): SystemDraftTextField[] {
+): GeneratedTextField[] {
   return [
     ...(!seed.lockedGoal ? [{ label: '共同目标', value: draft.goal }] : []),
     { label: '共同代价', value: draft.stake },
@@ -2611,28 +2159,55 @@ function findUnsupportedSystemDraftDetail(
   idea: string,
   seed: Pick<StorySeed, 'activeSituation' | 'lockedFacts'>,
   value: string,
-): { label: string, value: string } | undefined {
-  return findUnsupportedGeneratedDetail(
+): UnsupportedDetailIssue | undefined {
+  return findUnsupportedGeneratedDetailFromRules(
     [idea, ...getUserConfirmedSeedSourceTexts(seed)],
     value,
+    unsupportedGeneratedDetailRules,
   )
 }
 
-function findUnsupportedGeneratedDetail(
+function findUnsupportedGeneratedDetailFromRules(
   establishedSourceTexts: readonly string[],
   value: string,
-): { label: string, value: string } | undefined {
+  rules: readonly UnsupportedDetailRule[],
+): UnsupportedDetailIssue | undefined {
   const establishedText = establishedSourceTexts.join('\n')
   const precision = Array.from(value.matchAll(unestablishedPrecisionPattern))
     .map((match) => match[0])
     .find((match) => !hasOriginalTextPhrase(establishedText, match))
   if (precision) return { label: '精确数值或时限', value: precision }
 
-  for (const rule of unsupportedGeneratedDetailRules) {
+  for (const rule of rules) {
     const unsupportedMatch = Array.from(value.matchAll(rule.pattern))
       .map((match) => match[0])
       .find((match) => !isGeneratedDetailSupported(establishedText, value, match, rule.label))
     if (unsupportedMatch) return { label: rule.label, value: unsupportedMatch }
+  }
+
+  return undefined
+}
+
+function createFieldGroundingChecks(
+  fields: readonly GeneratedTextField[],
+  rules: readonly UnsupportedDetailRule[],
+): GeneratedFieldGroundingCheck[] {
+  return fields.map((field) => ({ field, rules }))
+}
+
+function findFirstUnsupportedGeneratedField(
+  establishedSourceTexts: readonly string[],
+  checks: readonly GeneratedFieldGroundingCheck[],
+): GeneratedFieldGroundingIssue | undefined {
+  for (const { field, rules } of checks) {
+    if (!field.value.trim()) continue
+
+    const detail = findUnsupportedGeneratedDetailFromRules(
+      establishedSourceTexts,
+      field.value,
+      rules,
+    )
+    if (detail) return { field, detail }
   }
 
   return undefined
@@ -2644,15 +2219,30 @@ function isGeneratedDetailSupported(
   match: string,
   label: string,
 ): boolean {
+  // A literal phrase is normally enough to prove that a detail was supplied
+  // by the user. Relationship/commitment phrases still need a role check:
+  // copying "不再联系" into "对方不再联系" would otherwise turn the
+  // protagonist's own promise into somebody else's boundary.
+  if (label === '未经建立的承诺或关系结论' || label === '他人边界或历史') {
+    if (hasOtherPersonBoundaryContext(candidateText, match)) {
+      return hasEstablishedOtherPersonBoundary(establishedText, candidateText)
+    }
+  }
+
   if (hasOriginalTextPhrase(establishedText, match)) return true
 
   // A direct commitment can be summarized with a close synonym, but the
   // committed action itself must still overlap the user's wording. This lets
   // "答应过不再打扰" become "不再打扰的承诺" while rejecting additions such
   // as "毕业前不再主动联系" or a newly asserted relationship boundary.
-  if (label === '未经建立的承诺或关系结论' && /(?:承诺|约定|保证)/u.test(match)) {
+  if (label === '未经建立的承诺或关系结论') {
+    if (hasOtherPersonCommitmentContext(candidateText, match)) return false
     return hasSupportedCommitmentAction(establishedText, candidateText)
       || (extractCommitmentActionPhrases(candidateText).length === 0 && hasEstablishedCommitment(establishedText))
+  }
+
+  if (label === '未经建立的接触或处理动作' && match === '主动联系') {
+    return hasSupportedCommitmentAction(establishedText, candidateText)
   }
 
   // A user's own confirmed commitment can be described as a boundary or
@@ -2661,24 +2251,41 @@ function isGeneratedDetailSupported(
   if (label === '他人边界或历史' && match === '边界') {
     const matchIndex = candidateText.indexOf(match)
     const nearbyText = matchIndex >= 0 ? candidateText.slice(Math.max(0, matchIndex - 12), matchIndex + match.length) : ''
-    return !/(?:对方|朋友|他|她)/u.test(nearbyText) && hasEstablishedCommitment(establishedText)
+    return /(?:自己|自身|自我|主角|已有|既有)[^，。！？；\n]{0,8}边界/u.test(nearbyText)
+      && hasEstablishedCommitment(establishedText)
   }
 
   // "违背自己的承诺" is the direct tradeoff implied by an established
   // commitment. Other outcome words remain unsupported unless quoted verbatim.
+  if (label === '未经建立的外部结果' && match === '风险') {
+    // "承担一项风险" is an abstract tradeoff. A risk tied to a concrete
+    // invented event ("暴露行踪的风险", "误送的风险") remains unsupported.
+    const matchIndex = candidateText.indexOf(match)
+    const nearbyText = matchIndex >= 0
+      ? candidateText.slice(Math.max(0, matchIndex - 16), matchIndex + match.length)
+      : ''
+    return !/(?:暴露|误送|伤害|误解|失去|错过|破坏|泄露|失败)/u.test(nearbyText)
+  }
+
   return label === '未经建立的外部结果'
     && match === '违背'
     && hasSupportedCommitmentAction(establishedText, candidateText)
 }
 
 function hasSupportedCommitmentAction(establishedText: string, candidateText: string): boolean {
-  const candidateActions = extractCommitmentActionPhrases(candidateText)
   const establishedActions = extractCommitmentActionPhrases(establishedText)
-  return candidateActions.some((candidateAction) => establishedActions.some((establishedAction) => (
-    candidateAction === establishedAction
-      || candidateAction.includes(establishedAction)
-      || establishedAction.includes(candidateAction)
-  )))
+  const normalizedEstablishedActions = establishedActions.map(normalizeCommitmentAction)
+  const candidateActions = extractCommitmentActionPhrases(candidateText)
+  if (candidateActions.some((candidateAction) => normalizedEstablishedActions.includes(normalizeCommitmentAction(candidateAction)))) {
+    return true
+  }
+
+  // Once the source contains an explicit promise, an abstract reference such
+  // as “the existing promise/constraint” may carry that same commitment
+  // forward. It must remain impersonal: concrete rules, permissions, terms,
+  // or another person's boundary still fail their own source checks.
+  return normalizedEstablishedActions.length > 0
+    && /(?:自己的|自身|自我|已有|既有)?(?:承诺|约定|保证|自我约束|限制|约束)/u.test(candidateText)
 }
 
 function hasEstablishedCommitment(value: string): boolean {
@@ -2695,6 +2302,54 @@ function extractCommitmentActionPhrases(value: string): string[] {
     .filter((phrase) => phrase.length >= 2)
 }
 
+function normalizeCommitmentAction(value: string): string {
+  const normalized = value
+    .replace(/[“”"「」]/gu, '')
+    .replace(/主动/gu, '')
+    .replace(/(?:自己的|本人|主角)/gu, '')
+    .replace(/[的之]$/u, '')
+    .trim()
+
+  // Compare the committed action rather than incidental objects that a
+  // model may append (for example, "不再主动联系"). This intentionally does
+  // not equate distinct actions such as "联系" and "打扰".
+  const action = /(?:不再|不得|不能|必须|要)(?:打开|公开|透露|泄露|提及|发送|联系|打扰|说|告诉|使用|触碰|查看|分享)/u.exec(normalized)
+  return action?.[0] ?? normalized
+}
+
+function hasOtherPersonBoundaryContext(candidateText: string, match: string): boolean {
+  const matchIndex = candidateText.indexOf(match)
+  if (matchIndex < 0) return false
+  const prefix = candidateText.slice(Math.max(0, matchIndex - 12), matchIndex)
+  const clauseStart = Math.max(
+    candidateText.lastIndexOf('，', matchIndex - 1),
+    candidateText.lastIndexOf('。', matchIndex - 1),
+    candidateText.lastIndexOf('；', matchIndex - 1),
+  ) + 1
+  const clausePrefix = candidateText.slice(clauseStart, matchIndex)
+  return /(?:对方|朋友|他人|主人|另一方)(?:明确|已经|已|曾|可能|默认|会)?的?$/u.test(prefix)
+    || /(?:对方|朋友|他人|主人|另一方)[^，。！？；\n]{0,10}(?:承诺|答应|约定|保证|拒绝|禁止|要求)[^，。！？；\n]{0,4}$/u.test(clausePrefix)
+    || /^(?:对方|朋友|他人|主人|另一方)[^，。！？；\n]{0,12}/u.test(match)
+}
+
+function hasOtherPersonCommitmentContext(candidateText: string, match: string): boolean {
+  const matchIndex = candidateText.indexOf(match)
+  if (matchIndex < 0) return false
+  const prefix = candidateText.slice(Math.max(0, matchIndex - 12), matchIndex)
+  return /(?:对方|朋友|他人|主人|另一方)(?:明确|已经|已|曾|可能|默认|会)?的?$/u.test(prefix)
+    || /(?:对方|朋友|他人|主人|另一方)[^，。！？；\n]{0,10}(?:承诺|答应|约定|保证)[^，。！？；\n]{0,4}$/u.test(prefix)
+}
+
+function hasEstablishedOtherPersonBoundary(establishedText: string, candidateText: string): boolean {
+  // Only permit a role-specific boundary when the same role and action are
+  // explicitly present in user-confirmed text. A bare matching substring is
+  // insufficient because the source may instead describe the protagonist's
+  // own promise.
+  const action = /(?:不再联系|不再打扰|拒绝(?:联系|见面|回复)?|禁止(?:联系|接触)?)/u.exec(candidateText)?.[0]
+  if (!action) return false
+  return new RegExp(`(?:对方|朋友|他人|主人|另一方)[^，。！？；\\n]{0,18}${action}`).test(establishedText)
+}
+
 function assertConflictCoreUsesSupportedDetails(
   idea: string,
   seed: StorySeed,
@@ -2703,17 +2358,13 @@ function assertConflictCoreUsesSupportedDetails(
   const sourceTexts = [idea, ...getConflictCoreEvidenceSourceTextsForCore(seed, core)]
   // A title is a display label, not a factual or causal assertion. Keep the
   // grounding contract on fields that can change what the story assumes.
-  const fields: SystemDraftTextField[] = [
-    { label: '共同目标', value: core.preservedGoal },
-    { label: '核心阻碍', value: core.obstacle },
-    { label: '真正的两难', value: core.tradeoff },
-    { label: '选择焦点', value: core.decisionFocus ?? '' },
-    { label: '阻碍机制', value: core.mechanism ?? '' },
-  ]
-  const issue = fields
-    .filter((field) => field.value.trim())
-    .map((field) => ({ field, detail: findUnsupportedGeneratedDetail(sourceTexts, field.value) }))
-    .find((entry) => entry.detail)
+  const issue = findFirstUnsupportedGeneratedField(
+    sourceTexts,
+    createFieldGroundingChecks(
+      getConflictCoreGroundingFields(core),
+      conflictCoreUnsupportedDetailRules,
+    ),
+  )
 
   if (issue?.detail) {
     throw new AppError(
@@ -2722,6 +2373,17 @@ function assertConflictCoreUsesSupportedDetails(
       'INVALID_CONFLICT_CORE_OUTPUT',
     )
   }
+}
+
+function getConflictCoreGroundingFields(core: StoredStoryConflictCore): GeneratedTextField[] {
+  return [
+    { label: '共同目标', value: core.preservedGoal },
+    { label: '核心阻碍', value: core.obstacle },
+    { label: '真正的两难', value: core.tradeoff },
+    { label: '故事钩子', value: core.storyHook ?? '' },
+    { label: '选择焦点', value: core.decisionFocus ?? '' },
+    { label: '阻碍机制', value: core.mechanism ?? '' },
+  ]
 }
 
 function applySystemConflictCoreDraft(seed: StorySeed, draft: StoryConflictCoreSystemDraft): StorySeed {
@@ -3681,6 +3343,7 @@ function toPublicConflictCore(core: StoredStoryConflictCore): StoryConflictCore 
     preservedGoal: core.preservedGoal,
     obstacle: core.obstacle,
     tradeoff: core.tradeoff,
+    ...(core.storyHook ? { storyHook: core.storyHook } : {}),
   }
 }
 
@@ -3692,25 +3355,25 @@ const conflictCoreDirectInferenceRules = `第一层可以把原文已经明示�
 
 const conflictCoreSystemPrompt = `你是一位严谨的中文故事编辑。你的任务是从用户的一个念头中提出三个“冲突核心”，供用户先选择这篇故事要卡在哪一种难处。
 
-必须严格返回 JSON 对象，不要 Markdown，不要解释，不要代码块。输出内容使用简体中文。第一层对用户只展示三件事：原始目标、核心阻碍、真正的两难。三条必须共享同一个 preservedGoal。若用户已经明确行动目标，逐字保留它；若用户没有明确行动目标，目标只能写成主角当下可主动完成的最小动作或决定，并且必须让读者能指出它对应 activeSituation 或 lockedFacts 中的哪个对象、事件或动作；可以补出由该事实直接推出的最小决定，但不能把原始事件抹平成抽象的“处理/应对”。不能用“眼前事件”“下一步”“这件事”“自然应对”“维持体面”“处理好这件事”等占位语替代真实目标。核心阻碍只写目标受阻的因果卡点，不得借新增画面、动作或临时条件让难处变得具体；不要写具体路线、金额、人物帮助、精确时限、精确距离、倒数数字、步数、先后动作、解决方案、完整行动过程或结局。tradeoff 要保持为抽象而清楚的取舍，不要展开成小剧情。每条还必须给出内部审核字段 mechanism 和 evidence：mechanism 用一句短语概括“目标为什么无法继续”，evidence 逐字摘取支持它的种子原文；不能给出证据的机制不成立。
+必须严格返回 JSON 对象，不要 Markdown，不要解释，不要代码块。输出内容使用简体中文。第一层对用户只展示原始目标、核心阻碍、真正的两难，以及一句很短的 storyHook。三条必须共享同一个 preservedGoal。若用户已经明确行动目标，逐字保留它；若用户没有明确行动目标，目标只能写成主角当下可主动完成的最小动作或决定，并且必须让读者能指出它对应 activeSituation 或 lockedFacts 中的哪个对象、事件或动作；可以补出由该事实直接推出的最小决定，但不能把原始事件抹平成抽象的“处理/应对”。不能用“眼前事件”“下一步”“这件事”“自然应对”“维持体面”“处理好这件事”等占位语替代真实目标。核心阻碍只写目标受阻的因果卡点，不得借新增画面、动作或临时条件让难处变得具体；不要写具体路线、金额、人物帮助、精确时限、精确距离、倒数数字、步数、先后动作、解决方案、完整行动过程或结局。tradeoff 要保持为抽象而清楚的取舍，不要展开成小剧情。storyHook 只是一句不超过 56 字的阅读钩子，用已建立的对象、目标或限制让读者感到这条冲突的张力；它不能展开成完整当前场景、为什么必须现在处理、主角此刻行动或直接代价。所有这些具体困境信息只在第二层生成。每条还必须给出内部审核字段 mechanism 和 evidence：mechanism 用一句短语概括“目标为什么无法继续”，evidence 逐字摘取支持它的种子原文；不能给出证据的机制不成立。
 
-只能使用原始念头和故事种子中的明确事实。第一层不允许新增任何会影响因果的现场条件、人物、物品、动作、过去对白或外部事件；这些具体场景只属于用户选中核心后的第二层具体困境。第一层也不要用具体画面或主角心理状态替未建立的事实占位。不得把 unknowns 填成事实：不能新增或断言任何未在原文建立的背景、关系、身份、责任、规则、资源、权限、过去经历或结果。若一个核心必须依赖这些信息才成立，就不要生成它。
+核心字段和 storyHook 只能使用原始念头和故事种子中的明确事实。storyHook 可以把已建立信息压缩成一句带一点画面的提示，但不能新增临时事件、永久背景、身份、关系定论、固定规则、资源权限、过去经历、严重伤害或确定结果，也不能伪装成用户已经说过的事实。不得把 unknowns 填成核心字段事实：不能新增或断言任何未在原文建立的背景、关系、身份、责任、规则、资源、权限、过去经历或结果。若一个核心必须依赖这些信息才成立，就不要生成它。
 
 每条还要输出仅供后续生成使用的 decisionFocus。它不展示给用户，必须用一句简短的话指出主角被迫在什么取向之间主动决定；它只能从 obstacle 和 tradeoff 推出，不能新增人物、路线、资源、精确时间或结果，也不能写成已经选定的方案。
 
 每条必须满足：若主角不处理 obstacle，preservedGoal 就会被延后、失败或被迫改变；为了继续，后续必须存在清楚的损失、风险或取舍，并且主角必须能通过自己的决定改变故事走向。障碍必须直接作用于目标本身，不能只是情绪不适、旁支请求或可无视的附带干扰。一个合格核心应能在不增加第二个核心阻碍的前提下继续升级，并在下一层形成两条同样成立、各有代价的起点。每条只保留一个主要阻碍机制，三条机制必须彼此不同；判断差异时先去掉人物、物品、地点、画面和情绪，只问“目标为什么无法继续”，若答案仍相同，就算换了表面载体也仍是重复。variationAxis 只用来概括该机制：time 是原文已建立的窗口或时机，resource 是原文中已有且目标必需的条件受限，relationship 是输入已建立的人际边界，commitment 是输入已建立的承诺或责任；未建立的心理状态不能伪装成任何轴。三条可以使用相同 variationAxis；绝不能为了凑齐不同 axis 另造关系、责任或资源。`
 
-const conflictCoreGenerationSupplement = `生成前先做三个内部检查：第一，preservedGoal 必须是主角尚未完成、可观察的动作或决定；若输入只有一个事件，就把该事件中的对象或动作保留下来，再补一个由它直接推出的最小“是否/如何”决定，不能原样复述事件。通用表达是“决定是否/如何对[输入中的对象或事件]作出回应”，但只有在输入语义支持时使用，方括号必须换成输入里的具体对象或事件。第二，分别写出三条“目标为什么无法继续”的因果句，三句的关键因果动词必须不同；如果删掉人物、物品、地点、画面和情绪后仍能互相替换，就不要把它们当作三条。第三，为每条机制列出 evidence，必须逐字出现在 activeSituation 或 lockedFacts 中；没有逐字证据的机制直接放弃，不得用任何新的背景、场景细节、行为或临时规则填空。机制类型只能从以下集合选择，且三条不得重复：information-gap（完成行动所需信息或意图未明）、boundary-conflict（输入已建立的关系/限制边界被触发）、meaning-commitment（行动本身会传达或放弃不可兼得的立场）、initiation-block（目标行动因输入已给出的条件无法启动）、window-pressure（输入明确给出的时机或窗口正在收窄）、resource-constraint（输入中已有且目标必需的资源受限）、commitment-conflict（输入中已建立的承诺或责任与目标冲突）。只有类型确实由原文支持且会改变后续选择时才可使用；不要把未建立的心理状态或一般性不适换名成三条机制。第一层不使用临时人物、物品、场景动作或过去对白补足机制；若需要这些细节，应留到第二层具体困境再生成。没有已建立的资源、责任或承诺时，不要为了填写 variationAxis 引入它们。若原文无法支持三种机制，宁可让审核拒绝并请求补充信息，也不能编造条件。\n\n${conflictCoreDirectInferenceRules}`
+const conflictCoreGenerationSupplement = `生成前先做四个内部检查：第一，preservedGoal 必须是主角尚未完成、可观察的动作或决定；若输入只有一个事件，就把该事件中的对象或动作保留下来，再补一个由它直接推出的最小“是否/如何”决定，不能原样复述事件。通用表达是“决定是否/如何对[输入中的对象或事件]作出回应”，但只有在输入语义支持时使用，方括号必须换成输入里的具体对象或事件。第二，分别写出三条“目标为什么无法继续”的因果句，三句的关键因果动词必须不同；如果删掉人物、物品、地点、画面和情绪后仍能互相替换，就不要把它们当作三条。第三，为每条机制列出 evidence，必须逐字出现在 activeSituation 或 lockedFacts 中；没有逐字证据的机制直接放弃，不得用任何新的背景、场景细节、行为或临时规则填空。第四，storyHook 必须只有一句，且只从目标、阻碍、取舍或已建立的对象中挑一个可感知的切面；它不是场景契约，不能写新的触发事件、现在压力、行动选择、直接代价或任何会进入后续因果的细节。机制类型只能从以下集合选择，且三条不得重复：information-gap（完成行动所需信息或意图未明）、boundary-conflict（输入已建立的关系/限制边界被触发）、meaning-commitment（行动本身会传达或放弃不可兼得的立场）、initiation-block（目标行动因输入已给出的条件无法启动）、window-pressure（输入明确给出的时机或窗口正在收窄）、resource-constraint（输入中已有且目标必需的资源受限）、commitment-conflict（输入中已建立的承诺或责任与目标冲突）。只有类型确实由原文支持且会改变后续选择时才可使用；不要把未建立的心理状态或一般性不适换名成三条机制。第一层不使用临时人物、物品、场景动作或过去对白补足机制；若需要这些细节，应留到第二层具体困境再生成。没有已建立的资源、责任或承诺时，不要为了填写 variationAxis 引入它们。若原文无法支持三种机制，宁可让审核拒绝并请求补充信息，也不能编造条件。\n\n${conflictCoreDirectInferenceRules}`
 
 const conflictCoreFieldSeparationSupplement = `variationAxis 与 mechanismType 是两个不同字段。variationAxis 只能填 time、resource、relationship 或 commitment，用于界面概括；mechanismType 才能填写 information-gap、boundary-conflict、meaning-commitment、initiation-block、window-pressure、resource-constraint 或 commitment-conflict。若某个 mechanismType 没有唯一的界面分类，可以复用最接近的 variationAxis，绝不能把 mechanismType 原样填进 variationAxis。`
 
-const conflictCoreReviewSupplement = `审稿时不要把模型的布尔值当作自证：先重述每条核心的目标动作、直接卡点和主要代价，再据此填写 goalForm。任何只复述 seed 事件、没有主角动作/决定的 preservedGoal 都必须判 event-or-state。第一层若出现故事种子中没有的现场人物、物品、动作、过去对白或外部事件，请在 unestablishedClaims 中逐项列出，并将 introducesNoUnestablishedFacts 判为 false；不要把它们当作普通临时条件放行。检查 mechanism 和 evidence：mechanism 必须回答“目标为什么无法继续”，evidence 必须逐字存在于 activeSituation 或 lockedFacts；evidence 不能为新的断言背书。任何只增加一个可忽略的附带条件、而没有改变目标可达性的核心，都必须判 obstacleThreatensGoal 为 false。若两个核心删去人物、物品、地点、画面和情绪后都可概括为同一种回避、等待或无法启动，即使表面不同，也必须判 usesDistinctMechanism 为 false。对于只提供一个当前事件的输入，只有当卡点分别来自信息未明、原文已建立的边界/限制、行动本身不可兼得的意义或代价等不可互换原因时，才可以判为机制不同；它们若都只是难开始行动仍然不通过。\n\n${conflictCoreDirectInferenceRules}`
+const conflictCoreReviewSupplement = `审稿时不要把模型的布尔值当作自证：先重述每条核心的目标动作、直接卡点和主要代价，再据此填写 goalForm。任何只复述 seed 事件、没有主角动作/决定的 preservedGoal 都必须判 event-or-state。storyHook 只是一句短展示文本，不能新增事实、场景动作或第二个阻碍；若它把原文没有的现场人物、物品、动作、过去对白或外部事件写成已成立事实，也必须在 unestablishedClaims 中列出。检查 mechanism 和 evidence：mechanism 必须回答“目标为什么无法继续”，evidence 必须逐字存在于 activeSituation 或 lockedFacts；evidence 不能为新的断言背书。任何只增加一个可忽略的附带条件、而没有改变目标可达性的核心，都必须判 obstacleThreatensGoal 为 false。若两个核心删去人物、物品、地点、画面和情绪后都可概括为同一种回避、等待或无法启动，即使表面不同，也必须判 usesDistinctMechanism 为 false。对于只提供一个当前事件的输入，只有当卡点分别来自信息未明、原文已建立的边界/限制、行动本身不可兼得的意义或代价等不可互换原因时，才可以判为机制不同；它们若都只是难开始行动仍然不通过。\n\n${conflictCoreDirectInferenceRules}`
 
 const conflictCoreReviewEvidenceSupplement = `mechanismEvidenceGrounded 只在以下条件同时成立时为 true：mechanismType 准确分类 mechanism；mechanism 准确概括 obstacle 的因果来源；evidence 的每项逐字出现在 activeSituation 或 lockedFacts；核心没有借这些原文补出新的关键事实。若任一条件不成立，填 false。`
 
 const conflictCoreContractReviewSystemPrompt = `你是一位严格的中文故事编辑审稿人。请判断每个候选冲突核心是否真的能驱动故事，而不是只制造一个看似有戏的插曲。
 
-必须严格返回 JSON 对象，不要 Markdown，不要解释，不要代码块。核心障碍只有在不处理它会让原始目标延后、失败、被迫改变，或使一个决定无法继续保持原有意义时才算成立；对于“决定是否/如何行动”这类目标，直接相关的信息未明或已建立边界带来的真实取舍可以构成阻碍，但单纯尴尬、麻烦、额外请求，或者主角仍能无代价地照常完成原目标，都必须判 obstacleThreatensGoal 为 false。requiresTradeoff 只有在继续目标必然会面对真实的损失、风险或取舍时才为 true，即使代价不会在第一层展示。hasSingleMechanism 只有在没有叠加第二个独立阻碍、完整场景、解法或结果时才为 true。sharesCommonGoal 只有在三条 preservedGoal 语义相同，且都保留用户明确目标或同一个最小可行动目标时才为 true。hasActionableGoal 只有在 preservedGoal 描述主角可完成或作出的动作/决定，并且明确引用原始 activeSituation 的对象、事件或动作，而不是“眼前事件”“下一步”“自然应对”“维持体面”“处理好关系”等抽象状态时才为 true。goalForm 必须分类为 explicit-goal、action、decision 或 event-or-state；只是在复述已经发生、正在发生或客观存在的事件，而没有主角要完成的动作/决定时，必须填 event-or-state 且 hasActionableGoal 为 false。goalAnchoredToSeed 只有在目标能让读者指出它对应 activeSituation 或 lockedFacts 中的具体对象、事件或动作时才为 true；仅有“完成应对、解决问题、维持体面”这类抽象意图，即使语法上像一个动作，也必须为 false。
+必须严格返回 JSON 对象，不要 Markdown，不要解释，不要代码块。storyHook 只是帮助读者比较的短句，不能把它当作已确认的当前场景或额外事实。核心障碍只有在不处理它会让原始目标延后、失败、被迫改变，或使一个决定无法继续保持原有意义时才算成立；对于“决定是否/如何行动”这类目标，直接相关的信息未明或已建立边界带来的真实取舍可以构成阻碍，但单纯尴尬、麻烦、额外请求，或者主角仍能无代价地照常完成原目标，都必须判 obstacleThreatensGoal 为 false。requiresTradeoff 只有在继续目标必然会面对真实的损失、风险或取舍时才为 true，即使代价不会在第一层展示。hasSingleMechanism 只有在没有叠加第二个独立阻碍、完整场景、解法或结果时才为 true。sharesCommonGoal 只有在三条 preservedGoal 语义相同，且都保留用户明确目标或同一个最小可行动目标时才为 true。hasActionableGoal 只有在 preservedGoal 描述主角可完成或作出的动作/决定，并且明确引用原始 activeSituation 的对象、事件或动作，而不是“眼前事件”“下一步”“自然应对”“维持体面”“处理好关系”等抽象状态时才为 true。goalForm 必须分类为 explicit-goal、action、decision 或 event-or-state；只是在复述已经发生、正在发生或客观存在的事件，而没有主角要完成的动作/决定时，必须填 event-or-state 且 hasActionableGoal 为 false。goalAnchoredToSeed 只有在目标能让读者指出它对应 activeSituation 或 lockedFacts 中的具体对象、事件或动作时才为 true；仅有“完成应对、解决问题、维持体面”这类抽象意图，即使语法上像一个动作，也必须为 false。
 
 introducesNoUnestablishedFacts 只有在核心没有把 unknowns 或未提及信息断言为事实时才为 true。要检查所有新增背景、身份、关系、责任、规则、资源、权限、心理状态和外部结果。第一层不允许用普通临时场景条件放行新人物、物品、动作、过去对白或外部事件；它们应在第二层具体困境中才出现。unestablishedClaims 必须列出候选中每一项不受种子支持的断言；若没有则返回空数组，不能为了让 introducesNoUnestablishedFacts 为 true 而省略。variationAxisFitsMechanism 只有在轴确实概括障碍机制时才为 true；时间轴必须有真实的时机或窗口压力，关系轴必须基于输入已建立的人际边界，资源轴必须基于输入已存在且对目标必要的条件，承诺轴必须基于输入已建立的承诺或责任。未建立的心理状态不能伪装成任意冲突轴。三条可以使用同一轴，不能因为轴重复而判错。forcesProtagonistDecision 只有在 decisionFocus 确实让主角必须主动选择，而不是等别人解决、单纯躲避或执行唯一正确答案时才为 true。supportsSustainedDevelopment 只有在任选一个合理起点后，仍可自然推进至少三步有后果的行动而不立刻解决时才为 true。hasEscalationPath 只有在不新增另一主冲突的前提下，当前阻碍可因选择、拖延或代价继续加压时才为 true。canSupportBalancedApproaches 只有在 decisionFocus 可生成两条并列、各有真实代价且没有明显更优的应对起点时才为 true。usesDistinctMechanism 只有在先去掉人物、物品、地点、画面和情绪后，这条核心的“目标为什么无法继续”仍与另外两条不同才为 true；若只是用不同表面载体重述同一种回避、等待或外部打断，必须为 false。候选核心不得写死精确秒数、步数、距离、路线、倒数、必须先后经过的完整行动、已经发生的回应或确定结局。`
 
@@ -3736,9 +3399,7 @@ const conflictCoreGroundingReviewSystemPrompt = `你是一位只做事实归因�
 
 抽象地描述“信息未明”“边界已被触发”等机制，也只有在其完整因果链由原文或允许的直接语义蕴含支持时才可放行；不能把未建立的具体情绪、动作、程序、关系或结果当作支撑。\n\n${conflictCoreDirectInferenceRules}\n\n若一条核心完全没有新增断言，unestablishedClaims 返回空数组。conflictCoreId 必须照抄输入，恰好覆盖本次输入中的全部候选。`
 
-const predicamentExpansionSystemPrompt = `你是一位擅长互动短篇故事的中文编辑。用户已经选定一个冲突核心；现在只把它展开为一个可进入故事的具体困境。
-
-必须严格返回 JSON 对象，不要 Markdown，不要解释，不要代码块。输出内容使用简体中文。必须逐字照抄输入的 variationAxis、preservedGoal、obstacle 和 tradeoff，不能换成另一条主线或另加第二个核心阻碍。输入中的 decisionFocus 是内部约束，不要原样写回 JSON，但 choice 和两条 approaches 必须围绕它展开。补齐一个当前场景、此刻需要处理的压力、当前已成立事实，以及两条彼此并列、都能开始且各有直接代价或不确定性的应对方向。用户会从 approaches 中选择一条，作为后续故事实际开始的路线；两条都必须是主角主动选择的不同起点，不能是连续步骤、唯一正确答案或等待他人替他解决，但此时不得预先写定具体开场、发展、他人回应、转折或结局。事实和行动构成可执行状态契约：fixed 不能被主角直接改写，unknown 不能作为行动前置条件或确定结果，actions 只能用既有事实支持，effects 只能指向 changeable 事实。不要把解法写成已经成功，也不要凭空补写特殊规则、权限、资源或他人的必然决定。`
+const predicamentExpansionSystemPrompt = `你是一位擅长互动短篇故事的中文编辑。用户已经选定一条冲突核心；现在把它展开成一份可执行的具体困境。\n\n必须严格返回 JSON 对象，不要 Markdown，不要解释，不要代码块。输出内容使用简体中文。必须逐字照抄输入的 variationAxis、preservedGoal、obstacle 和 tradeoff，不能换成另一条主线或另加第二个核心阻碍。输入中的 storyHook 只用于第一层比较，不是已经成立的当前场景或事实，不能照抄为 immediateSituation、facts、urgency、choice 或 plausibleCost；第二层必须自己建立当前场景、为什么必须现在处理、主角必须面对的取舍、共同风险，以及 2 到 4 条暂定事实。输入中的 decisionFocus 是内部约束，不要原样写回 JSON，但两条 approaches 必须围绕它展开。两条 approaches 必须彼此并列、都能开始且各有直接代价或不确定性；它们此时只用于证明困境有张力。进入“故事两端”后，用户才会从中选择一条作为故事实际开始的路线。两条都必须是主角主动选择的不同起点，不能是连续步骤、唯一正确答案或等待他人替他解决，但此时不得预先写定具体开场、发展、他人回应、转折或结局。\n\nimmediateSituation 可以首次补足普通、当下可见的画面，但它不能补写人物姓名、过去经历、固定关系、资源、权限、技术条件或他人的既定反应。facts 会进入后续状态：只保留已确认限制、与核心直接相连的暂定当前状态，或“尚未作出选择”这类可改变状态；不要把手机、号码、网络、临时工具、容器、渠道、场所规则或他人安排写成现成资源。urgency、choice 和 plausibleCost 只能从已确认阻碍、时限或取舍推出，不能假定别人会发现、转交、回应、拒绝，不能把主角的心意、创伤或关系结论当作已成立事实。approaches 可以提出尝试联系、暂缓或处理等普通选择，但不能预设具体通讯渠道、设备、权限、工具或成功结果。\n\n事实和行动构成可执行状态契约：fixed 不能被主角直接改写，unknown 不能作为行动前置条件或确定结果，actions 只能用既有事实支持，effects 只能指向 changeable 事实，并且必须指向行动后会真正改变的状态；不要把检查一个临时资源、重复原状态或无变化的观察当成状态变更。可以建立一个与已确认核心一致的普通当前场景，并补充不改变选择可行性的普通细节；这些细节不能变成新增限制、资源、权限、精确时限或他人的必然决定，也不要把解法写成已经成功。`
 
 const storySeedSystemPrompt = `你是一位严谨的中文故事编辑。请把用户已写出的念头整理成一份可跨步骤保留的故事种子。
 
@@ -3998,12 +3659,13 @@ const conflictCoreResponseSchema = `{
       "decisionFocus": "仅供后续生成使用的一句主动选择焦点；只在 preservedGoal 与 evidence 已明确的条件之间决定，不写具体方案、过程或结果",
       "mechanism": "仅供审核使用的因果机制标签；用不新增事实的短语概括目标为什么无法继续，例如明示条件受限、明示关系边界或明示意愿冲突；不得写成画面、道具、人物状态或具体过程",
       "mechanismType": "information-gap、boundary-conflict、meaning-commitment、initiation-block、window-pressure、resource-constraint 或 commitment-conflict",
-      "evidence": ["逐字摘取 activeSituation、lockedFacts，或明确标出的系统暂定设定中支持该机制的短语；没有证据就不要生成该机制"]
+      "evidence": ["逐字摘取 activeSituation、lockedFacts，或明确标出的系统暂定设定中支持该机制的短语；没有证据就不要生成该机制"],
+      "storyHook": "一句不超过 56 字的故事钩子；只重组已建立的目标、阻碍、取舍或对象，不写完整场景、紧迫性、行动、直接代价或新的事实"
     }
   ]
 }
 
-重要：恰好生成 3 条；三条要靠“阻碍如何卡住同一目标”的实质机制不同来区分，variationAxis 可以重复，不能把不同 axis 当作配额。先去掉人物、物品、地点、画面和情绪后，三条的“目标为什么无法继续”必须仍然不同；只替换表面载体不算不同。每条都必须有清楚的 tradeoff、decisionFocus、mechanism、mechanismType 和 evidence。mechanismType 必须准确描述因果来源，且三条不能重复；如果同一个稀薄事实不能支持三种不同类型，就不要虚构条件来凑数。mechanism 必须是可复述的因果差异，evidence 必须逐字来自故事种子。decisionFocus、mechanism、mechanismType 和 evidence 是服务端内部字段，不会展示给用户。obstacle 不得新增画面、现场动作、人物状态、具体规则、精确时间、步数、路线、完整行动或结局。只有 title、variationAxis、preservedGoal、obstacle 和 tradeoff 会进入第一层用户界面。`
+重要：恰好生成 3 条；三条要靠“阻碍如何卡住同一目标”的实质机制不同来区分，variationAxis 可以重复，不能把不同 axis 当作配额。先去掉人物、物品、地点、画面和情绪后，三条的“目标为什么无法继续”必须仍然不同；只替换表面载体不算不同。每条都必须有清楚的 tradeoff、decisionFocus、mechanism、mechanismType、evidence 和 storyHook。mechanismType 必须准确描述因果来源，且三条不能重复；如果同一个稀薄事实不能支持三种不同类型，就不要虚构条件来凑数。mechanism 必须是可复述的因果差异，evidence 必须逐字来自故事种子。decisionFocus、mechanism、mechanismType 和 evidence 是服务端内部字段。storyHook 会展示给用户，但只能是已建立信息的短钩子；不得把它写成当前场景、触发事件、行动选择、直接代价、永久背景、固定规则或结局。obstacle 仍不得新增画面、现场动作、人物状态、具体规则、精确时间、步数、路线、完整行动或结局。`
 
 const conflictCoreReplacementResponseSchema = `{
   "core": {
@@ -4015,7 +3677,8 @@ const conflictCoreReplacementResponseSchema = `{
     "decisionFocus": "只在目标和已建立证据之间的主动选择焦点",
     "mechanism": "不新增事实的目标受阻因果短语",
     "mechanismType": "information-gap、boundary-conflict、meaning-commitment、initiation-block、window-pressure、resource-constraint 或 commitment-conflict",
-    "evidence": ["逐字摘取支持 mechanism 的原文或明确系统暂定设定"]
+    "evidence": ["逐字摘取支持 mechanism 的原文或明确系统暂定设定"],
+    "storyHook": "一句只重组已建立信息的短钩子，不写新的场景、行动或代价"
   }
 }`
 
@@ -4059,12 +3722,12 @@ const predicamentExpansionResponseSchema = `{
     "title": "不超过 12 个字、描述困境的标题",
     "variationAxis": "逐字照抄已确认冲突核心的 variationAxis",
     "preservedGoal": "逐字照抄已确认冲突核心的 preservedGoal",
-    "immediateSituation": "此刻开始发生的具体小情境；最多引入一项可撤销的临时假设",
+    "immediateSituation": "此刻开始发生的具体小情境；由第二层首次建立，不照抄 storyHook",
     "obstacle": "逐字照抄已确认冲突核心的 obstacle",
     "tradeoff": "逐字照抄已确认冲突核心的 tradeoff",
-    "urgency": "为什么现在需要处理",
-    "choice": "主角此刻必须面对的核心取舍；不预设具体行动过程",
-    "plausibleCost": "不处理或仓促处理该阻碍时的共同风险",
+    "urgency": "说明为什么现在需要处理",
+    "choice": "写主角此刻必须面对的核心取舍，不预设具体行动过程",
+    "plausibleCost": "写不处理或仓促处理该阻碍时的共同风险",
     "approaches": [
       { "intent": "第一条可行的应对方向", "cost": "它的直接代价或不确定性" },
       { "intent": "第二条可行的应对方向", "cost": "它的直接代价或不确定性" }
@@ -4097,7 +3760,8 @@ const predicamentExpansionResponseSchema = `{
 2. facts 必须有 2 到 4 个，每个 fact 的 id 格式为 "fact-1", "fact-2" 等
 3. actions 必须有 1 到 3 个，每个 action 的 id 格式为 "action-1", "action-2" 等
 4. action.preconditions 必须引用上面 facts 数组中存在的、非 unknown 的 fact id
-5. action.effects 必须引用上面 facts 数组中存在的、mutability 为 changeable 的 fact id`
+5. action.effects 必须引用上面 facts 数组中存在的、mutability 为 changeable 的 fact id
+6. storyHook 只用于第一层比较，不能当作已确认事实或要求逐字承接；当前场景、压力、取舍和共同风险都必须在这一层首次完整建立`
 
 function buildStorySeedPrompt(idea: string, repairMessage?: string): string {
   const repair = repairMessage
@@ -4133,7 +3797,7 @@ ${idea}
 已从原文提取的故事种子：
 ${formatStorySeed(seed)}
 
-用户选择让系统先给一版。请提出一个共同故事起点，并在其中规划恰好三条彼此独立的创作分支。不要把系统暂定内容写成用户已经说过的事实；保留所有原始信息，不要用具体人物、地点、时间、结果或复杂小剧情硬凑戏剧性。${goalInstruction} stake 和 constraint 共同构成三条分支共享的起点；directions 中每一条 premise 和 tradeoff 只属于自己的分支，是用户可选择的系统暂定前提。三条 mechanismType 必须不同，且每条都要能单独支撑一条冲突核心。${repair}\n\n粒度必须保持最小：stake、constraint、每条 premise、每条 tradeoff 各只写一句，且只表达一个条件或一个取舍。优先从原始目标、事件、时限或承诺中得到三个不同机制；共同 stake 和 constraint 不得凭原始信息新增资源或操作状态。除非原始念头明确给出，否则不要写精确数字或钟点、账号密码、设备故障或接口、网络电量、文书条款、机构流程、他人的既定状态或过去事件；也不要把主角自己的承诺改写成他人已经拒绝或禁止联系的边界，不要把内容未知改写成他人的偏好、意愿或期待，不要补写主角心理动机或关系结论，也不要写“先做什么再做什么”的操作流程。可用“信息尚未确认”“已有承诺会被触碰”“可用窗口收窄”“继续会承担一项代价”这类抽象机制表达。\n\n每条 directions 都必须保留共同目标，只提出一项最小、可编辑的分支前提，明确目标为什么会因此受阻以及继续时要接受什么取舍；不要把另外两条分支的前提混进来，也不要把三条分支写成同一故事中同时成立的事实。严格使用以下 JSON：
+用户选择让系统先给一版。请提出一个共同故事起点，并在其中规划恰好三条彼此独立的创作分支。不要把系统暂定内容写成用户已经说过的事实；保留所有原始信息，不要用具体人物、地点、时间、结果或复杂小剧情硬凑戏剧性。${goalInstruction} stake 和 constraint 共同构成三条分支共享的起点；directions 中每一条 premise 和 tradeoff 只属于自己的分支，是用户可选择的系统暂定前提。三条 mechanismType 必须不同，且每条都要能单独支撑一条冲突核心。${repair}\n\n粒度必须保持最小：stake、constraint、每条 premise、每条 tradeoff 各只写一句，且只表达一个条件或一个取舍。优先从原始目标、事件、时限或承诺中得到不同机制；共同 stake 和 constraint 不得凭原始信息新增资源或操作状态。系统暂定不是给具体虚构事实加标签：任何未由原文支持的内容只能是无人物、无物品归属、无过去经历、无他人态度或许可、无明确处理方式或结果的抽象机制，例如“暂定：完成目标所需的一项信息尚未确认”。不能借“暂定”写出某人当面承诺、物品主人未知、未经许可、具体交付方式、心理状态或既定后果。除非原始念头明确给出，否则不要写精确数字或钟点、账号密码、设备故障或接口、网络电量、文书条款、机构流程、他人的既定状态或过去事件；也不要把主角自己的承诺改写成他人已经拒绝或禁止联系的边界，不要把内容未知改写成他人的偏好、意愿或期待，不要补写主角心理动机或关系结论，也不要写“先做什么再做什么”的操作流程。可用“信息尚未确认”“已有承诺会被触碰”“可用窗口收窄”“继续会承担一项代价”这类抽象机制表达。\n\n每条 directions 都必须保留共同目标，只提出一项最小、可编辑的分支前提，明确目标为什么会因此受阻以及继续时要接受什么取舍；不要把另外两条分支的前提混进来，也不要把三条分支写成同一故事中同时成立的事实。严格使用以下 JSON：
 ${getSystemConflictCoreDraftResponseSchema(seed)}`
 }
 
@@ -4159,7 +3823,7 @@ ${JSON.stringify(candidate)}
 
 上一版检查结果：${repairMessage}
 
-请重写整份 systemDraft。${goalInstruction} 每个 stake、constraint、premise、tradeoff 只能是一句、一个条件或一个取舍；删除所有精确数字、钟点、技术/设备状态、资源操作状态、文书流程、机构信息、他人既定态度、未建立的心理结论和完整行动链。不要把“她答应过不再打扰”改写成对方明确拒绝或禁止联系；不要把未知内容改写成对方的期待或意愿。优先使用抽象且可编辑的表达，例如“信息尚无法确认”“已有承诺会被触碰”“可用窗口正在收窄”。三条 directions 必须恰好存在、mechanismType 互不相同、彼此互斥，并且每条只保留一个最小前提和一个取舍。不要解释，只返回以下 JSON：
+请重写整份 systemDraft。${goalInstruction} 每个 stake、constraint、premise、tradeoff 只能是一句、一个条件或一个取舍；删除所有精确数字、钟点、技术/设备状态、资源操作状态、文书流程、机构信息、他人既定态度、未建立的心理结论和完整行动链。系统暂定不能新增具体的人物经历、物品归属、他人许可、交付方式或结果；即使加了“暂定”也不能把这些未建立内容写成成立事实。不要把“她答应过不再打扰”改写成对方明确拒绝或禁止联系；不要把未知内容改写成对方的期待或意愿。优先使用抽象且可编辑的表达，例如“暂定：完成目标所需的一项信息尚未确认”“已有承诺会被触碰”“可用窗口正在收窄”。三条 directions 必须恰好存在、mechanismType 互不相同、彼此互斥，并且每条只保留一个最小前提和一个取舍。不要解释，只返回以下 JSON：
 ${getSystemConflictCoreDraftResponseSchema(seed)}`
 }
 
@@ -4208,38 +3872,7 @@ function buildConflictCorePrompt(
       `分支 ${index + 1}：名称「${direction.label}」；机制「${direction.mechanismType}」；暂定前提「${direction.premise}」；暂定取舍「${direction.tradeoff}」`
     )).join('\n')}`
     : ''
-  return `用户的模糊想法：\n---\n${request.idea}\n---\n\n${formatStorySeed(seed)}\n\n${getConflictCoreGoalInstruction(seed)}${getSparseSeedConflictCoreInstruction(seed)}${directionInstructions}\n\n扩展尺度：${getExpansionScopeInstruction(request.expansionScope ?? 'keep-scale')}\n${request.preference ? `用户偏好：${request.preference}` : ''}\n${request.excludedTitles?.length ? `请避免重复标题：${request.excludedTitles.join('、')}` : ''}${repair}\n\n第一层对用户只回答三件事：“主角想完成什么？现在被什么卡住？为了继续必须放弃、冒险失去或暂时无法兼得什么？”。保留原始目标，目标必须锚定故事种子中的对象、事件或动作；核心阻碍要直接威胁它，且只写已建立事实构成的因果卡点；tradeoff 只能表达核心取舍。另输出一条仅供后续使用的 decisionFocus，用来约束主角随后必须作出的主动选择；它不进入用户界面。不要写具体画面、现场动作、路线、金额、人物帮助、精确时间、步数、完整行动或结局。严格使用以下 JSON：\n${conflictCoreResponseSchema}`
-}
-
-function buildConflictCoreBranchPrompt(
-  request: StoryDirectionsRequest,
-  seed: StorySeed,
-  direction: SystemDraftDirection,
-  index: number,
-  repairMessage: string,
-): string {
-  const excludedTitles = request.excludedTitles?.length
-    ? `\n请不要使用这些已淘汰标题：${request.excludedTitles.join('、')}。`
-    : ''
-
-  return `用户的模糊想法：
----
-${request.idea}
----
-
-${formatStorySeed(seed)}
-
-这是系统暂定设定中的第 ${index + 1} 条互斥创作分支。系统暂定分支名称：「${direction.label}」
-分支机制类型：${direction.mechanismType}
-分支暂定前提：「${direction.premise}」
-分支暂定取舍：「${direction.tradeoff}」
-
-只生成这一条分支的冲突核心，不要生成其他分支，也不要把其他分支的前提带入本条。preservedGoal 必须使用共同目标；mechanismType 必须逐字为「${direction.mechanismType}」；evidence 至少逐字引用分支暂定前提或分支暂定取舍。系统暂定前提不是用户原话，但用户已选择系统先给一版，因此可以作为本分支的可编辑创作假设，不能扩写成新的背景、人物、规则、结果或完整行动过程。${repairMessage}
-
-  ${excludedTitles}
-
-  严格使用以下 JSON（只返回 core 对象）：
-${conflictCoreReplacementResponseSchema}`
+  return `用户的模糊想法：\n---\n${request.idea}\n---\n\n${formatStorySeed(seed)}\n\n${getConflictCoreGoalInstruction(seed)}${getSparseSeedConflictCoreInstruction(seed)}${directionInstructions}\n\n扩展尺度：${getExpansionScopeInstruction(request.expansionScope ?? 'keep-scale')}\n${request.preference ? `用户偏好：${request.preference}` : ''}\n${request.excludedTitles?.length ? `请避免重复标题：${request.excludedTitles.join('、')}` : ''}${repair}\n\n第一层只让用户比较三条冲突核心：主角想完成什么、现在被什么卡住、为了继续暂时无法兼得什么。保留原始目标，目标必须锚定故事种子中的对象、事件或动作；核心阻碍要直接威胁它，且只写已建立事实构成的因果卡点；tradeoff 只能表达核心取舍。另输出一条仅供后续使用的 decisionFocus，用来约束主角随后必须作出的主动选择；它不进入用户界面。storyHook 只用一句很短的话为这条冲突提供阅读钩子，必须重组已建立的对象、目标、阻碍或取舍，不能写完整当前场景、紧迫性、行动选择、直接代价或新的创作事实。具体场景、暂定事实和两条应对方向全部留到第二层。严格使用以下 JSON：\n${conflictCoreResponseSchema}`
 }
 
 function buildConflictCoreReplacementPrompt(
@@ -4359,7 +3992,7 @@ function buildConflictCoreReviewPrompt(
   const comparison = comparisonCores.length !== cores.length
     ? `\n横向比较参考（只用于判断机制差异和共同目标，不要为这些参考候选返回 review）：\n${JSON.stringify(comparisonCores)}`
     : ''
-  return `原始念头：\n---\n${idea}\n---\n\n${formatStorySeed(seed)}\n\n扩展尺度：${getExpansionScopeInstruction(expansionScope)}${allowedSources}\n\n待审核候选冲突核心：\n${JSON.stringify(cores)}${comparison}\n\n请逐条审查目标连续性、目标威胁、单一阻碍、真正两难、主角主动决定、可持续推进和升级空间；再横向比较待审核候选是否拥有不同的阻碍机制。审查 goalAnchoredToSeed 时，必须把 preservedGoal 对照 activeSituation 和 lockedFacts，确认目标保留了原始对象、事件或动作，而不是仅凭“应对/处理/解决”这样的动词通过。先检查每条 mechanism 是否准确概括 obstacle 的因果原因，再检查 evidence 是否逐字出现在 ${evidenceSourceDescription}；evidence 不能让候选凭空增加事实。系统暂定设定若存在，只可作为用户主动选择的本次路径前提，不得标成原文，并且每条只能使用上方对应编号的 systemDraftBranch。审查 usesDistinctMechanism 时，先抽象出每条“目标无法继续的原因”，忽略人物、道具、地点和画面，再比较原因是否真的不同。候选核心不得写死精确秒数、步数、距离、路线、倒数、固定先后动作、已经发生的回应和确定结局。只审查第一层字段和内部 decisionFocus、mechanism、evidence，不要求具体场景。conflictCoreId 必须照抄待审核输入，恰好覆盖 ${cores.length} 条。${repair}\n严格使用：\n${getConflictCoreReviewResponseSchema(cores)}`
+  return `原始念头：\n---\n${idea}\n---\n\n${formatStorySeed(seed)}\n\n扩展尺度：${getExpansionScopeInstruction(expansionScope)}${allowedSources}\n\n待审核候选冲突核心：\n${JSON.stringify(cores)}${comparison}\n\n请逐条审查目标连续性、目标威胁、单一阻碍、真正两难、主角主动决定、可持续推进和升级空间；再横向比较待审核候选是否拥有不同的阻碍机制。审查 goalAnchoredToSeed 时，必须把 preservedGoal 对照 activeSituation 和 lockedFacts，确认目标保留了原始对象、事件或动作，而不是仅凭“应对/处理/解决”这样的动词通过。先检查每条 mechanism 是否准确概括 obstacle 的因果原因，再检查 evidence 是否逐字出现在 ${evidenceSourceDescription}；evidence 不能让候选凭空增加事实。系统暂定设定若存在，只可作为用户主动选择的本次路径前提，不得标成原文，并且每条只能使用上方对应编号的 systemDraftBranch。审查 usesDistinctMechanism 时，先抽象出每条“目标无法继续的原因”，忽略人物、道具、地点和画面，再比较原因是否真的不同。候选核心不得写死精确秒数、步数、距离、路线、倒数、固定先后动作、已经发生的回应和确定结局。审查 preservedGoal、obstacle、tradeoff、storyHook 和内部 decisionFocus、mechanism、evidence；storyHook 必须只是已建立信息的短钩子，不能用来推导当前场景或新事实。conflictCoreId 必须照抄待审核输入，恰好覆盖 ${cores.length} 条。${repair}\n严格使用：\n${getConflictCoreReviewResponseSchema(cores)}`
 }
 
 function buildConflictCoreGroundingReviewPrompt(
@@ -4389,7 +4022,7 @@ ${allowedSources}
 待核对的第一层候选：
 ${JSON.stringify(cores)}
 
-请逐条核对每个候选的 preservedGoal、obstacle、tradeoff、decisionFocus 和 mechanism。只列出没有被该候选允许事实源建立、却被候选写成已成立事实或因果前提的断言；不要评价结构，不要重述所有正确内容。systemDraftCommon 和 systemDraftBranch 是明确允许的系统暂定前提，不能仅因它们不在原始念头中就列为 unestablishedClaims；但候选仍不能把它们扩写成新的动作、位置、距离、视线、态度、过去经历、规则或结果。尤其不能因为 evidence 引用了一个宽泛片段，就认可该片段之外的断言。若只是把允许事实源中的对象、事件或动作组织成一个尚未发生的最小“决定是否/如何回应”目标，不要将这种必要组织本身列为新增事实。每条候选都必须返回 unestablishedClaims 数组；没有问题时返回空数组。conflictCoreId 必须照抄输入，并且只覆盖以上 ${cores.length} 条候选。${repair}
+请逐条核对每个候选的 preservedGoal、obstacle、tradeoff、storyHook、decisionFocus 和 mechanism。storyHook 只可重组该候选已经允许的对象、目标、限制或取舍；不能把它当作已成立场景，也不能由它推出新的人物、动作、压力或后果。只列出没有被该候选允许事实源建立、却被候选核心字段写成已成立事实或因果前提的断言；不要评价结构，不要重述所有正确内容。systemDraftCommon 和 systemDraftBranch 是明确允许的系统暂定前提，不能仅因它们不在原始念头中就列为 unestablishedClaims；但候选仍不能把它们扩写成新的动作、位置、距离、视线、态度、过去经历、规则或结果。尤其不能因为 evidence 引用了一个宽泛片段，就认可该片段之外的断言。若只是把允许事实源中的对象、事件或动作组织成一个尚未发生的最小“决定是否/如何回应”目标，不要将这种必要组织本身列为新增事实。每条候选都必须返回 unestablishedClaims 数组；没有问题时返回空数组。conflictCoreId 必须照抄输入，并且只覆盖以上 ${cores.length} 条候选。${repair}
 
 严格使用：
 ${getConflictCoreGroundingReviewResponseSchema(cores)}`
@@ -4418,7 +4051,14 @@ function buildPredicamentExpansionPrompt(
   core: StoredStoryConflictCore,
   repairMessage?: string,
 ): string {
-  return `用户最初的想法：\n---\n${idea}\n---\n\n${formatStorySeed(seed)}\n\n${formatStoryRealityContractContext(seed)}\n\n已确认的冲突核心（必须逐字保留 variationAxis、preservedGoal、obstacle 和 tradeoff）：\n${JSON.stringify(core)}\n\n内部选择焦点（不能原样写回 JSON）：${getConflictCoreDecisionFocus(core)}\n\n请展开为一个具体困境：补齐 immediateSituation、urgency、facts、恰好 2 条 approaches、choice 和 plausibleCost。choice 与两条 approaches 都必须回应内部选择焦点。用户会选择其中一条 approach，后续头尾与逐步发展必须从该方向实际开始；因此两条都要是主角可主动选择、各有真实代价且没有明显更优的独立起点，不能是连续步骤、等待他人解决或同一办法的改写，也不能在这里预先写定具体回应、转折或结局。具体场景只引入一项临时假设，不能新增第二个核心阻碍。${repairMessage ? `\n上一版未通过结构检查：${repairMessage}。请重写全部具体困境。` : ''}\n\n严格使用以下 JSON：\n${predicamentExpansionResponseSchema}`
+  const { storyHook, ...confirmedCore } = core
+  const hookInstruction = storyHook
+    ? `\n上一层的故事钩子仅供比较：「${storyHook}」。它不是已经成立的场景或事实，不得逐字承接，也不能拿它补出新的限制、人物或结果。`
+    : ''
+  const repair = repairMessage
+    ? `\n上一版未通过结构检查：${repairMessage}。请重写全部具体困境。`
+    : ''
+  return `用户最初的想法：\n---\n${idea}\n---\n\n${formatStorySeed(seed)}\n\n${formatStoryRealityContractContext(seed)}\n\n已确认的冲突核心（必须逐字保留 variationAxis、preservedGoal、obstacle 和 tradeoff）：\n${JSON.stringify(confirmedCore)}${hookInstruction}\n\n内部选择焦点（不能原样写回 JSON）：${getConflictCoreDecisionFocus(core)}\n\n请展开为一个具体困境：补齐 immediateSituation、urgency、choice、plausibleCost、2 到 4 条 facts、恰好 2 条 approaches 和必要的 actions。choice 与两条 approaches 都必须回应内部选择焦点。两条 approach 此时只展示，不要求用户立刻选择；进入“故事两端”后，用户会选其中一条作为实际故事路线，后续头尾与逐步发展必须从该方向实际开始。因此两条都要是主角可主动选择、各有真实代价且没有明显更优的独立起点，不能是连续步骤、等待他人解决或同一办法的改写，也不能在这里预先写定具体回应、转折或结局。当前场景可以由与已确认核心一致的普通细节构成，但这些细节不能变成新增限制、资源、权限、精确时限、他人的必然决定或第二个核心阻碍。${repair}\n\n严格使用以下 JSON：\n${predicamentExpansionResponseSchema}`
 }
 
 function formatStorySeed(seed: StorySeed): string {
@@ -4955,6 +4595,7 @@ function parseModelConflictCore(value: unknown, index: number): StoredStoryConfl
     mechanism: readText(record, 'mechanism', message, 80, invalidModelOutputContext),
     mechanismType,
     evidence: readRequiredTextList(record, 'evidence', 1, 2, 80, message, invalidModelOutputContext),
+    storyHook: readText(record, 'storyHook', message, 96, invalidModelOutputContext),
   }
 }
 
@@ -5112,9 +4753,14 @@ function validatePredicamentNarrative(
 ) {
   const factsById = new Map(predicament.facts.map((fact) => [fact.id, fact]))
   for (const action of predicament.actions) {
+    const changesStaticResource = action.effects.some((factId) => {
+      const statement = factsById.get(factId)?.statement ?? ''
+      return /(?:手机|电话|通讯录|号码|网络|账号|设备|工具|容器|小盒|收纳)/u.test(statement)
+    })
     if (
       action.preconditions.some((factId) => factsById.get(factId)?.mutability === undefined || factsById.get(factId)?.mutability === 'unknown')
       || action.effects.some((factId) => factsById.get(factId)?.mutability !== 'changeable')
+      || changesStaticResource
     ) {
       throw new AppError(message, context.statusCode, context.code)
     }

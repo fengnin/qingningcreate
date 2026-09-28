@@ -97,7 +97,7 @@ export function OpeningScreen({ session }: { session: StorySession }) {
           </span>
         </label>
         <button className="primary-action opening-action" type="button" onClick={() => void session.openConflictCorePicker()} disabled={!session.trimmedIdea}>
-          寻找冲突核心 <ArrowRight size={18} />
+          生成三条冲突核心 <ArrowRight size={18} />
         </button>
       </section>
       <footer className="opening-footer"><StoryJourney current={0} /></footer>
@@ -110,8 +110,6 @@ export function ConflictCorePickerScreen({ session }: { session: StorySession })
   const hasConflictCores = session.conflictCores.length > 0
   const [contextRouteView, setContextRouteView] = useState<ConflictCoreContextRouteView>()
   const [hasEnteredContextRoute, setHasEnteredContextRoute] = useState(false)
-  const [isSystemDraftEditorOpen, setIsSystemDraftEditorOpen] = useState(false)
-  const systemDraft = session.seed?.systemDraft
   const hasSystemDraftGenerationFailure = session.stageErrorCode === 'SYSTEM_DRAFT_GENERATION_FAILED'
   const hasSystemDraftConflictCoreFailure = session.stageErrorCode === 'SYSTEM_DRAFT_CONFLICT_CORE_RETRY_EXHAUSTED'
   const systemDraftPrefill = hasSystemDraftGenerationFailure
@@ -129,7 +127,6 @@ export function ConflictCorePickerScreen({ session }: { session: StorySession })
     || isSystemDraftFallbackEditorOpen
 
   const showContextRouteChoice = () => {
-    setIsSystemDraftEditorOpen(false)
     setContextRouteView('choice')
   }
   const chooseManualContext = () => {
@@ -145,10 +142,6 @@ export function ConflictCorePickerScreen({ session }: { session: StorySession })
     setContextRouteView(undefined)
     await session.applyConflictCoreContext(context)
   }
-  const applySystemDraftAsContext = async (context: StoryConflictCoreContext) => {
-    setIsSystemDraftEditorOpen(false)
-    await session.applyConflictCoreContext(context)
-  }
   const retryConflictCoreStage = () => {
     if (hasSystemDraftGenerationFailure || hasSystemDraftConflictCoreFailure) {
       generateSystemDraft()
@@ -159,7 +152,6 @@ export function ConflictCorePickerScreen({ session }: { session: StorySession })
   }
   const shouldReturnToContextChoice = isManualContextFormOpen
     || isSystemDraftFallbackEditorOpen
-    || isSystemDraftEditorOpen
     || (hasEnteredContextRoute && !isContextChoiceVisible)
   const goBackFromConflictCore = () => {
     if (shouldReturnToContextChoice) {
@@ -175,13 +167,13 @@ export function ConflictCorePickerScreen({ session }: { session: StorySession })
       step={1}
       eyebrow="01 / 06 · 冲突核心"
       title="先确认，主角到底会被什么卡住。"
-      lead="先只选共同目标、核心阻碍和真正的两难；具体场景与当下压力留到下一步。"
+      lead="先比较同一目标下的阻碍与取舍；具体场景、紧迫性和应对方向留到下一步。"
       session={session}
       aside={<ConflictCoreSummary seed={session.seed} core={session.selectedConflictCore} />}
       onBack={goBackFromConflictCore}
       backLabel={shouldReturnToContextChoice ? '返回补充方式' : undefined}
     >
-      {isLoading && <GenerationNotice label="正在寻找三种冲突核心" detail="先保留故事主线，再判断什么会真正阻断它。" />}
+      {isLoading && <GenerationNotice label="正在生成三条冲突核心" detail="先保留故事主线，再判断什么会真正阻断它。" />}
       {isContextRecoveryVisible ? (
         <ConflictCoreContextRecovery
           session={session}
@@ -206,38 +198,19 @@ export function ConflictCorePickerScreen({ session }: { session: StorySession })
           <div className="stage-heading">
             <div>
               <p>围绕“{session.trimmedIdea}”继续</p>
-              <strong>三种不同的卡点，都从同一个目标出发。</strong>
+              <strong>三种不同的冲突机制，都从同一个目标出发。</strong>
             </div>
-            <span>先比较难处，再确认哪一种值得展开。</span>
+            <span>比较阻碍和取舍，再确认哪一种值得展开。</span>
           </div>
           <div className="conflict-core-goal" aria-label="共同目标">
-            <span><Target size={14} /> 共同目标</span>
+            <span><Target size={14} /> 原始目标</span>
             <strong>{session.seed?.lockedGoal ?? session.conflictCores[0]?.preservedGoal}</strong>
           </div>
-          {systemDraft && (
-            <SystemDraftSummary
-              draft={systemDraft}
-              onEdit={() => {
-                setHasEnteredContextRoute(true)
-                setIsSystemDraftEditorOpen(true)
-              }}
-            />
-          )}
-          {systemDraft && isSystemDraftEditorOpen && (
-            <ConflictCoreContextForm
-              idea={session.trimmedIdea}
-              initialContext={mergeConflictCoreContext(session.conflictCoreContext, systemDraft)}
-              systemDraft={systemDraft}
-              disabled={isLoading}
-              onApplyContext={applySystemDraftAsContext}
-            />
-          )}
           {session.conflictCoreFeedback.trim() && <p className="conflict-core-feedback-status"><Sparkles size={14} /> 已记住：“{session.conflictCoreFeedback.trim()}”</p>}
           <div className="conflict-core-list" aria-label="冲突核心">
             {session.conflictCores.map((core, index) => (
               <ConflictCoreOption
                 core={core}
-                branchPremise={systemDraft?.directions?.length === 3 ? systemDraft.directions[index]?.premise : undefined}
                 index={index}
                 key={core.id}
                 selected={core.id === session.selectedConflictCoreId}
@@ -253,7 +226,7 @@ export function ConflictCorePickerScreen({ session }: { session: StorySession })
           />
           <StageActions
             onNext={() => void session.continueToPredicament()}
-            nextLabel="确认这个冲突核心"
+            nextLabel="展开这条冲突核心"
             disabled={!session.selectedConflictCore}
           />
         </>
@@ -324,51 +297,6 @@ function ConflictCoreContextRecovery({
   )
 }
 
-function SystemDraftSummary({
-  draft,
-  onEdit,
-}: {
-  draft: StoryConflictCoreSystemDraft
-  onEdit: () => void
-}) {
-  const isDeterministicFallback = draft.origin === 'deterministic-fallback'
-
-  return (
-    <section className="system-draft-summary" aria-label="系统暂定设定">
-      <header>
-        <span><Sparkles size={14} /> 系统暂定设定</span>
-        <button className="text-action" type="button" onClick={onEdit}>改为自己补充</button>
-      </header>
-      {isDeterministicFallback && (
-        <p className="system-draft-fallback-note"><CircleAlert size={14} /> 模型审核暂时不可用；以下是可编辑的确定性草案，不代表原始事实，也不代表审核通过。</p>
-      )}
-      <dl>
-        <div><dt>目标</dt><dd>{draft.goal}</dd></div>
-        <div><dt>代价</dt><dd>{draft.stake}</dd></div>
-        <div><dt>限制</dt><dd>{draft.constraint}</dd></div>
-      </dl>
-      {draft.directions?.length === 3 && (
-        <ol className="system-draft-directions" aria-label="系统暂定冲突方向">
-          {draft.directions.map((direction, index) => (
-            <li key={`${direction.mechanismType}-${direction.label}`}>
-              <span>{String(index + 1).padStart(2, '0')}</span>
-              <div>
-                <strong>{direction.label}</strong>
-                <p>{direction.premise}</p>
-                <p className="system-draft-direction-tradeoff"><small>取舍</small>{direction.tradeoff}</p>
-              </div>
-            </li>
-          ))}
-        </ol>
-      )}
-      <p>{draft.directions?.length === 3
-        ? '三条前提是互斥的系统暂定分支；选中一条后，只有该方向会进入后续故事。'
-        : '这组前提由系统提出，不是原始念头；当前冲突核心会以它为基础继续展开。'}
-      </p>
-    </section>
-  )
-}
-
 export function PredicamentPickerScreen({ session }: { session: StorySession }) {
   const isLoading = session.stageStatus === 'loading'
   const predicament = session.predicament
@@ -378,7 +306,7 @@ export function PredicamentPickerScreen({ session }: { session: StorySession }) 
       step={2}
       eyebrow="02 / 06 · 具体困境"
       title="再把这个阻碍，落到一个当下局面。"
-      lead="把冲突落到当前局面，再选择一条应对方向作为后续故事的起点。"
+      lead="补齐当前场景、缘由、暂定事实和两条应对方向，先确认故事为什么必须从这里开始。"
       session={session}
       aside={<PredicamentSummary seed={session.seed} predicament={predicament} approach={session.selectedApproach} />}
     >
@@ -392,16 +320,13 @@ export function PredicamentPickerScreen({ session }: { session: StorySession }) 
         {predicament && (
           <PredicamentDetail
             predicament={predicament}
-            selectedApproachId={session.selectedApproachId}
-            onSelectApproach={session.selectPredicamentApproach}
-            disabled={isLoading}
           />
         )}
         <StageActions
           onRegenerate={() => void session.regeneratePredicament()}
-          onNext={() => void session.continueToHeadTail()}
+          onNext={session.continueToHeadTail}
           nextLabel="确认这个具体困境"
-          disabled={!predicament || !session.selectedApproach}
+          disabled={!predicament}
         />
       </StepContent>
     </StoryWorkspace>
@@ -409,39 +334,61 @@ export function PredicamentPickerScreen({ session }: { session: StorySession }) 
 }
 
 export function HeadTailScreen({ session }: { session: StorySession }) {
+  const isLoading = session.stageStatus === 'loading'
+  const hasHeadTailOptions = session.headTailOptions.length > 0
+
   return (
     <StoryWorkspace
       step={3}
       eyebrow="03 / 06 · 故事两端"
       title="先定故事从哪里开始，最后如何结束。"
-      lead="选择迫使故事开始的事件，并定下主角最后亲自完成的行动、目标结果与代价。"
+      lead="先选故事要从哪条应对方向开始，再定下开场、关键行动和结尾。"
       session={session}
       aside={<PredicamentSummary seed={session.seed} predicament={session.predicament} approach={session.selectedApproach} compact />}
     >
       <StepContent
-        loading={session.stageStatus === 'loading'}
+        loading={isLoading}
         error={session.stageError}
         loadingLabel="正在生成三种故事两端"
         loadingDetail="让开场线索在预定结尾中得到回应。"
         onRetry={() => void session.retryCurrentStage()}
       >
-        <div className="head-tail-list">
-          {session.headTailOptions.map((option, index) => (
-            <HeadTailOption
-              key={option.id}
-              option={option}
-              index={index}
-              selected={option.id === session.selectedHeadTailId}
-              onSelect={session.selectHeadTail}
+        {session.predicament && (
+          <PredicamentApproachPicker
+            approaches={session.predicament.approaches}
+            selectedApproachId={session.selectedApproachId}
+            onSelectApproach={session.selectPredicamentApproach}
+            disabled={isLoading}
+            heading="选择故事要从哪条方向开始"
+          />
+        )}
+        {hasHeadTailOptions ? (
+          <>
+            <div className="head-tail-list">
+              {session.headTailOptions.map((option, index) => (
+                <HeadTailOption
+                  key={option.id}
+                  option={option}
+                  index={index}
+                  selected={option.id === session.selectedHeadTailId}
+                  onSelect={session.selectHeadTail}
+                />
+              ))}
+            </div>
+            <StageActions
+              onRegenerate={() => void session.regenerateHeadTail()}
+              onNext={() => void session.continueToStorySpine()}
+              nextLabel="确认两端，开始逐步发展"
+              disabled={!session.selectedHeadTail}
             />
-          ))}
-        </div>
-        <StageActions
-          onRegenerate={() => void session.regenerateHeadTail()}
-          onNext={() => void session.continueToStorySpine()}
-          nextLabel="确认两端，开始逐步发展"
-          disabled={!session.selectedHeadTail}
-        />
+          </>
+        ) : (
+          <StageActions
+            onNext={() => void session.regenerateHeadTail()}
+            nextLabel="按这条方向生成故事两端"
+            disabled={!session.selectedApproach}
+          />
+        )}
       </StepContent>
     </StoryWorkspace>
   )
@@ -708,13 +655,11 @@ function StageActions({ onRegenerate, onNext, nextLabel, disabled }: {
 
 function ConflictCoreOption({
   core,
-  branchPremise,
   index,
   selected,
   onSelect,
 }: {
   core: StoryConflictCore
-  branchPremise?: string
   index: number
   selected: boolean
   onSelect: (id: string) => void
@@ -733,7 +678,7 @@ function ConflictCoreOption({
       </span>
       <span className="conflict-core-option-content">
         <strong className="conflict-core-option-title">{core.title}</strong>
-        {branchPremise && <span className="conflict-core-option-premise"><small>本方向暂定</small><b>{branchPremise}</b></span>}
+        {core.storyHook && <span className="conflict-core-option-premise"><small>故事钩子</small><b>{core.storyHook}</b></span>}
         <span className="conflict-core-option-obstacle">
           <small>核心阻碍</small>
           <b>{core.obstacle}</b>
@@ -749,14 +694,8 @@ function ConflictCoreOption({
 
 function PredicamentDetail({
   predicament,
-  selectedApproachId,
-  onSelectApproach,
-  disabled,
 }: {
   predicament: StoryPredicament
-  selectedApproachId: string | undefined
-  onSelectApproach: (id: string) => void
-  disabled: boolean
 }) {
   return (
     <section className="predicament-detail" aria-label="具体困境">
@@ -769,12 +708,7 @@ function PredicamentDetail({
         <p>{predicament.immediateSituation}</p>
       </div>
       <PredicamentContext predicament={predicament} />
-      <PredicamentApproachPicker
-        approaches={predicament.approaches}
-        selectedApproachId={selectedApproachId}
-        onSelectApproach={onSelectApproach}
-        disabled={disabled}
-      />
+      <PredicamentApproachPreviewList approaches={predicament.approaches} />
     </section>
   )
 }
@@ -800,22 +734,40 @@ function PredicamentContext({ predicament }: { predicament: StoryPredicament }) 
   )
 }
 
+function PredicamentApproachPreviewList({ approaches }: { approaches: StoryPredicamentApproach[] }) {
+  return (
+    <PredicamentApproachList
+      approaches={approaches}
+      heading="两条可行的应对方向"
+      ariaLabel="可行应对方向"
+      renderApproach={(approach, index) => (
+        <div className="predicament-approach is-preview" key={approach.id}>
+          <PredicamentApproachCardContent approach={approach} index={index} />
+        </div>
+      )}
+    />
+  )
+}
+
 function PredicamentApproachPicker({
   approaches,
   selectedApproachId,
   onSelectApproach,
   disabled,
+  heading,
 }: {
   approaches: StoryPredicamentApproach[]
   selectedApproachId: string | undefined
   onSelectApproach: (id: string) => void
   disabled: boolean
+  heading: string
 }) {
   return (
-    <section className="predicament-approach-section" aria-label="选择应对方向">
-      <p>选择一条应对方向</p>
-      <div className="predicament-approaches">
-        {approaches.map((approach, index) => (
+    <PredicamentApproachList
+      approaches={approaches}
+      heading={heading}
+      ariaLabel="选择应对方向"
+      renderApproach={(approach, index) => (
           <PredicamentApproachOption
             approach={approach}
             index={index}
@@ -824,7 +776,27 @@ function PredicamentApproachPicker({
             onSelect={onSelectApproach}
             disabled={disabled}
           />
-        ))}
+      )}
+    />
+  )
+}
+
+function PredicamentApproachList({
+  approaches,
+  heading,
+  ariaLabel,
+  renderApproach,
+}: {
+  approaches: StoryPredicamentApproach[]
+  heading: string
+  ariaLabel: string
+  renderApproach: (approach: StoryPredicamentApproach, index: number) => ReactNode
+}) {
+  return (
+    <section className="predicament-approach-section" aria-label={ariaLabel}>
+      <p>{heading}</p>
+      <div className="predicament-approaches">
+        {approaches.map(renderApproach)}
       </div>
     </section>
   )
@@ -851,13 +823,31 @@ function PredicamentApproachOption({
       aria-pressed={selected}
       disabled={disabled}
     >
+      <PredicamentApproachCardContent approach={approach} index={index} selected={selected} />
+    </button>
+  )
+}
+
+function PredicamentApproachCardContent({
+  approach,
+  index,
+  selected,
+}: {
+  approach: StoryPredicamentApproach
+  index: number
+  selected?: boolean
+}) {
+  return (
+    <>
       <span className="predicament-approach-heading">
         <span className="predicament-approach-label">方向 {index + 1}</span>
-        <span className="choice-indicator" aria-hidden="true">{selected ? <Check size={14} /> : <span />}</span>
+        {selected !== undefined && (
+          <span className="choice-indicator" aria-hidden="true">{selected ? <Check size={14} /> : <span />}</span>
+        )}
       </span>
       <strong>{approach.intent}</strong>
       <span className="predicament-approach-cost"><b>直接代价</b><span>{approach.cost}</span></span>
-    </button>
+    </>
   )
 }
 
@@ -1008,6 +998,7 @@ function ConflictCoreSummary({ seed, core }: { seed: StorySession['seed']; core:
         <div><dt>{getStoryGoalLabel(seed)}</dt><dd>{seed?.lockedGoal ?? core.preservedGoal}</dd></div>
         <div><dt>核心阻碍</dt><dd>{core.obstacle}</dd></div>
         <div><dt>真正的两难</dt><dd>{core.tradeoff}</dd></div>
+        {core.storyHook && <div><dt>故事钩子</dt><dd>{core.storyHook}</dd></div>}
       </dl>
       <div className="aside-principle"><Lightbulb size={16} /><span>下一步会把这个阻碍落到具体局面，但不会偷偷换掉目标。</span></div>
     </>
