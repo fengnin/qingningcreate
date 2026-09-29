@@ -53,8 +53,8 @@ export interface StorySeed {
   lockedGoal: string | null
   lockedFacts: string[]
   /**
-   * A provisional premise proposed after the user explicitly chooses the
-   * system-led route. It is never extracted from or attributed to the input.
+   * A provisional premise proposed by the system for a sparse idea. It is
+   * never extracted from or attributed to the input.
    */
   systemDraft?: StoryConflictCoreSystemDraft
   worldMode: 'realistic-default' | 'user-specified'
@@ -111,7 +111,8 @@ export type StoryConflictCoreSystemDraftOrigin = 'model' | 'deterministic-fallba
 
 /**
  * The system's clearly labelled, editable premise for a sparse idea. It is
- * only present when the user asks the system to draft a first direction.
+ * created automatically when the first layer lacks enough user facts, or on
+ * an explicit user request for another system-led set.
  */
 export interface StoryConflictCoreSystemDraft {
   goal: string
@@ -130,8 +131,7 @@ export interface StoryConflictCoreSystemDraft {
 
 /**
  * The first-layer choice. It names the common goal, the single obstacle, and
- * the thing the protagonist cannot keep while continuing. storyHook is only
- * a short reading hook; it is not a confirmed scene fact.
+ * the thing the protagonist cannot keep while continuing.
  */
 export interface StoryConflictCore {
   id: string
@@ -140,6 +140,7 @@ export interface StoryConflictCore {
   preservedGoal: string
   obstacle: string
   tradeoff: string
+  /** Retained for persisted sessions created before the three-field picker. */
   storyHook?: string
 }
 

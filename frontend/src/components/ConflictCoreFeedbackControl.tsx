@@ -54,7 +54,7 @@ export function ConflictCoreFeedbackControl({
             value={feedbackDraft}
             onChange={(event) => setFeedbackDraft(event.target.value)}
             onKeyDown={handleFeedbackKeyDown}
-            placeholder="例如：时间更紧，或关系上更难选择"
+            placeholder="例如：更意外、关系更尴尬，或更有反差"
             maxLength={80}
             autoFocus
           />

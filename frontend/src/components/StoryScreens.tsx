@@ -206,6 +206,9 @@ export function ConflictCorePickerScreen({ session }: { session: StorySession })
             <span><Target size={14} /> 原始目标</span>
             <strong>{session.seed?.lockedGoal ?? session.conflictCores[0]?.preservedGoal}</strong>
           </div>
+          {session.seed?.systemDraft && (
+            <p className="conflict-core-feedback-status"><Sparkles size={14} /> 以下三条是系统暂定的创意方向；选中一条后，才会成为后续故事的前提。</p>
+          )}
           {session.conflictCoreFeedback.trim() && <p className="conflict-core-feedback-status"><Sparkles size={14} /> 已记住：“{session.conflictCoreFeedback.trim()}”</p>}
           <div className="conflict-core-list" aria-label="冲突核心">
             {session.conflictCores.map((core, index) => (
@@ -214,6 +217,7 @@ export function ConflictCorePickerScreen({ session }: { session: StorySession })
                 index={index}
                 key={core.id}
                 selected={core.id === session.selectedConflictCoreId}
+                isSystemDraft={Boolean(session.seed?.systemDraft)}
                 onSelect={session.selectConflictCore}
               />
             ))}
@@ -320,6 +324,7 @@ export function PredicamentPickerScreen({ session }: { session: StorySession }) 
         {predicament && (
           <PredicamentDetail
             predicament={predicament}
+            isSystemDraft={Boolean(session.seed?.systemDraft?.activeDirection)}
           />
         )}
         <StageActions
@@ -657,11 +662,13 @@ function ConflictCoreOption({
   core,
   index,
   selected,
+  isSystemDraft,
   onSelect,
 }: {
   core: StoryConflictCore
   index: number
   selected: boolean
+  isSystemDraft: boolean
   onSelect: (id: string) => void
 }) {
   return (
@@ -673,12 +680,11 @@ function ConflictCoreOption({
     >
       <span className="conflict-core-option-topline">
         <span className="conflict-core-option-index">{String(index + 1).padStart(2, '0')}</span>
-        <span className="conflict-core-option-axis">{conflictAxisLabel[core.variationAxis]}</span>
+        <span className="conflict-core-option-axis">{isSystemDraft ? '创意方向' : conflictAxisLabel[core.variationAxis]}</span>
         <span className="conflict-core-option-choice" aria-hidden="true">{selected ? <Check size={14} /> : <span />}</span>
       </span>
       <span className="conflict-core-option-content">
         <strong className="conflict-core-option-title">{core.title}</strong>
-        {core.storyHook && <span className="conflict-core-option-premise"><small>故事钩子</small><b>{core.storyHook}</b></span>}
         <span className="conflict-core-option-obstacle">
           <small>核心阻碍</small>
           <b>{core.obstacle}</b>
@@ -694,8 +700,10 @@ function ConflictCoreOption({
 
 function PredicamentDetail({
   predicament,
+  isSystemDraft,
 }: {
   predicament: StoryPredicament
+  isSystemDraft: boolean
 }) {
   return (
     <section className="predicament-detail" aria-label="具体困境">
@@ -704,16 +712,22 @@ function PredicamentDetail({
         <h2>{predicament.title}</h2>
       </header>
       <div className="predicament-scene">
-        <span>当前场景</span>
+        <span>{isSystemDraft ? '当前场景（系统暂定）' : '当前场景'}</span>
         <p>{predicament.immediateSituation}</p>
       </div>
-      <PredicamentContext predicament={predicament} />
+      <PredicamentContext predicament={predicament} isSystemDraft={isSystemDraft} />
       <PredicamentApproachPreviewList approaches={predicament.approaches} />
     </section>
   )
 }
 
-function PredicamentContext({ predicament }: { predicament: StoryPredicament }) {
+function PredicamentContext({
+  predicament,
+  isSystemDraft,
+}: {
+  predicament: StoryPredicament
+  isSystemDraft: boolean
+}) {
   return (
     <>
       <dl className="predicament-facts">
@@ -724,8 +738,8 @@ function PredicamentContext({ predicament }: { predicament: StoryPredicament }) 
         <div><dt>必须面对</dt><dd>{predicament.choice}</dd></div>
         <div><dt>共同风险</dt><dd>{predicament.plausibleCost}</dd></div>
       </dl>
-      <section className="predicament-known-facts" aria-label="暂定事实">
-        <p>暂定事实</p>
+      <section className="predicament-known-facts" aria-label={isSystemDraft ? '系统暂定事实' : '暂定事实'}>
+        <p>{isSystemDraft ? '系统暂定事实' : '暂定事实'}</p>
         <ul>
           {predicament.facts.map((fact) => <li key={fact.id}>{fact.statement}</li>)}
         </ul>
@@ -998,7 +1012,6 @@ function ConflictCoreSummary({ seed, core }: { seed: StorySession['seed']; core:
         <div><dt>{getStoryGoalLabel(seed)}</dt><dd>{seed?.lockedGoal ?? core.preservedGoal}</dd></div>
         <div><dt>核心阻碍</dt><dd>{core.obstacle}</dd></div>
         <div><dt>真正的两难</dt><dd>{core.tradeoff}</dd></div>
-        {core.storyHook && <div><dt>故事钩子</dt><dd>{core.storyHook}</dd></div>}
       </dl>
       <div className="aside-principle"><Lightbulb size={16} /><span>下一步会把这个阻碍落到具体局面，但不会偷偷换掉目标。</span></div>
     </>

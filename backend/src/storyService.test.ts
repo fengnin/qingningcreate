@@ -5,9 +5,22 @@ import type {
   StoryConflictCoreSystemDraft,
   StoryNarrativeState,
   StoryPredicament,
+  StoryTurn,
   StoryTransition,
 } from '../../shared/story-contract.js'
-import { validatePredicamentForConflictCore, validateSystemConflictCoreDraft } from './storyService.js'
+import {
+  createBoundedSystemConflictCoreDraftFallback,
+  createCoreAnchoredPredicamentFallback,
+  createOriginalIdeaFallbackSeed,
+  createSystemDraftCandidatePreservingFallback,
+  createSystemDraftHeadTailFallback,
+  createSystemDraftConflictCoreFallback,
+  createSystemDraftStoryTurnFallback,
+  shouldAutoGenerateSystemConflictCoreDraft,
+  validatePredicamentForConflictCore,
+  validateSystemConflictCoreDraft,
+  validateSystemDraftStoryTurnContinuation,
+} from './storyService.js'
 import { createNarrativeStateMachine } from './storyState.js'
 
 const examples = {
@@ -60,6 +73,486 @@ function createValidDraft(): StoryConflictCoreSystemDraft {
     ],
   }
 }
+
+const sparseIdea = '青柠去游乐园'
+const sparseSeed = {
+  activeSituation: sparseIdea,
+  lockedGoal: '去游乐园',
+  lockedFacts: ['青柠去游乐园'],
+}
+
+const reportSeed = {
+  activeSituation: '周岚要提交报告',
+  lockedGoal: '提交报告',
+  lockedFacts: ['周岚要提交报告'],
+}
+
+function createSparseSystemDraft(): StoryConflictCoreSystemDraft {
+  return createBoundedSystemConflictCoreDraftFallback(sparseSeed)
+}
+
+function createCreativeSparseSystemDraft(): StoryConflictCoreSystemDraft {
+  return {
+    goal: reportSeed.lockedGoal,
+    stake: '继续提交报告需要承担一项取舍',
+    constraint: '当前会有一个主要阻碍',
+    origin: 'model',
+    directions: [
+      {
+        label: '末页便签',
+        mechanismType: 'information-gap',
+        premise: '暂定：报告末页夹着一张写着陌生名字的便签',
+        tradeoff: '按原计划提交，还是先保住便签里的名字',
+      },
+      {
+        label: '划掉的句子',
+        mechanismType: 'meaning-commitment',
+        premise: '暂定：报告里有一处被反复划掉的陌生句子',
+        tradeoff: '保留原句提交，还是让这处空白留在报告里',
+      },
+      {
+        label: '未署名附页',
+        mechanismType: 'initiation-block',
+        premise: '暂定：报告后面多出一页未署名的附页',
+        tradeoff: '把附页留在报告里，还是先拿掉这页',
+      },
+    ],
+  }
+}
+
+function formatDirectionForExpectation(direction: string): string {
+  return direction.includes('「') ? direction : `「${direction}」`
+}
+
+test('uses a system draft for a goal-only idea but not for a detailed seed', () => {
+  assert.equal(shouldAutoGenerateSystemConflictCoreDraft(sparseSeed), true)
+  assert.equal(shouldAutoGenerateSystemConflictCoreDraft(seed), false)
+})
+
+test('keeps a bare idea actionable when the model seed extraction is unavailable', () => {
+  const amusement = createOriginalIdeaFallbackSeed('青柠去游乐园', undefined)
+  const apology = createOriginalIdeaFallbackSeed('阿南想向朋友道歉', undefined)
+  const report = createOriginalIdeaFallbackSeed('周岚要提交报告', undefined)
+
+  assert.deepEqual(
+    [amusement.subject, amusement.lockedGoal],
+    ['青柠', '去游乐园'],
+  )
+  assert.deepEqual(
+    [apology.subject, apology.lockedGoal],
+    ['阿南', '向朋友道歉'],
+  )
+  assert.deepEqual(
+    [report.subject, report.lockedGoal],
+    ['周岚', '提交报告'],
+  )
+})
+
+test('adapts deterministic creative drafts to the target and avoids prior motifs', () => {
+  const amusementDraft = createBoundedSystemConflictCoreDraftFallback(sparseSeed)
+  const reportDraft = createBoundedSystemConflictCoreDraftFallback(reportSeed)
+  const apologySeed = {
+    subject: '阿南',
+    activeSituation: '阿南想向朋友道歉',
+    lockedGoal: '向朋友道歉',
+    lockedFacts: ['阿南想向朋友道歉'],
+  }
+  const apologyDraft = createBoundedSystemConflictCoreDraftFallback(apologySeed)
+  const refreshedAmusementDraft = createBoundedSystemConflictCoreDraftFallback(
+    sparseSeed,
+    amusementDraft.directions?.map((direction) => direction.label),
+  )
+
+  assert.equal(amusementDraft.goal, sparseSeed.lockedGoal)
+  assert.equal(reportDraft.goal, reportSeed.lockedGoal)
+  assert.equal(apologyDraft.goal, apologySeed.lockedGoal)
+  assert.notDeepEqual(amusementDraft.directions, reportDraft.directions)
+  assert.deepEqual(
+    amusementDraft.directions?.map((direction) => direction.mechanismType),
+    reportDraft.directions?.map((direction) => direction.mechanismType),
+  )
+  assert.match(JSON.stringify(amusementDraft.directions), /去游乐园/u)
+  assert.match(JSON.stringify(reportDraft.directions), /提交报告/u)
+  assert.match(JSON.stringify(amusementDraft.directions), /游园图/u)
+  assert.match(JSON.stringify(reportDraft.directions), /文稿页/u)
+  assert.match(JSON.stringify(apologyDraft.directions), /便签/u)
+  assert.match(JSON.stringify(apologyDraft.directions), /阿南/u)
+  assert.notDeepEqual(
+    amusementDraft.directions?.map((direction) => direction.label),
+    refreshedAmusementDraft.directions?.map((direction) => direction.label),
+  )
+  assert.doesNotMatch(JSON.stringify(amusementDraft.directions), /(?:条件缺口|当前限制|时间受限|旧物上的陌生话|陌生人的请求|继续的直接代价)/u)
+  assert.doesNotMatch(JSON.stringify(amusementDraft.directions), /一件眼下不能替代的东西/u)
+  for (const [idea, draft, draftSeed] of [
+    [sparseIdea, amusementDraft, sparseSeed],
+    [reportSeed.activeSituation, reportDraft, reportSeed],
+    [apologySeed.activeSituation, apologyDraft, apologySeed],
+    [sparseIdea, refreshedAmusementDraft, sparseSeed],
+  ] as const) {
+    assert.doesNotThrow(() => validateSystemConflictCoreDraft(idea, draftSeed, draft))
+  }
+})
+
+test('keeps a usable creative branch when a later model branch becomes a workflow', () => {
+  const draft: StoryConflictCoreSystemDraft = {
+    goal: sparseSeed.lockedGoal,
+    stake: '继续去游乐园需要承担一项取舍',
+    constraint: '当前会有一个主要阻碍',
+    origin: 'model',
+    directions: [
+      {
+        label: '旧照片上的陌生日期',
+        mechanismType: 'information-gap',
+        premise: '暂定：与去游乐园有关的旧照片上多出一个陌生日期',
+        tradeoff: '先查清日期，还是照原计划去游乐园',
+      },
+      {
+        label: '入园核验',
+        mechanismType: 'boundary-conflict',
+        premise: '暂定：工作人员要求完成现场核验',
+        tradeoff: '配合核验，还是暂不继续',
+      },
+      {
+        label: '继续的代价',
+        mechanismType: 'commitment-conflict',
+        premise: '暂定：继续去游乐园会失去一件眼下不能替代的东西',
+        tradeoff: '承担代价继续，还是保住它暂缓行动',
+      },
+    ],
+  }
+
+  assert.throws(
+    () => validateSystemConflictCoreDraft(sparseIdea, sparseSeed, draft),
+    /流程、资格或系统规定/,
+  )
+})
+
+test('keeps a partial creative draft and fills its missing directions with visible hooks', () => {
+  const candidate: StoryConflictCoreSystemDraft = {
+    goal: sparseSeed.lockedGoal,
+    stake: '继续去游乐园需要承担一项取舍',
+    constraint: '当前会有一个主要阻碍',
+    origin: 'model',
+    directions: [
+      {
+        label: '旧照片上的陌生日期',
+        mechanismType: 'information-gap',
+        premise: '暂定：与去游乐园有关的旧照片上多出一个陌生日期',
+        tradeoff: '先查清日期，还是照原计划去游乐园',
+      },
+      {
+        label: '入园核验',
+        mechanismType: 'boundary-conflict',
+        premise: '暂定：工作人员要求完成现场核验',
+        tradeoff: '配合核验，还是暂不继续',
+      },
+      {
+        label: '继续的代价',
+        mechanismType: 'commitment-conflict',
+        premise: '暂定：继续去游乐园会失去一件眼下不能替代的东西',
+        tradeoff: '承担代价继续，还是保住它暂缓行动',
+      },
+    ],
+  }
+
+  const fallback = createSystemDraftCandidatePreservingFallback(sparseIdea, sparseSeed, candidate)
+
+  assert.equal(fallback.origin, 'model')
+  assert.equal(fallback.directions?.[0]?.label, '旧照片上的陌生日期')
+  assert.deepEqual(fallback.directions?.slice(1).map((direction) => direction.mechanismType), [
+    'boundary-conflict',
+    'commitment-conflict',
+  ])
+  assert.doesNotMatch(JSON.stringify(fallback.directions), /一件眼下不能替代的东西/u)
+  assert.doesNotThrow(() => validateSystemConflictCoreDraft(sparseIdea, sparseSeed, fallback))
+})
+
+test('does not discard retained directions when they use a different valid mechanism type', () => {
+  const candidate: StoryConflictCoreSystemDraft = {
+    goal: sparseSeed.lockedGoal,
+    stake: '继续去游乐园需要承担一项取舍',
+    constraint: '当前会有一个主要阻碍',
+    origin: 'model',
+    directions: [
+      {
+        label: '旧照片上的陌生日期',
+        mechanismType: 'information-gap',
+        premise: '暂定：与去游乐园有关的旧照片上多出一个陌生日期',
+        tradeoff: '先查清日期，还是照原计划去游乐园',
+      },
+      {
+        label: '划掉的署名',
+        mechanismType: 'meaning-commitment',
+        premise: '暂定：一张写着主角名字的纸上，有一道未干的划痕',
+        tradeoff: '保留这个名字继续，还是亲手划掉它暂缓行动',
+      },
+    ],
+  }
+
+  const fallback = createSystemDraftCandidatePreservingFallback(sparseIdea, sparseSeed, candidate)
+
+  assert.equal(fallback.origin, 'model')
+  assert.deepEqual(fallback.directions?.map((direction) => direction.mechanismType), [
+    'information-gap',
+    'meaning-commitment',
+    'boundary-conflict',
+  ])
+  assert.doesNotThrow(() => validateSystemConflictCoreDraft(sparseIdea, sparseSeed, fallback))
+})
+
+test('allows one bounded provisional premise for each sparse-idea direction', () => {
+  assert.doesNotThrow(() => validateSystemConflictCoreDraft(
+    sparseIdea,
+    sparseSeed,
+    createSparseSystemDraft(),
+  ))
+})
+
+test('allows a concrete one-hook system draft without treating it as user fact', () => {
+  const draft = createCreativeSparseSystemDraft()
+
+  assert.doesNotThrow(() => validateSystemConflictCoreDraft(
+    reportSeed.activeSituation,
+    reportSeed,
+    draft,
+  ))
+
+  const cores = createSystemDraftConflictCoreFallback({
+    lockedGoal: reportSeed.lockedGoal,
+    systemDraft: draft,
+  })
+  assert.deepEqual(cores?.map((core) => core.title), draft.directions?.map((direction) => direction.label))
+  assert.deepEqual(cores?.map((core) => core.obstacle), draft.directions?.map((direction) => direction.premise))
+})
+
+test('allows a dramatic single-hook draft with one direct choice on each side', () => {
+  const draft: StoryConflictCoreSystemDraft = {
+    goal: '看演唱会',
+    stake: '继续这件事会失去一项眼下重要的东西',
+    constraint: '目标旁出现了一个需要回应的反常信号',
+    origin: 'model',
+    directions: [
+      {
+        label: '门票背面有陌生字迹',
+        mechanismType: 'information-gap',
+        premise: '暂定：青柠手中的纸质门票背面，用蓝墨水写着“别进去”三个字',
+        tradeoff: '撕掉字迹直接入场，还是保留字迹原地停步',
+      },
+      {
+        label: '安检员递来未署名纸条',
+        mechanismType: 'boundary-conflict',
+        premise: '暂定：安检员递还青柠背包时，多塞进一张没写字的白纸条',
+        tradeoff: '当场展开纸条，还是收起纸条',
+      },
+      {
+        label: '口袋里多出旧号码',
+        mechanismType: 'meaning-commitment',
+        premise: '暂定：青柠口袋里多出一张写着旧号码的纸条',
+        tradeoff: '把纸条留在手里进场，还是当场撕掉纸条',
+      },
+    ],
+  }
+
+  assert.doesNotThrow(() => validateSystemConflictCoreDraft('青柠看演唱会', {
+    activeSituation: '青柠看演唱会',
+    lockedGoal: '看演唱会',
+    lockedFacts: ['青柠', '看演唱会'],
+  }, draft))
+})
+
+test('accepts a mistaken-name hook as a bounded identity conflict', () => {
+  const draft = createCreativeSparseSystemDraft()
+  draft.directions![1] = {
+    label: '叫错的名字',
+    mechanismType: 'boundary-conflict',
+    premise: '暂定：一个陌生人把主角叫成另一个名字',
+    tradeoff: '顺着这个错认听下去，还是当场否认继续当前目标',
+  }
+
+  assert.doesNotThrow(() => validateSystemConflictCoreDraft(
+    reportSeed.activeSituation,
+    reportSeed,
+    draft,
+  ))
+})
+
+test('rejects a creative hook that expands into a staged scene or prescribed route', () => {
+  const draft = createCreativeSparseSystemDraft()
+  draft.directions![1] = {
+    label: '检票口的黑口罩',
+    mechanismType: 'boundary-conflict',
+    premise: '暂定：检票员身后突然伸来一只手，递出黑口罩，没说话只盯着主角的眼睛',
+    tradeoff: '戴上口罩被带往未知侧门，还是坚持原计划走正门入场',
+  }
+
+  assert.throws(
+    () => validateSystemConflictCoreDraft(reportSeed.activeSituation, reportSeed, draft),
+    /(?:连续现场动作|既定路线或被他人带领)/u,
+  )
+})
+
+test('carries only the selected creative hook into the second-layer contract', () => {
+  const systemDraft = createCreativeSparseSystemDraft()
+  systemDraft.activeDirection = systemDraft.directions?.[0]
+  const activeSeed = { ...reportSeed, systemDraft }
+  const core = createSystemDraftConflictCoreFallback(activeSeed)?.[0]
+  assert.ok(core)
+
+  const predicament = createCoreAnchoredPredicamentFallback(activeSeed, core)
+  assert.match(predicament.immediateSituation, /末页夹着一张写着陌生名字的便签/u)
+  assert.match(predicament.facts[0]?.statement ?? '', /系统暂定阻碍/u)
+  assert.doesNotMatch(
+    JSON.stringify(predicament),
+    /(?:门票|票务|手机|支付|工作人员|身份证|二维码|审批|手续)/u,
+  )
+  assert.doesNotThrow(() => validatePredicamentForConflictCore(
+    reportSeed.activeSituation,
+    activeSeed,
+    core,
+    predicament,
+  ))
+})
+
+test('rejects a system hook that writes a process, result, or settled person state', () => {
+  const cases: Array<{ name: string; change: (draft: StoryConflictCoreSystemDraft) => void }> = [
+    {
+      name: 'action chain',
+      change: (draft) => { draft.directions![0].premise = '暂定：先找出便签来源再决定是否提交' },
+    },
+    {
+      name: 'finished result',
+      change: (draft) => { draft.directions![1].premise = '暂定：报告已经被处理完成' },
+    },
+    {
+      name: 'settled person state',
+      change: (draft) => { draft.directions![2].premise = '暂定：一位匿名人物已经离开' },
+    },
+    {
+      name: 'invented deadline',
+      change: (draft) => { draft.directions![2].tradeoff = '在两小时内提交，还是放弃这次机会' },
+    },
+  ]
+
+  for (const { name, change } of cases) {
+    const draft = createCreativeSparseSystemDraft()
+    change(draft)
+    assert.throws(
+      () => validateSystemConflictCoreDraft(reportSeed.activeSituation, reportSeed, draft),
+      /系统暂定设定需要收紧/,
+      name,
+    )
+  }
+})
+
+test('keeps sparse system draft branches above scene-level detail', () => {
+  const cases: Array<{ name: string; change: (draft: StoryConflictCoreSystemDraft) => void }> = [
+    {
+      name: 'ticket repurchase and cash outcome',
+      change: (draft) => { draft.directions![0].tradeoff = '补齐凭证耗尽现金，还是保住现金' },
+    },
+    {
+      name: 'inspector and credential workflow',
+      change: (draft) => { draft.directions![1].premise = '暂定：工作人员要求出示身份证件' },
+    },
+    {
+      name: 'identity confirmation and verification workflow',
+      change: (draft) => {
+        draft.directions![1].premise = '暂定：需要本人现场确认身份'
+        draft.directions![1].tradeoff = '配合现场核验流程，还是暂不继续当前目标'
+      },
+    },
+    {
+      name: 'borrowing a credential and leaving contact details',
+      change: (draft) => { draft.directions![1].tradeoff = '借用他人证件，还是留下联系方式' },
+    },
+    {
+      name: 'reserved attraction outcome',
+      change: (draft) => { draft.directions![2].tradeoff = '预约具体项目，还是放弃当前目标' },
+    },
+  ]
+
+  for (const { name, change } of cases) {
+    const draft = createSparseSystemDraft()
+    change(draft)
+    assert.throws(
+      () => validateSystemConflictCoreDraft(sparseIdea, sparseSeed, draft),
+      /具体资源、身份、支付、预约或流程/,
+      name,
+    )
+  }
+})
+
+test('creates three grounded conflict cores when model core generation is exhausted', () => {
+  const draft = createSparseSystemDraft()
+  const fallback = createSystemDraftConflictCoreFallback({
+    lockedGoal: sparseSeed.lockedGoal,
+    systemDraft: draft,
+  })
+
+  assert.equal(fallback?.length, 3)
+  assert.deepEqual(fallback?.map((core) => core.obstacle), draft.directions!.map((direction) => direction.premise))
+  assert.deepEqual(fallback?.map((core) => core.tradeoff), draft.directions!.map((direction) => direction.tradeoff))
+})
+
+test('maps an allowed system hook into a conflict core without reinterpreting its mystery as fact', () => {
+  const draft: StoryConflictCoreSystemDraft = {
+    goal: '看演唱会',
+    stake: '继续看演唱会需要承担一项取舍',
+    constraint: '当前会有一个主要阻碍',
+    origin: 'model',
+    directions: [
+      {
+        label: '陌生警告',
+        mechanismType: 'information-gap',
+        premise: '暂定：门票背面写着“别进去，他在找你”',
+        tradeoff: '先追究这句话，还是照原计划看演唱会',
+      },
+      {
+        label: '认错身份',
+        mechanismType: 'boundary-conflict',
+        premise: '暂定：一个陌生人把青柠认成了另一个人',
+        tradeoff: '顺着误认继续，还是当场否认它',
+      },
+      {
+        label: '继续的代价',
+        mechanismType: 'commitment-conflict',
+        premise: '暂定：继续看演唱会会失去一件眼下不能替代的东西',
+        tradeoff: '承担代价继续，还是保住它暂缓行动',
+      },
+    ],
+  }
+  const cores = createSystemDraftConflictCoreFallback({ lockedGoal: '看演唱会', systemDraft: draft })
+
+  assert.deepEqual(cores?.map((core) => core.obstacle), draft.directions?.map((direction) => direction.premise))
+  assert.match(cores?.[0]?.decisionFocus ?? '', /他在找你/u)
+})
+
+test('rejects a sparse system draft that turns tradeoffs into action scenes', () => {
+  const cases: Array<{ name: string; change: (draft: StoryConflictCoreSystemDraft) => void }> = [
+    {
+      name: 'searching and alternative entry method',
+      change: (draft) => { draft.directions![0].tradeoff = '先观察旧物再作决定，还是立刻作决定' },
+    },
+    {
+      name: 'current location and movement instruction',
+      change: (draft) => { draft.directions![1].premise = '暂定：当前位置无法直接继续当前目标' },
+    },
+    {
+      name: 'companion binding workflow',
+      change: (draft) => { draft.directions![2].tradeoff = '先回应眼前请求再继续，还是立刻继续' },
+    },
+  ]
+
+  for (const { name, change } of cases) {
+    const draft = createSparseSystemDraft()
+    change(draft)
+    assert.throws(
+      () => validateSystemConflictCoreDraft(sparseIdea, sparseSeed, draft),
+      /(?:完整行动流程|具体行动步骤、地点或执行方式)/,
+      name,
+    )
+  }
+})
 
 test('allows abstract system draft mechanisms without inventing facts', () => {
   assert.doesNotThrow(() => validateSystemConflictCoreDraft(idea, seed, createValidDraft()))
@@ -241,6 +734,162 @@ test('allows a second-layer scene while keeping the conflict core intact', () =>
   ))
 })
 
+test('allows an ordinary current scene reference while rejecting invented interaction history', () => {
+  const currentScene = createValidPredicament()
+  currentScene.immediateSituation = '当前现场中，安澜还没有决定是否送回耳环。'
+  assert.doesNotThrow(() => validatePredicamentForConflictCore(
+    idea,
+    seed,
+    predicamentCore,
+    currentScene,
+  ))
+
+  const inventedHistory = createValidPredicament()
+  inventedHistory.immediateSituation = '安澜曾当面答应不再联系，现在还没有决定是否送回耳环。'
+  assert.throws(
+    () => validatePredicamentForConflictCore(idea, seed, predicamentCore, inventedHistory),
+    /具体困境.+未建立/,
+  )
+})
+
+test('builds a grounded fallback predicament from the selected conflict core', () => {
+  const fallback = createCoreAnchoredPredicamentFallback(seed, {
+    id: 'conflict-core-1',
+    title: '归还前的决定',
+    ...predicamentCore,
+  })
+
+  assert.match(fallback.immediateSituation, /婚礼彩排前/u)
+  assert.equal(fallback.approaches[0]?.intent, '在礼服明早要还的时限内决定是否送回去。')
+  assert.equal(fallback.approaches[1]?.intent, '暂不决定。')
+  assert.equal(fallback.approaches.length, 2)
+  assert.equal(fallback.actions[0]?.effects[0], 'fact-decision')
+  assert.doesNotThrow(() => validatePredicamentForConflictCore(idea, seed, predicamentCore, fallback))
+})
+
+test('turns a selected sparse system direction into a bounded predicament contract', () => {
+  const core = createSystemDraftConflictCoreFallback({
+    lockedGoal: sparseSeed.lockedGoal,
+    systemDraft: createSparseSystemDraft(),
+  })?.[0]
+  assert.ok(core)
+
+  const fallback = createCoreAnchoredPredicamentFallback(sparseSeed, core)
+  const [firstDirection, secondDirection] = core.tradeoff
+    .split('还是')
+    .map((value) => value.trim().replace(/[，、。！？\s]+$/u, ''))
+  assert.ok(fallback.immediateSituation.includes(core.obstacle.replace(/^暂定：/u, '')))
+  assert.match(fallback.urgency, /继续「去游乐园」前/u)
+  assert.equal(
+    fallback.choice,
+    `在${formatDirectionForExpectation(firstDirection)}与${formatDirectionForExpectation(secondDirection)}之间作出决定。`,
+  )
+  assert.deepEqual(fallback.approaches.map((approach) => approach.intent), [
+    `${firstDirection}。`,
+    `${secondDirection}。`,
+  ])
+  assert.deepEqual(fallback.approaches.map((approach) => approach.cost), [
+    `选择${formatDirectionForExpectation(firstDirection)}后，需要承担这条方向带来的直接变化。`,
+    `选择${formatDirectionForExpectation(secondDirection)}后，需要承担这条方向带来的直接变化。`,
+  ])
+  assert.match(fallback.facts[0]?.statement ?? '', /系统暂定阻碍/u)
+  assert.doesNotThrow(() => validatePredicamentForConflictCore(sparseIdea, sparseSeed, core, fallback))
+})
+
+test('recognizes a model-proposed system direction as the selected branch contract', () => {
+  const modelDraft = createSparseSystemDraft()
+  modelDraft.origin = 'model'
+  modelDraft.activeDirection = modelDraft.directions?.[1]
+  const core = createSystemDraftConflictCoreFallback({
+    lockedGoal: sparseSeed.lockedGoal,
+    systemDraft: modelDraft,
+  })?.[1]
+  assert.ok(core)
+
+  const fallback = createCoreAnchoredPredicamentFallback(sparseSeed, core)
+  const [firstDirection, secondDirection] = core.tradeoff
+    .split('还是')
+    .map((value) => value.trim().replace(/[，、。！？\s]+$/u, ''))
+  assert.deepEqual(fallback.approaches.map((approach) => approach.intent), [
+    `${firstDirection}。`,
+    `${secondDirection}。`,
+  ])
+  assert.ok(fallback.immediateSituation.includes(core.obstacle.replace(/^暂定：/u, '')))
+  assert.doesNotThrow(() => validatePredicamentForConflictCore(sparseIdea, {
+    ...sparseSeed,
+    systemDraft: modelDraft,
+  }, core, fallback))
+})
+
+test('gives each selected sparse hook a minimal scene and direct costs from its own tradeoff', () => {
+  const cores = createSystemDraftConflictCoreFallback({
+    lockedGoal: sparseSeed.lockedGoal,
+    systemDraft: createSparseSystemDraft(),
+  })
+  assert.ok(cores)
+
+  for (const core of cores) {
+    const fallback = createCoreAnchoredPredicamentFallback(sparseSeed, core)
+    const [firstDirection, secondDirection] = core.tradeoff
+      .split('还是')
+      .map((value) => value.trim().replace(/[，、。！？\s]+$/u, ''))
+    assert.ok(fallback.immediateSituation.includes(core.obstacle.replace(/^暂定：/u, '')))
+    assert.match(fallback.urgency, /继续「去游乐园」前/u)
+    assert.deepEqual(fallback.approaches.map((approach) => approach.cost), [
+      `选择${formatDirectionForExpectation(firstDirection)}后，需要承担这条方向带来的直接变化。`,
+      `选择${formatDirectionForExpectation(secondDirection)}后，需要承担这条方向带来的直接变化。`,
+    ])
+    assert.doesNotMatch(
+      JSON.stringify(fallback),
+      /(?:购买|支付|核验|通讯|预约|分钟|小时|现金)/u,
+    )
+  }
+})
+
+test('keeps a bounded system branch usable when story-two-end generation needs a fallback', () => {
+  const systemDraft = createSparseSystemDraft()
+  systemDraft.activeDirection = systemDraft.directions?.[1]
+  const activeSeed = {
+    subject: '青柠',
+    ...sparseSeed,
+    systemDraft,
+    worldMode: 'realistic-default' as const,
+    expansionScope: 'keep-scale' as const,
+    unknowns: ['外部细节'],
+  }
+  const core = createSystemDraftConflictCoreFallback(activeSeed)?.[1]
+  assert.ok(core)
+
+  const predicament = createCoreAnchoredPredicamentFallback(activeSeed, core)
+  const options = createSystemDraftHeadTailFallback({
+    seed: activeSeed,
+    predicament,
+    approach: predicament.approaches[0],
+  })
+  const machine = createNarrativeStateMachine({ maximumActions: 8, maximumFacts: 20 })
+  const state = machine.createInitialState(activeSeed, predicament)
+
+  assert.equal(options.length, 3)
+  const selectedDirection = predicament.approaches[0]?.intent.replace(/[。！？]+$/u, '')
+  assert.ok(selectedDirection)
+  for (const option of options) {
+    assert.match(option.opening, new RegExp(selectedDirection, 'u'))
+    assert.match(option.climax, new RegExp(selectedDirection, 'u'))
+    assert.equal(option.climaxActionId, 'action-decide')
+    assert.doesNotMatch(
+      JSON.stringify(option),
+      /(?:门票|电子票|订单|手机|支付|工作人员|身份证|二维码|分钟|小时|现金)/u,
+    )
+    assert.doesNotThrow(() => machine.validateExpectedTransition(
+      state,
+      option.transition,
+      option.climaxActionId,
+      { statusCode: 502, code: 'INVALID_MODEL_OUTPUT' },
+      'fallback transition should be valid',
+    ))
+  }
+})
+
 test('rejects invented durable details in a second-layer predicament', () => {
   const cases: Array<{ name: string; change: (predicament: StoryPredicament) => void }> = [
     {
@@ -326,4 +975,153 @@ test('rejects a narrative transition that leaves its declared effect unchanged',
     ),
     /transition\.changedFacts 必须只更新 narrativeAction\.effects/,
   )
+})
+
+function createSelectedSparseTurnContext() {
+  const systemDraft = createSparseSystemDraft()
+  systemDraft.activeDirection = systemDraft.directions?.[1]
+  const activeSeed = {
+    subject: '青柠',
+    ...sparseSeed,
+    systemDraft,
+    worldMode: 'realistic-default' as const,
+    expansionScope: 'keep-scale' as const,
+    unknowns: ['外部细节'],
+  }
+  const core = createSystemDraftConflictCoreFallback(activeSeed)?.[1]
+  assert.ok(core)
+
+  const predicament = createCoreAnchoredPredicamentFallback(activeSeed, core)
+  const approach = predicament.approaches[0]
+  const headTail = createSystemDraftHeadTailFallback({
+    seed: activeSeed,
+    predicament,
+    approach,
+  })[0]
+  const machine = createNarrativeStateMachine({ maximumActions: 8, maximumFacts: 20 })
+  const state = machine.createInitialState(activeSeed, predicament)
+
+  return {
+    machine,
+    state,
+    request: {
+      idea: sparseIdea,
+      seed: activeSeed,
+      predicament,
+      approach,
+      headTail,
+      mode: 'start' as const,
+      history: [],
+    },
+  }
+}
+
+test('keeps selected system-draft story-turn fallbacks inside the established contract', () => {
+  const { machine, request, state } = createSelectedSparseTurnContext()
+  const turn = createSystemDraftStoryTurnFallback(request, state)
+
+  assert.doesNotThrow(() => validateSystemDraftStoryTurnContinuation(request, turn))
+  assert.equal(turn.options.length, 3)
+  assert.doesNotMatch(
+    JSON.stringify(turn),
+    /(?:门票|票务|手机|消息|支付|工作人员|身份证|二维码|检票|闸机|审批|手续)/u,
+  )
+  for (const option of turn.options) {
+    assert.doesNotThrow(() => machine.validateTurnOption(
+      state,
+      option,
+      { statusCode: 502, code: 'INVALID_MODEL_OUTPUT' },
+      'fallback turn option should be valid',
+    ))
+  }
+
+  const selectedOption = turn.options[0]
+  const continuedRequest = {
+    ...request,
+    mode: 'continue' as const,
+    history: [{
+      turnId: turn.id,
+      phase: turn.phase,
+      node: turn.node,
+      conflict: turn.conflict,
+      selectedOption,
+    }],
+  }
+  const continuedState = machine.applyTransition(
+    state,
+    selectedOption.narrativeAction,
+    selectedOption.transition,
+  )
+  const continuedTurn = createSystemDraftStoryTurnFallback(continuedRequest, continuedState)
+
+  assert.doesNotThrow(() => validateSystemDraftStoryTurnContinuation(continuedRequest, continuedTurn))
+  assert.notDeepEqual(
+    continuedTurn.options.map((option) => option.action),
+    turn.options.map((option) => option.action),
+  )
+  assert.match(continuedTurn.node.event, /已经完成上一项选择/u)
+})
+
+test('rejects unestablished detail categories throughout a system-draft story turn', () => {
+  const cases: Array<{ name: string; change: (turn: StoryTurn) => void }> = [
+    {
+      name: 'device and unread message in the current event',
+      change: (turn) => { turn.node.event = '青柠看着手机屏幕里未回复的消息。' },
+    },
+    {
+      name: 'ticket verification in the conflict consequence',
+      change: (turn) => { turn.conflict.consequence = '一张电子票需要在入口核验。' },
+    },
+    {
+      name: 'service workflow in the question',
+      change: (turn) => { turn.question = '要不要向工作人员提交申请？' },
+    },
+    {
+      name: 'unestablished person status in an option consequence',
+      change: (turn) => { turn.options[0].immediateConsequence = '对方一直没有到场，原有安排被迫停下。' },
+    },
+    {
+      name: 'institutional workflow in an introduced fact',
+      change: (turn) => {
+        turn.options[0].transition.introducedFacts = [{
+          id: 'fact-new-1',
+          statement: '平台要求完成审批手续。',
+          source: 'confirmed-action',
+          mutability: 'changeable',
+        }]
+      },
+    },
+  ]
+
+  for (const { name, change } of cases) {
+    const { request, state } = createSelectedSparseTurnContext()
+    const turn = createSystemDraftStoryTurnFallback(request, state)
+    change(turn)
+    assert.throws(
+      () => validateSystemDraftStoryTurnContinuation(request, turn),
+      /系统暂定分支后的逐步发展当前回合.+未经建立/u,
+      name,
+    )
+  }
+})
+
+test('rejects direct reuse of an unselected direction in a system-draft story turn', () => {
+  const { request, state } = createSelectedSparseTurnContext()
+  const alternativeDirection = request.predicament.approaches[1]?.intent.replace(/[。！？]+$/u, '')
+  assert.ok(alternativeDirection)
+
+  for (const route of [
+    `${alternativeDirection}。`,
+    alternativeDirection,
+  ]) {
+    const turn = createSystemDraftStoryTurnFallback(request, state)
+    turn.options[1].action = route
+    turn.options[1].narrativeAction.intent = route
+
+    assert.throws(
+      () => validateSystemDraftStoryTurnContinuation(request, turn),
+      new RegExp(`未选方向“${alternativeDirection}”`, 'u'),
+      route,
+    )
+  }
 })

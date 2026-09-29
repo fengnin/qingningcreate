@@ -123,7 +123,12 @@ function createStoryFoundationActions(
 
   const applyConflictCoreFeedback = async (feedback: string) => {
     const preference = feedback.trim()
-    if (preference) await loaders.loadConflictCores({ preference })
+    if (preference) {
+      await loaders.loadConflictCores({
+        preference,
+        generateSystemDraft: Boolean(state.seed?.systemDraft),
+      })
+    }
   }
 
   const applyConflictCoreContext = async (context: StoryConflictCoreContext) => {
@@ -135,7 +140,7 @@ function createStoryFoundationActions(
   }
 
   const generateSystemDraft = async () => {
-    await loaders.loadConflictCores({ generateSystemDraft: true, excludedTitles: [] })
+    await loaders.loadConflictCores({ generateSystemDraft: true })
   }
 
   const selectConflictCore = (id: string) => {
@@ -171,7 +176,11 @@ function createStoryFoundationActions(
     updateIdea,
     useExample: () => updateIdea(getNextStoryIdeaExample(state.idea)),
     openConflictCorePicker,
-    showDifferentConflictCores: () => loaders.loadConflictCores(),
+    showDifferentConflictCores: () => (
+      state.seed?.systemDraft
+        ? loaders.loadConflictCores({ generateSystemDraft: true })
+        : loaders.loadConflictCores()
+    ),
     applyConflictCoreFeedback,
     applyConflictCoreContext,
     generateSystemDraft,
