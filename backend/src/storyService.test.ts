@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type {
   StoryAction,
+  CreativeBrief,
   StoryConflictCoreSystemDraft,
   StoryNarrativeState,
   StoryPredicament,
@@ -17,10 +18,19 @@ import {
   createSystemDraftConflictCoreFallback,
   createSystemDraftStoryTurnFallback,
   shouldAutoGenerateSystemConflictCoreDraft,
+  validateConfirmedCurveStoryTurnContinuation,
   validatePredicamentForConflictCore,
   validateSystemConflictCoreDraft,
   validateSystemDraftStoryTurnContinuation,
 } from './storyService.js'
+import {
+  confirmProvisionalCurve,
+  createProvisionalCurveFallback,
+  isSystemCurveProposalSafe,
+  materializeConfirmedCurve,
+  regenerateCurveBeat,
+  updateCurveBeat,
+} from './storyCoCreation.js'
 import { createNarrativeStateMachine } from './storyState.js'
 
 const examples = {
@@ -76,9 +86,13 @@ function createValidDraft(): StoryConflictCoreSystemDraft {
 
 const sparseIdea = '青柠去游乐园'
 const sparseSeed = {
+  subject: '青柠',
   activeSituation: sparseIdea,
   lockedGoal: '去游乐园',
   lockedFacts: ['青柠去游乐园'],
+  worldMode: 'realistic-default' as const,
+  expansionScope: 'keep-scale' as const,
+  unknowns: [],
 }
 
 const reportSeed = {
@@ -127,6 +141,172 @@ function formatDirectionForExpectation(direction: string): string {
 test('uses a system draft for a goal-only idea but not for a detailed seed', () => {
   assert.equal(shouldAutoGenerateSystemConflictCoreDraft(sparseSeed), true)
   assert.equal(shouldAutoGenerateSystemConflictCoreDraft(seed), false)
+})
+
+test('creates a provisional curve before any path facts exist', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  assert.equal(curve.status, 'draft')
+  assert.equal(curve.beats.length, 7)
+  assert.ok(curve.beats.every((beat) => beat.source === 'user-input' || beat.source === 'system-proposal'))
+  assert.equal(curve.beats.some((beat) => beat.status === 'confirmed' && beat.source === 'system-proposal'), false)
+})
+
+test('rejects scene-level model content from a provisional curve', () => {
+  assert.equal(
+    isSystemCurveProposalSafe(
+      'trigger',
+      '暂定：一阵风掀飞门票，它飘向旋转木马围栏内，主角必须立刻钻进去捡回它。',
+    ),
+    false,
+  )
+  assert.equal(
+    isSystemCurveProposalSafe(
+      'trigger',
+      '暂定：青柠想去游乐园玩时，一个意外让原计划停住。',
+    ),
+    true,
+  )
+})
+
+test('editing an early curve beat marks dependent proposals stale', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['cost'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const result = updateCurveBeat(curve, 'beat-trigger', '暂定：游乐园里出现一件让主角改变计划的反常小事。')
+  assert.deepEqual(result.affectedBeatIds, ['beat-escalation', 'beat-midpoint-turn', 'beat-climax-choice', 'beat-resolution'])
+  assert.equal(result.curve.beats.find((beat) => beat.id === 'beat-trigger')?.source, 'user-edit')
+  assert.equal(result.curve.beats.find((beat) => beat.id === 'beat-resolution')?.status, 'stale')
+})
+
+test('does not let regeneration replace the user-provided current state', async () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+
+  await assert.rejects(
+    regenerateCurveBeat(sparseIdea, sparseSeed, curve, 'beat-current-state'),
+    /当前状态来自你的原始想法/u,
+  )
+})
+
+test('a curve cannot be confirmed while dependent beats are stale', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['cost'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const edited = updateCurveBeat(curve, 'beat-trigger', '暂定：游乐园里出现一件让主角改变计划的反常小事。').curve
+  assert.throws(() => confirmProvisionalCurve(edited), /处理被修改影响/u)
+  const confirmed = confirmProvisionalCurve(curve).confirmedCurve
+  const foundation = materializeConfirmedCurve(sparseSeed, confirmed)
+  assert.equal(foundation.seed.systemDraft, undefined)
+  assert.equal(foundation.predicament.facts.every((fact) => fact.source === 'confirmed-curve'), true)
+})
+
+test('materializes only current curve constraints as initial facts', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const confirmed = confirmProvisionalCurve(createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)).confirmedCurve
+  const foundation = materializeConfirmedCurve(sparseSeed, confirmed)
+
+  assert.ok(foundation.predicament.facts.length >= 2)
+  assert.ok(foundation.predicament.facts.length <= 4)
+  assert.equal(
+    foundation.predicament.facts.some((fact) => (
+      fact.originCurveBeatIds?.includes('beat-climax-choice')
+      || fact.originCurveBeatIds?.includes('beat-resolution')
+    )),
+    false,
+  )
+  assert.equal(foundation.headTail.climax, confirmed.beats.find((beat) => beat.id === 'beat-climax-choice')?.detail)
+  assert.equal(foundation.headTail.resolution, confirmed.beats.find((beat) => beat.id === 'beat-resolution')?.detail)
+})
+
+test('rejects a confirmed-curve opening that invents access machinery', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const confirmed = confirmProvisionalCurve(createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)).confirmedCurve
+  const foundation = materializeConfirmedCurve(sparseSeed, confirmed)
+  const turn: StoryTurn = {
+    id: 'turn-1',
+    phase: 'opening',
+    node: {
+      id: 'node-1',
+      title: '游乐园门口',
+      event: '青柠站在游乐园入口，手机弹出消息：VIP 通道卡因过去多次代排而失效。',
+      purpose: '让最擅长的办法变成新的阻碍。',
+      goalState: 'trying',
+    },
+    conflict: {
+      nodeId: 'node-1',
+      conflict: '她必须决定是否使用那张 VIP 通道卡。',
+      action: '选择一个此刻的应对方式。',
+      consequence: '这个选择会影响她如何面对代价。',
+      intensity: 1,
+      anchor: '起点',
+    },
+    question: '青柠现在怎么办？',
+    options: [],
+    narrativeAction: null,
+    transition: null,
+    canConclude: false,
+    isConclusion: false,
+  }
+
+  assert.throws(
+    () => validateConfirmedCurveStoryTurnContinuation({
+      idea: sparseIdea,
+      seed: foundation.seed,
+      predicament: foundation.predicament,
+      approach: foundation.approach,
+      headTail: foundation.headTail,
+      history: [],
+      confirmedCurve: confirmed,
+    }, turn),
+    /手机/u,
+  )
+})
+
+test('uses an author-edited current state as the confirmed story goal', () => {
+  const brief: CreativeBrief = {
+    tones: ['friendship'],
+    dramaticForces: ['relationship-tension'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const authorGoal = '青柠想先陪朋友看完演出，再决定要不要去游乐园。'
+  const edited = updateCurveBeat(curve, 'beat-current-state', authorGoal).curve
+  const reconciled = {
+    ...edited,
+    beats: edited.beats.map((beat) => (
+      beat.status === 'stale' ? { ...beat, status: 'proposed' as const } : beat
+    )),
+  }
+  const confirmed = confirmProvisionalCurve(reconciled).confirmedCurve
+  const foundation = materializeConfirmedCurve(sparseSeed, confirmed)
+
+  assert.equal(foundation.seed.activeSituation, authorGoal)
+  assert.equal(foundation.seed.lockedGoal, authorGoal)
+  assert.equal(foundation.predicament.preservedGoal, authorGoal)
+  assert.ok(foundation.predicament.facts.some((fact) => fact.originCurveBeatIds?.includes('beat-current-state')))
 })
 
 test('keeps a bare idea actionable when the model seed extraction is unavailable', () => {
@@ -850,7 +1030,6 @@ test('keeps a bounded system branch usable when story-two-end generation needs a
   const systemDraft = createSparseSystemDraft()
   systemDraft.activeDirection = systemDraft.directions?.[1]
   const activeSeed = {
-    subject: '青柠',
     ...sparseSeed,
     systemDraft,
     worldMode: 'realistic-default' as const,
@@ -981,7 +1160,6 @@ function createSelectedSparseTurnContext() {
   const systemDraft = createSparseSystemDraft()
   systemDraft.activeDirection = systemDraft.directions?.[1]
   const activeSeed = {
-    subject: '青柠',
     ...sparseSeed,
     systemDraft,
     worldMode: 'realistic-default' as const,

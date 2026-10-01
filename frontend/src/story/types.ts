@@ -9,6 +9,16 @@ export type {
   StoryConflictCoreContext,
   StoryConflictCoreContextPrefill,
   StoryConflictCoreSystemDraft,
+  AuthorInstruction,
+  ConfirmedCurve,
+  CreativeBrief,
+  CreativeTone,
+  CurveBeat,
+  CurveBeatKind,
+  CurveBeatSource,
+  CurveBeatStatus,
+  DramaticForce,
+  ProvisionalCurve,
   StoryExpansionScope,
   StoryFact,
   StoryFactChange,
@@ -28,6 +38,15 @@ export type {
   StoryReviewItem,
   StorySeed,
   StorySessionVersion,
+  StoryCoCreationResponse,
+  StoryCoCreationStartRequest,
+  StoryCurveBeatRegenerationRequest,
+  StoryCurveBeatUpdateRequest,
+  StoryCurveConfirmationResponse,
+  StoryCurveConfirmRequest,
+  StoryCurveMutationResponse,
+  StoryCurveSpineResponse,
+  StoryCurveStartSpineRequest,
   StoryTransition,
   StoryTurn,
   StoryTurnHistoryItem,
@@ -42,6 +61,8 @@ export type {
 
 export type StoryView =
   | 'opening'
+  | 'creative-brief'
+  | 'provisional-curve'
   | 'conflict-core-picker'
   | 'predicament'
   | 'head-tail'

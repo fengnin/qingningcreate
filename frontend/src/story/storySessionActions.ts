@@ -5,6 +5,11 @@ import {
   requestStoryPredicament,
   requestStoryTurn,
   requestStoryTurnOptionRefinement,
+  requestStoryCoCreationStart,
+  requestCurveBeatUpdate,
+  requestCurveBeatRegeneration,
+  requestCurveConfirmation,
+  requestCurveStorySpine,
 } from './storyApi'
 import {
   type PendingTurnRequest,
@@ -14,6 +19,7 @@ import { normalizeConflictCoreContext } from './conflictCoreContext'
 import { getNextStoryIdeaExample } from './storyIdeaExamples'
 import type {
   StoryConflictCoreContext,
+  CreativeBrief,
   StorySessionVersion,
   StoryTurnMode,
   StoryTurnOptionRefinement,
@@ -36,6 +42,13 @@ export interface StorySessionActions {
   updateIdea: (idea: string) => void
   useExample: () => void
   openConflictCorePicker: () => Promise<void>
+  openCreativeBrief: () => void
+  updateCreativeBrief: (brief: CreativeBrief) => void
+  generateProvisionalCurve: (brief?: CreativeBrief) => Promise<void>
+  updateCurveBeat: (beatId: string, detail: string) => Promise<void>
+  regenerateCurveBeat: (beatId: string, feedback?: string) => Promise<void>
+  confirmProvisionalCurve: () => Promise<void>
+  startStorySpineFromCurve: () => Promise<void>
   showDifferentConflictCores: () => Promise<void>
   applyConflictCoreFeedback: (feedback: string) => Promise<void>
   applyConflictCoreContext: (context: StoryConflictCoreContext) => Promise<void>
@@ -61,6 +74,8 @@ export interface StorySessionActions {
 }
 
 const previousViewByView: Partial<Record<StoryView, StoryView>> = {
+  'creative-brief': 'opening',
+  'provisional-curve': 'creative-brief',
   'conflict-core-picker': 'opening',
   predicament: 'conflict-core-picker',
   'head-tail': 'predicament',
@@ -75,12 +90,14 @@ export function createStorySessionActions(
   const loaders = createStorySessionLoaders(state, stage)
   const context = { state, stage, loaders }
   const storyProgressActions = createStoryProgressActions(context)
+  const coCreationActions = createCoCreationActions(context)
 
   return {
     ...createStoryFoundationActions(context),
+    ...coCreationActions,
     ...createStoryPlanningActions(context),
     ...storyProgressActions,
-    ...createNavigationActions(context, storyProgressActions.generateFullStory),
+    ...createNavigationActions(context, storyProgressActions.generateFullStory, coCreationActions.generateProvisionalCurve),
   }
 }
 
@@ -88,6 +105,135 @@ interface StorySessionActionContext {
   state: StorySessionState
   stage: StoryStageRequest
   loaders: StorySessionLoaders
+}
+
+function createCoCreationActions(
+  { state, stage }: StorySessionActionContext,
+): Pick<
+  StorySessionActions,
+  | 'openCreativeBrief'
+  | 'updateCreativeBrief'
+  | 'generateProvisionalCurve'
+  | 'updateCurveBeat'
+  | 'regenerateCurveBeat'
+  | 'confirmProvisionalCurve'
+  | 'startStorySpineFromCurve'
+> {
+  const openCreativeBrief = () => {
+    if (!state.trimmedIdea) return
+    state.resetStoryFoundation()
+    state.setView('creative-brief')
+  }
+
+  const generateProvisionalCurve = async (briefOverride?: CreativeBrief) => {
+    if (!state.trimmedIdea) return
+    const brief = briefOverride ?? state.creativeBrief
+    state.resetStoryFoundation()
+    state.setCreativeBrief(brief)
+    state.setView('provisional-curve')
+    await runStorySessionStageRequest(
+      state,
+      stage,
+      () => requestStoryCoCreationStart({ idea: state.trimmedIdea, brief }),
+      (result) => {
+        state.setSeed(result.seed)
+        state.setCreativeBrief(result.brief)
+        state.setProvisionalCurve(result.curve)
+        state.setConfirmedCurve(undefined)
+      },
+    )
+  }
+
+  const updateCurveBeat = async (beatId: string, detail: string) => {
+    const curve = state.provisionalCurve
+    if (!curve || !state.storyId) return
+    await runStorySessionStageRequest(
+      state,
+      stage,
+      () => requestCurveBeatUpdate({
+        storyId: state.storyId!,
+        revision: state.revision,
+        curveId: curve.id,
+        beatId,
+        detail,
+      }),
+      (result) => {
+        state.setProvisionalCurve(result.curve)
+      },
+    )
+  }
+
+  const regenerateCurveBeat = async (beatId: string, feedback?: string) => {
+    const curve = state.provisionalCurve
+    if (!curve || !state.storyId) return
+    await runStorySessionStageRequest(
+      state,
+      stage,
+      () => requestCurveBeatRegeneration({
+        storyId: state.storyId!,
+        revision: state.revision,
+        curveId: curve.id,
+        beatId,
+        feedback: feedback?.trim() || undefined,
+      }),
+      (result) => {
+        state.setProvisionalCurve(result.curve)
+      },
+    )
+  }
+
+  const confirmProvisionalCurve = async () => {
+    const curve = state.provisionalCurve
+    if (!curve || !state.storyId || state.confirmedCurve) return
+    await runStorySessionStageRequest(
+      state,
+      stage,
+      () => requestCurveConfirmation({
+        storyId: state.storyId!,
+        revision: state.revision,
+        curveId: curve.id,
+      }),
+      (result) => {
+        state.setProvisionalCurve(result.curve)
+        state.setConfirmedCurve(result.confirmedCurve)
+      },
+    )
+  }
+
+  const startStorySpineFromCurve = async () => {
+    const curve = state.provisionalCurve
+    if (!curve || !state.confirmedCurve || !state.storyId) return
+    await runStorySessionStageRequest(
+      state,
+      stage,
+      () => requestCurveStorySpine({
+        storyId: state.storyId!,
+        revision: state.revision,
+        curveId: curve.id,
+      }),
+      (result) => {
+        state.setSeed(result.seed)
+        state.setPredicament(result.predicament)
+        state.setSelectedApproachId(result.approach.id)
+        state.setHeadTailOptions([result.headTail])
+        state.setSelectedHeadTailId(result.headTail.id)
+        state.setCommittedHeadTailId(result.headTail.id)
+        applyStoryTurnState(state, result)
+        state.setSelectedTurnOptionId(undefined)
+        state.setView('story-spine')
+      },
+    )
+  }
+
+  return {
+    openCreativeBrief,
+    updateCreativeBrief: state.setCreativeBrief,
+    generateProvisionalCurve,
+    updateCurveBeat,
+    regenerateCurveBeat,
+    confirmProvisionalCurve,
+    startStorySpineFromCurve,
+  }
 }
 
 function createStoryFoundationActions(
@@ -107,7 +253,7 @@ function createStoryFoundationActions(
   | 'selectPredicamentApproach'
 > {
   const updateIdea = (idea: string) => {
-    if (idea.trim() !== state.trimmedIdea && state.conflictCores.length) {
+    if (idea.trim() !== state.trimmedIdea && (state.conflictCores.length || state.provisionalCurve || state.storyId)) {
       state.resetStoryFoundation()
     }
     state.setIdea(idea)
@@ -311,8 +457,14 @@ function createStoryProgressActions(
 function createNavigationActions(
   { state, stage, loaders }: StorySessionActionContext,
   generateFullStory: StorySessionActions['generateFullStory'],
+  generateProvisionalCurve: StorySessionActions['generateProvisionalCurve'],
 ): Pick<StorySessionActions, 'retryCurrentStage' | 'goBack' | 'goBackToOpening' | 'restartStory'> {
   const retryCurrentStage = async () => {
+    if (state.view === 'provisional-curve') {
+      if (!state.provisionalCurve) await generateProvisionalCurve()
+      return
+    }
+
     if (state.view === 'conflict-core-picker') {
       await loaders.loadConflictCores({
         context: normalizeConflictCoreContext(state.conflictCoreContext),
@@ -347,13 +499,15 @@ function createNavigationActions(
     }
 
     stage.clearStageFeedback()
-    const previousView = previousViewByView[state.view]
+    const previousView = state.view === 'story-spine' && state.confirmedCurve
+      ? 'provisional-curve'
+      : previousViewByView[state.view]
     if (previousView) state.setView(previousView)
   }
 
   const restartStory = () => {
     state.setView('opening')
-    state.setIdea(getNextStoryIdeaExample(state.idea))
+    state.setIdea('')
     state.resetStoryFoundation()
     stage.clearStageFeedback()
   }

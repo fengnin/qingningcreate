@@ -14,6 +14,16 @@ import {
   generateSessionStory,
   generateSessionStoryTurn,
   generateSessionStoryTurnOptionRefinement,
+  startStoryCoCreation,
+  updateSessionCurveBeat,
+  regenerateSessionCurveBeat,
+  confirmSessionCurve,
+  startSessionStorySpineFromCurve,
+  parseStoryCoCreationStartRequest,
+  parseStoryCurveBeatUpdateRequest,
+  parseStoryCurveBeatRegenerationRequest,
+  parseStoryCurveConfirmRequest,
+  parseStoryCurveStartSpineRequest,
 } from './storyService.js'
 import type {
   ApiErrorResponse,
@@ -25,6 +35,10 @@ import type {
   StoryGenerationResponse,
   StoryHeadTailResponse,
   StoryTurnResponse,
+  StoryCoCreationResponse,
+  StoryCurveMutationResponse,
+  StoryCurveConfirmationResponse,
+  StoryCurveSpineResponse,
 } from '../../shared/story-contract.js'
 
 const app = express()
@@ -48,6 +62,41 @@ registerStoryStage(
   parseDirectionRequest,
   generateDirections,
   (result) => result satisfies StoryDirectionsResponse,
+)
+
+registerStoryStage(
+  '/api/story/co-create/start',
+  parseStoryCoCreationStartRequest,
+  startStoryCoCreation,
+  (result) => result satisfies StoryCoCreationResponse,
+)
+
+registerStoryStage(
+  '/api/story/curve/beat',
+  parseStoryCurveBeatUpdateRequest,
+  updateSessionCurveBeat,
+  (result) => result satisfies StoryCurveMutationResponse,
+)
+
+registerStoryStage(
+  '/api/story/curve/beat/regenerate',
+  parseStoryCurveBeatRegenerationRequest,
+  regenerateSessionCurveBeat,
+  (result) => result satisfies StoryCurveMutationResponse,
+)
+
+registerStoryStage(
+  '/api/story/curve/confirm',
+  parseStoryCurveConfirmRequest,
+  confirmSessionCurve,
+  (result) => result satisfies StoryCurveConfirmationResponse,
+)
+
+registerStoryStage(
+  '/api/story/curve/start-spine',
+  parseStoryCurveStartSpineRequest,
+  startSessionStorySpineFromCurve,
+  (result) => result satisfies StoryCurveSpineResponse,
 )
 
 registerStoryStage(

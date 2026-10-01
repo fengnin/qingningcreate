@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import type {
   GeneratedStory,
   StoryHeadTailOption,
@@ -6,6 +6,9 @@ import type {
   StoryConflictCore,
   StoryConflictCores,
   StoryConflictCoreContext,
+  ConfirmedCurve,
+  CreativeBrief,
+  ProvisionalCurve,
   StoryPredicament,
   StoryPredicamentApproach,
   StorySeed,
@@ -16,7 +19,6 @@ import type {
   StoryTurnOption,
   StoryView,
 } from './types'
-import { getInitialStoryIdeaExample, rememberStoryIdeaExample } from './storyIdeaExamples'
 
 export type StoryPlanResetPoint = 'conflict-core' | 'predicament' | 'head-tail'
 
@@ -38,6 +40,12 @@ export interface StorySessionState {
   setConflictCores: (options: StoryConflictCores | []) => void
   conflictCoreContext: StoryConflictCoreContext
   setConflictCoreContext: (context: StoryConflictCoreContext) => void
+  creativeBrief: CreativeBrief
+  setCreativeBrief: (brief: CreativeBrief) => void
+  provisionalCurve: ProvisionalCurve | undefined
+  setProvisionalCurve: (curve: ProvisionalCurve | undefined) => void
+  confirmedCurve: ConfirmedCurve | undefined
+  setConfirmedCurve: (curve: ConfirmedCurve | undefined) => void
   conflictCoreFeedback: string
   setConflictCoreFeedback: (feedback: string) => void
   selectedConflictCoreId: string | undefined
@@ -77,10 +85,13 @@ export interface StorySessionState {
 
 export function useStorySessionState(): StorySessionState {
   const [view, setView] = useState<StoryView>('opening')
-  const [idea, setIdea] = useState(getInitialStoryIdeaExample)
+  const [idea, setIdea] = useState('')
   const [seed, setSeed] = useState<StorySeed>()
   const [conflictCores, setConflictCores] = useState<StoryConflictCores | []>([])
   const [conflictCoreContext, setConflictCoreContext] = useState<StoryConflictCoreContext>({})
+  const [creativeBrief, setCreativeBrief] = useState<CreativeBrief>(createEmptyCreativeBrief)
+  const [provisionalCurve, setProvisionalCurve] = useState<ProvisionalCurve>()
+  const [confirmedCurve, setConfirmedCurve] = useState<ConfirmedCurve>()
   const [conflictCoreFeedback, setConflictCoreFeedback] = useState('')
   const [selectedConflictCoreId, setSelectedConflictCoreId] = useState<string>()
   const [predicament, setPredicament] = useState<StoryPredicament>()
@@ -98,9 +109,6 @@ export function useStorySessionState(): StorySessionState {
 
   const trimmedIdea = idea.trim()
 
-  useEffect(() => {
-    rememberStoryIdeaExample(idea)
-  }, [])
   const selectedConflictCore = useMemo(
     () => conflictCores.find((core) => core.id === selectedConflictCoreId),
     [conflictCores, selectedConflictCoreId],
@@ -147,6 +155,12 @@ export function useStorySessionState(): StorySessionState {
     setSelectedConflictCoreId(undefined)
   }
 
+  const clearCoCreation = () => {
+    setCreativeBrief(createEmptyCreativeBrief())
+    setProvisionalCurve(undefined)
+    setConfirmedCurve(undefined)
+  }
+
   const resetPlanAfter = (resetPoint: StoryPlanResetPoint) => {
     if (resetPoint === 'conflict-core') {
       clearPredicamentSelection()
@@ -164,6 +178,7 @@ export function useStorySessionState(): StorySessionState {
     setRevision(0)
     setSeed(undefined)
     setConflictCoreContext({})
+    clearCoCreation()
     clearConflictCoreSelection()
     resetPlanAfter('conflict-core')
   }
@@ -184,6 +199,12 @@ export function useStorySessionState(): StorySessionState {
     setConflictCores,
     conflictCoreContext,
     setConflictCoreContext,
+    creativeBrief,
+    setCreativeBrief,
+    provisionalCurve,
+    setProvisionalCurve,
+    confirmedCurve,
+    setConfirmedCurve,
     conflictCoreFeedback,
     setConflictCoreFeedback,
     selectedConflictCoreId,
@@ -219,6 +240,14 @@ export function useStorySessionState(): StorySessionState {
     resetPlanAfter,
     resetStoryFoundation,
     applySessionVersion,
+  }
+}
+
+function createEmptyCreativeBrief(): CreativeBrief {
+  return {
+    tones: [],
+    dramaticForces: [],
+    allowSystemNamedCharacters: false,
   }
 }
 

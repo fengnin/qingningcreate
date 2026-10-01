@@ -16,8 +16,10 @@ export type StoryFactMutability = 'fixed' | 'changeable' | 'unknown'
 export interface StoryFact {
   id: string
   statement: string
-  source: 'user' | 'system-draft' | 'predicament' | 'confirmed-action'
+  source: 'user' | 'system-draft' | 'predicament' | 'confirmed-curve' | 'confirmed-action'
   mutability: StoryFactMutability
+  /** Curve nodes that established this fact after the author confirmed them. */
+  originCurveBeatIds?: string[]
 }
 
 export interface StoryAction {
@@ -26,6 +28,8 @@ export interface StoryAction {
   preconditions: string[]
   effects: string[]
   source: 'user-choice' | 'generated'
+  /** Curve nodes that constrain this action after the author confirms a curve. */
+  originCurveBeatIds?: string[]
 }
 
 export interface StoryFactChange {
@@ -57,9 +61,86 @@ export interface StorySeed {
    * never extracted from or attributed to the input.
    */
   systemDraft?: StoryConflictCoreSystemDraft
+  /** The author's lightweight direction for the current story. */
+  creativeBrief?: CreativeBrief
   worldMode: 'realistic-default' | 'user-specified'
   expansionScope: StoryExpansionScope
   unknowns: string[]
+}
+
+export type CreativeTone = 'comedy' | 'warm' | 'friendship' | 'romance' | 'growth' | 'mystery' | 'fantasy'
+
+export type DramaticForce = 'misunderstanding' | 'cost' | 'surprise' | 'contrast' | 'relationship-tension'
+
+/**
+ * Choices that guide proposals without becoming story facts by themselves.
+ * All fields except the naming permission may stay empty.
+ */
+export interface CreativeBrief {
+  tones: CreativeTone[]
+  dramaticForces: DramaticForce[]
+  allowSystemNamedCharacters: boolean
+  note?: string
+}
+
+export type CurveBeatKind =
+  | 'current-state'
+  | 'character-tension'
+  | 'trigger'
+  | 'escalation'
+  | 'midpoint-turn'
+  | 'climax-choice'
+  | 'resolution'
+
+export type CurveBeatSource = 'user-input' | 'system-proposal' | 'user-edit' | 'undecided'
+
+export type CurveBeatStatus = 'proposed' | 'edited' | 'confirmed' | 'stale' | 'rejected'
+
+export interface CurveBeat {
+  id: string
+  kind: CurveBeatKind
+  title: string
+  detail: string
+  source: CurveBeatSource
+  status: CurveBeatStatus
+  dependsOn: string[]
+}
+
+export type AuthorInstructionKind = 'replace' | 'remove' | 'regenerate'
+
+/** A deliberate author-level edit. It is never a character action. */
+export interface AuthorInstruction {
+  id: string
+  kind: AuthorInstructionKind
+  text: string
+  targetBeatId: string
+  createdAt: number
+}
+
+export type ProvisionalCurveStatus = 'draft' | 'confirmed' | 'superseded'
+
+/**
+ * The sole pre-story source of truth. Its beats contain proposal material,
+ * never path facts, until the author confirms the whole curve.
+ */
+export interface ProvisionalCurve {
+  id: string
+  title: string
+  status: ProvisionalCurveStatus
+  brief: CreativeBrief
+  beats: CurveBeat[]
+  instructions: AuthorInstruction[]
+  createdAt: number
+  updatedAt: number
+}
+
+export interface ConfirmedCurve {
+  id: string
+  provisionalCurveId: string
+  title: string
+  brief: CreativeBrief
+  beats: CurveBeat[]
+  confirmedAt: number
 }
 
 /**
@@ -299,6 +380,31 @@ export interface StoryDirectionsRequest {
   revision?: number
 }
 
+export interface StoryCoCreationStartRequest {
+  idea: string
+  brief: CreativeBrief
+}
+
+export interface StoryCurveBeatUpdateRequest extends StorySessionVersion {
+  curveId: string
+  beatId: string
+  detail: string
+}
+
+export interface StoryCurveBeatRegenerationRequest extends StorySessionVersion {
+  curveId: string
+  beatId: string
+  feedback?: string
+}
+
+export interface StoryCurveConfirmRequest extends StorySessionVersion {
+  curveId: string
+}
+
+export interface StoryCurveStartSpineRequest extends StorySessionVersion {
+  curveId: string
+}
+
 export interface StoryPredicamentSessionRequest extends StorySessionVersion {
   conflictCoreId: string
 }
@@ -336,6 +442,22 @@ export interface StoryDirectionsResponse extends StorySessionVersion {
   conflictCores: StoryConflictCores
 }
 
+export interface StoryCoCreationResponse extends StorySessionVersion {
+  seed: StorySeed
+  brief: CreativeBrief
+  curve: ProvisionalCurve
+}
+
+export interface StoryCurveMutationResponse extends StorySessionVersion {
+  curve: ProvisionalCurve
+  affectedBeatIds: string[]
+}
+
+export interface StoryCurveConfirmationResponse extends StorySessionVersion {
+  curve: ProvisionalCurve
+  confirmedCurve: ConfirmedCurve
+}
+
 export type StoryConflictCoresResponse = StoryDirectionsResponse
 
 export interface StoryPredicamentResponse extends StorySessionVersion {
@@ -349,6 +471,14 @@ export interface StoryHeadTailResponse extends StorySessionVersion {
 export interface StoryTurnResponse extends StorySessionVersion {
   history: StoryTurnHistoryItem[]
   turn: StoryTurn
+}
+
+/** The first turn created from a confirmed curve, with its materialized path foundation. */
+export interface StoryCurveSpineResponse extends StoryTurnResponse {
+  seed: StorySeed
+  predicament: StoryPredicament
+  approach: StoryPredicamentApproach
+  headTail: StoryHeadTailOption
 }
 
 export interface StoryGenerationResponse extends StorySessionVersion {

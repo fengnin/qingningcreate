@@ -11,6 +11,9 @@ import type {
   StoryConflictCoreContext,
   StoryConflictCoreContextPrefill,
   StoryConflictCoreSystemDraft,
+  ConfirmedCurve,
+  CreativeBrief,
+  ProvisionalCurve,
   StoryPredicament,
   StoryPredicamentApproach,
   StorySeed,
@@ -27,6 +30,9 @@ export interface StorySession extends StorySessionActions {
   seed: StorySeed | undefined
   conflictCores: StoryConflictCores | []
   conflictCoreContext: StoryConflictCoreContext
+  creativeBrief: CreativeBrief
+  provisionalCurve: ProvisionalCurve | undefined
+  confirmedCurve: ConfirmedCurve | undefined
   conflictCoreFeedback: string
   selectedConflictCore: StoryConflictCore | undefined
   selectedConflictCoreId: string | undefined
@@ -62,6 +68,9 @@ export function useStorySession(): StorySession {
     seed: state.seed,
     conflictCores: state.conflictCores,
     conflictCoreContext: state.conflictCoreContext,
+    creativeBrief: state.creativeBrief,
+    provisionalCurve: state.provisionalCurve,
+    confirmedCurve: state.confirmedCurve,
     conflictCoreFeedback: state.conflictCoreFeedback,
     selectedConflictCore: state.selectedConflictCore,
     selectedConflictCoreId: state.selectedConflictCoreId,

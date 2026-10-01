@@ -1,6 +1,14 @@
 import { AppError, requestQwenJson } from './qwen.js'
 import { createNarrativeStateMachine, type StoryValidationContext } from './storyState.js'
 import { formatStoryRealityContractContext, storyRealityContractInstruction } from './storyRealityContract.js'
+import {
+  confirmProvisionalCurve,
+  generateProvisionalCurve,
+  materializeConfirmedCurve,
+  parseCreativeBrief,
+  regenerateCurveBeat,
+  updateCurveBeat,
+} from './storyCoCreation.js'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
@@ -49,6 +57,18 @@ import type {
   StoryVariationAxis,
   StoryReviewItem,
   StorySessionVersion,
+  ConfirmedCurve,
+  CreativeBrief,
+  ProvisionalCurve,
+  StoryCoCreationResponse,
+  StoryCoCreationStartRequest,
+  StoryCurveBeatRegenerationRequest,
+  StoryCurveBeatUpdateRequest,
+  StoryCurveConfirmationResponse,
+  StoryCurveConfirmRequest,
+  StoryCurveMutationResponse,
+  StoryCurveSpineResponse,
+  StoryCurveStartSpineRequest,
 } from '../../shared/story-contract.js'
 
 type ValidationErrorContext = StoryValidationContext
@@ -301,6 +321,17 @@ const systemDraftContinuationUnsupportedDetailRules: readonly UnsupportedDetailR
   },
 ]
 
+// A confirmed curve establishes the story's structural commitments, not a
+// blank check to invent the concrete machinery that makes those commitments
+// happen. Keep early turns free of unsupported privilege, access, or history.
+const confirmedCurveContinuationUnsupportedDetailRules: readonly UnsupportedDetailRule[] = [
+  ...systemDraftContinuationUnsupportedDetailRules,
+  {
+    label: '未经确认的特权、捷径或使用记录',
+    pattern: /(?:VIP|预约|快速通行(?:券|卡)?|通道卡|代排|走后门|特权(?:通道|待遇)?|使用过(?:\d+|[零〇一二两三四五六七八九十百千万亿半]+)次)/giu,
+  },
+]
+
 // The model review still verifies every first-layer claim against the source.
 // This smaller local guard only blocks concrete invented facts. Abstract
 // causal language is reviewed semantically instead of by a single word match.
@@ -515,7 +546,10 @@ interface StorySessionRecord {
   id: string
   idea: string
   seed: StorySeed
-  conflictCores: StoredStoryConflictCores
+  workflow?: 'legacy' | 'co-creation'
+  conflictCores?: StoredStoryConflictCores
+  provisionalCurve?: ProvisionalCurve
+  confirmedCurve?: ConfirmedCurve
   selectedConflictCore?: StoredStoryConflictCore
   selectedPredicament?: StoryPredicament
   selectedApproach?: StoryPredicamentApproach
@@ -538,6 +572,7 @@ interface StoryFoundation {
   seed: StorySeed
   predicament: StoryPredicament
   approach: StoryPredicamentApproach
+  confirmedCurve?: ConfirmedCurve
 }
 
 interface StoryHeadTailRequest extends StoryFoundation {}
@@ -654,6 +689,50 @@ export function parseDirectionRequest(body: unknown): StoryDirectionsRequest {
   const revision = readOptionalNonNegativeInteger(record, 'revision')
 
   return { idea, expansionScope, context, generateSystemDraft, preference, excludedTitles, storyId, revision }
+}
+
+export function parseStoryCoCreationStartRequest(body: unknown): StoryCoCreationStartRequest {
+  const record = parseRequestRecord(body, ['idea', 'brief'])
+  return {
+    idea: readText(record, 'idea', '请先写下一个故事想法。', maximumStoryIdeaLength, invalidRequestContext),
+    brief: parseCreativeBrief(record.brief),
+  }
+}
+
+export function parseStoryCurveBeatUpdateRequest(body: unknown): StoryCurveBeatUpdateRequest {
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'beatId', 'detail'])
+  return {
+    ...parseStorySessionReference(record),
+    curveId: readIdentifier(record, 'curveId', '暂定故事曲线不完整，请刷新后重试。', invalidRequestContext),
+    beatId: readIdentifier(record, 'beatId', '请选择要编辑的曲线节点。', invalidRequestContext),
+    detail: readText(record, 'detail', '曲线节点内容不能为空。', 220, invalidRequestContext),
+  }
+}
+
+export function parseStoryCurveBeatRegenerationRequest(body: unknown): StoryCurveBeatRegenerationRequest {
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'beatId', 'feedback'])
+  return {
+    ...parseStorySessionReference(record),
+    curveId: readIdentifier(record, 'curveId', '暂定故事曲线不完整，请刷新后重试。', invalidRequestContext),
+    beatId: readIdentifier(record, 'beatId', '请选择要重推的曲线节点。', invalidRequestContext),
+    feedback: readOptionalText(record, 'feedback', 180),
+  }
+}
+
+export function parseStoryCurveConfirmRequest(body: unknown): StoryCurveConfirmRequest {
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'curveId'])
+  return {
+    ...parseStorySessionReference(record),
+    curveId: readIdentifier(record, 'curveId', '暂定故事曲线不完整，请刷新后重试。', invalidRequestContext),
+  }
+}
+
+export function parseStoryCurveStartSpineRequest(body: unknown): StoryCurveStartSpineRequest {
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'curveId'])
+  return {
+    ...parseStorySessionReference(record),
+    curveId: readIdentifier(record, 'curveId', '暂定故事曲线不完整，请刷新后重试。', invalidRequestContext),
+  }
 }
 
 function parseConflictCoreContext(value: unknown): StoryConflictCoreContext | undefined {
@@ -2112,6 +2191,9 @@ function extractGoalAnchorTerms(sourceTexts: string[]): string[] {
 export async function generateDirections(request: StoryDirectionsRequest): Promise<StoryDirectionsResponse> {
   if (request.storyId) {
     const session = getStorySession(request.storyId, request.revision)
+    if (session.workflow === 'co-creation') {
+      throw new AppError('当前故事正在编辑暂定主线，请在曲线工作区继续。', 409, 'STORY_CO_CREATION_WORKFLOW')
+    }
     if (request.idea !== session.idea) {
       throw new AppError('故事想法已改变，请从第一步重新生成困境。', 409, 'STORY_SESSION_CONFLICT')
     }
@@ -2147,11 +2229,169 @@ function createConflictCoreResponse(
   }
 }
 
+export async function startStoryCoCreation(
+  request: StoryCoCreationStartRequest,
+): Promise<StoryCoCreationResponse> {
+  const directSeed = createDirectCoCreationSeed(request.idea)
+  const resolved = directSeed
+    ? { seed: directSeed }
+    : await resolveStorySeed({
+      idea: request.idea,
+      expansionScope: 'keep-scale',
+    })
+  const { systemDraft: _systemDraft, ...seedWithoutSystemDraft } = resolved.seed
+  const seed: StorySeed = {
+    ...seedWithoutSystemDraft,
+    creativeBrief: request.brief,
+  }
+  const curve = await generateProvisionalCurve(request.idea, seed, request.brief)
+  const session = createCoCreationSession(request.idea, seed, curve)
+  storySessions.set(session.id, session)
+  persistStorySessions()
+
+  return {
+    storyId: session.id,
+    revision: session.revision,
+    seed,
+    brief: request.brief,
+    curve,
+  }
+}
+
+export async function updateSessionCurveBeat(
+  request: StoryCurveBeatUpdateRequest,
+): Promise<StoryCurveMutationResponse> {
+  const session = getStorySession(request.storyId, request.revision)
+  const curve = requireDraftCurve(session, request.curveId)
+  const result = updateCurveBeat(curve, request.beatId, request.detail)
+  session.provisionalCurve = result.curve
+  commitStorySessionChanges(session)
+  return {
+    storyId: session.id,
+    revision: session.revision,
+    curve: result.curve,
+    affectedBeatIds: result.affectedBeatIds,
+  }
+}
+
+export async function regenerateSessionCurveBeat(
+  request: StoryCurveBeatRegenerationRequest,
+): Promise<StoryCurveMutationResponse> {
+  const session = getStorySession(request.storyId, request.revision)
+  const curve = requireDraftCurve(session, request.curveId)
+  const result = await regenerateCurveBeat(session.idea, session.seed, curve, request.beatId, request.feedback)
+  assertStorySessionRevision(session, request.revision)
+  session.provisionalCurve = result.curve
+  commitStorySessionChanges(session)
+  return {
+    storyId: session.id,
+    revision: session.revision,
+    curve: result.curve,
+    affectedBeatIds: result.affectedBeatIds,
+  }
+}
+
+export async function confirmSessionCurve(
+  request: StoryCurveConfirmRequest,
+): Promise<StoryCurveConfirmationResponse> {
+  const session = getStorySession(request.storyId, request.revision)
+  const curve = requireDraftCurve(session, request.curveId)
+  const result = confirmProvisionalCurve(curve)
+  session.provisionalCurve = result.curve
+  session.confirmedCurve = result.confirmedCurve
+  session.seed = { ...session.seed, creativeBrief: result.confirmedCurve.brief }
+  commitStorySessionChanges(session)
+  return {
+    storyId: session.id,
+    revision: session.revision,
+    curve: result.curve,
+    confirmedCurve: result.confirmedCurve,
+  }
+}
+
+export async function startSessionStorySpineFromCurve(
+  request: StoryCurveStartSpineRequest,
+): Promise<StoryCurveSpineResponse> {
+  const session = getStorySession(request.storyId, request.revision)
+  const confirmedCurve = requireConfirmedCurve(session, request.curveId)
+  if (session.currentTurn || session.state || session.history.length) {
+    throw new AppError('这条主线已经开始推演，请继续当前故事。', 409, 'STORY_SPINE_ALREADY_STARTED')
+  }
+
+  const foundation = materializeConfirmedCurve(session.seed, confirmedCurve)
+  const turn = await generateStoryTurn({
+    idea: session.idea,
+    seed: foundation.seed,
+    predicament: foundation.predicament,
+    approach: foundation.approach,
+    confirmedCurve,
+    headTail: foundation.headTail,
+    mode: 'start',
+    history: [],
+  })
+  assertStorySessionRevision(session, request.revision)
+  session.seed = foundation.seed
+  session.selectedPredicament = foundation.predicament
+  session.selectedApproach = foundation.approach
+  session.selectedHeadTail = foundation.headTail
+  session.state = narrativeState.createInitialState(foundation.seed, foundation.predicament)
+  session.history = []
+  session.currentTurn = turn
+  commitStorySessionChanges(session)
+  return {
+    ...createStoryTurnResponse(session, turn),
+    seed: foundation.seed,
+    predicament: foundation.predicament,
+    approach: foundation.approach,
+    headTail: foundation.headTail,
+  }
+}
+
+function createDirectCoCreationSeed(idea: string): StorySeed | undefined {
+  const inferredAction = extractOriginalIdeaAction(idea)
+  // This narrow path avoids asking a model to interpret an already explicit
+  // one-line premise. Longer prose continues through normal seed extraction.
+  if (!inferredAction || inferredAction.subject.length > 4) return undefined
+
+  return {
+    ...createOriginalIdeaFallbackSeed(idea, undefined),
+    subject: inferredAction.subject,
+    lockedGoal: inferredAction.goal,
+    expansionScope: 'keep-scale',
+  }
+}
+
+function requireDraftCurve(session: StorySessionRecord, curveId: string): ProvisionalCurve {
+  if (session.workflow !== 'co-creation' || !session.provisionalCurve) {
+    throw new AppError('当前故事没有可编辑的暂定主线。', 409, 'STORY_CURVE_NOT_FOUND')
+  }
+  if (session.provisionalCurve.id !== curveId) {
+    throw new AppError('暂定主线已经变化，请刷新后重试。', 409, 'STORY_SESSION_CONFLICT')
+  }
+  if (session.provisionalCurve.status !== 'draft') {
+    throw new AppError('这条主线已经确认，不能继续修改。', 409, 'STORY_CURVE_ALREADY_CONFIRMED')
+  }
+  return session.provisionalCurve
+}
+
+function requireConfirmedCurve(session: StorySessionRecord, curveId: string): ConfirmedCurve {
+  if (session.workflow !== 'co-creation' || !session.confirmedCurve) {
+    throw new AppError('请先确认暂定故事曲线，再进入剧情推演。', 409, 'STORY_CURVE_NOT_CONFIRMED')
+  }
+  if (session.confirmedCurve.provisionalCurveId !== curveId) {
+    throw new AppError('确认的主线已经变化，请刷新后重试。', 409, 'STORY_SESSION_CONFLICT')
+  }
+  return session.confirmedCurve
+}
+
 export async function generateSessionPredicament(
   request: StoryPredicamentSessionRequest,
 ): Promise<StoryPredicamentResponse> {
   const session = getStorySession(request.storyId, request.revision)
-  const core = session.conflictCores.find((candidate) => candidate.id === request.conflictCoreId)
+  if (session.workflow === 'co-creation') {
+    throw new AppError('请先在暂定故事曲线中确认主线。', 409, 'STORY_CURVE_NOT_CONFIRMED')
+  }
+  const core = session.conflictCores?.find((candidate) => candidate.id === request.conflictCoreId)
   if (!core) {
     throw new AppError('所选冲突核心已不在当前会话中，请重新选择。', 409, 'STORY_SESSION_CONFLICT')
   }
@@ -2295,7 +2535,12 @@ async function extractStorySeed(
 }
 
 function assertStorySeedUsesOriginalText(idea: string, seed: StorySeedDraft) {
-  const quotedValues = [...seed.lockedFacts, ...(seed.lockedGoal ? [seed.lockedGoal] : [])]
+  const quotedValues = [
+    seed.subject,
+    seed.activeSituation,
+    ...seed.lockedFacts,
+    ...(seed.lockedGoal ? [seed.lockedGoal] : []),
+  ]
   const hasUnquotedValue = quotedValues.some((value) => !hasOriginalTextPhrase(idea, value))
   if (hasUnquotedValue) {
     throw new AppError('模型没有逐字保留原始念头中的锁定事实或目标，请重试。', 502, 'INVALID_MODEL_OUTPUT')
@@ -3443,6 +3688,7 @@ export async function generateStoryTurn(request: StoryTurnRequest): Promise<Stor
       }, '模型没有返回下一段可继续发展的故事情境，请重试。')
       const turn = parseModelStoryTurn(record, request, state, outputFormat)
       validateSystemDraftStoryTurnContinuation(request, turn)
+      validateConfirmedCurveStoryTurnContinuation(request, turn)
       if (shouldReviewStoryTurnGrounding) {
         await reportStoryTurnGroundingWarning(request, state, turn)
       }
@@ -3455,6 +3701,13 @@ export async function generateStoryTurn(request: StoryTurnRequest): Promise<Stor
         `Story turn rejected (mode=${request.mode}, confirmedTurns=${request.history.length}, format=${getStoryTurnOutputFormat(attempt)}, attempt=${attempt + 1}): ${repairMessage}`,
       )
     }
+  }
+
+  if (request.confirmedCurve) {
+    const fallback = createConfirmedCurveStoryTurnFallback(request, state)
+    validateConfirmedCurveStoryTurnContinuation(request, fallback)
+    console.warn(`Story turn used the confirmed-curve fallback (mode=${request.mode}, confirmedTurns=${request.history.length}).`)
+    return fallback
   }
 
   if (usesSelectedSystemDraftDirection(request.seed)) {
@@ -3487,6 +3740,7 @@ async function generateStoryTurnOptionRefinement(
       }, '模型没有返回可用的修改后选择，请重试。')
       const option = parseRefinedStoryTurnOption(record, request, state)
       validateSystemDraftStoryTurnOptionContinuation(request, option)
+      validateConfirmedCurveStoryTurnOptionContinuation(request, option)
       return option
     } catch (error) {
       if (!isRetryableStoryTurnError(error)) throw error
@@ -3790,6 +4044,138 @@ function getAlternativePredicamentDirection(predicament: StoryPredicament, selec
   return normalizeGoalText(firstDirection) === normalizeGoalText(selectedDirection)
     ? secondDirection
     : firstDirection
+}
+
+function createConfirmedCurveStoryTurnFallback(
+  request: StoryTurnRequest,
+  state: StoryNarrativeState,
+): StoryTurn {
+  if (request.mode === 'conclude') {
+    return createSystemDraftStoryTurnFallback(request, state)
+  }
+
+  const confirmedCurve = request.confirmedCurve
+  if (!confirmedCurve) {
+    throw new AppError('已确认曲线缺失，无法开始故事推演。', 502, 'INVALID_MODEL_OUTPUT')
+  }
+
+  const getBeatDetail = (kind: ConfirmedCurve['beats'][number]['kind'], fallback: string) => {
+    const detail = confirmedCurve.beats.find((beat) => beat.kind === kind)?.detail ?? fallback
+    return trimTerminalSentence(detail.replace(/^暂定[：:]\s*/u, ''))
+  }
+  const subject = request.seed.subject || '主角'
+  const goal = trimTerminalSentence(request.predicament.preservedGoal)
+  const trigger = getBeatDetail('trigger', `${subject}原来的办法暂时无法继续`)
+  const escalation = getBeatDetail('escalation', `${subject}需要在原有安排与新的难题之间作出取舍`)
+  const cost = getBeatDetail('climax-choice', `${subject}需要承担代价，再决定怎样继续`)
+  const historyLength = request.history.length
+  const isFirstTurn = historyLength === 0
+  const previousAction = request.history.at(-1)?.selectedOption.action
+  const turnId = `turn-${historyLength + 1}`
+  const nodeId = `node-${historyLength + 1}`
+  const event = isFirstTurn
+    ? `${subject}仍想${goal}，但「${trigger}」让原来的安排停住。此刻还没有任何解决办法成为事实。`
+    : `${subject}已经确认“${previousAction}”，但「${escalation}」仍需要被继续面对。`
+  const options = createConfirmedCurveFallbackOptions(turnId, subject, goal, trigger, cost)
+  const turn: StoryTurn = {
+    id: turnId,
+    phase: getStoryTurnPhaseForRequest(request),
+    node: {
+      id: nodeId,
+      title: isFirstTurn ? '先面对停住的安排' : '继续面对取舍',
+      event: limitPredicamentFallbackText(event, 180),
+      purpose: limitPredicamentFallbackText(
+        `把已确认的阻碍转成${subject}此刻可以自主决定的行动，并持续回应「${goal}」。`,
+        120,
+      ),
+      goalState: getStoryTurnGoalState(false, historyLength),
+    },
+    conflict: {
+      nodeId,
+      conflict: limitPredicamentFallbackText(`「${trigger}」意味着${escalation}。`, 160),
+      action: limitPredicamentFallbackText(
+        `${subject}需要决定，是先看清阻碍、先承认代价，还是先放下原来的办法。`,
+        140,
+      ),
+      consequence: '无论选择哪一种，原来的办法都不再是默认答案。',
+      intensity: historyLength >= minimumConfirmedTurnsBeforeConclusion - 1 ? 4 : 2,
+      anchor: isFirstTurn ? '起点' : '推进',
+    },
+    question: limitPredicamentFallbackText(`在不假装阻碍已经消失的前提下，${subject}现在先怎么做？`, 140),
+    options,
+    narrativeAction: null,
+    transition: null,
+    canConclude: canConcludeAfterCurrentTurn(request),
+    isConclusion: false,
+  }
+
+  validateStoryTurnShape(turn, invalidModelOutputContext, getStoryTurnValidationMessage(false))
+  validateStoryTurnStateTransition(turn, state, getStoryTurnValidationMessage(false))
+  return turn
+}
+
+function createConfirmedCurveFallbackOptions(
+  turnId: string,
+  subject: string,
+  goal: string,
+  trigger: string,
+  cost: string,
+): StoryTurnOption[] {
+  const createOption = (
+    index: number,
+    label: string,
+    action: string,
+    immediateConsequence: string,
+    laterEffect: string,
+  ): StoryTurnOption => {
+    const id = `${turnId}-option-${index}`
+    const actionId = `${id}-action`
+    const boundedAction = limitPredicamentFallbackText(action, 120)
+    return {
+      id,
+      label: limitPredicamentFallbackText(label, 32),
+      action: boundedAction,
+      immediateConsequence: limitPredicamentFallbackText(immediateConsequence, 120),
+      laterEffect: limitPredicamentFallbackText(laterEffect, 120),
+      narrativeAction: {
+        id: actionId,
+        intent: boundedAction,
+        preconditions: [],
+        effects: [],
+        source: 'generated',
+      },
+      transition: {
+        actionId,
+        consumedFacts: [],
+        changedFacts: [],
+        introducedFacts: [],
+      },
+    }
+  }
+
+  return [
+    createOption(
+      1,
+      '先看清阻碍',
+      `${subject}先不沿用原来的办法，认真辨认「${trigger}」到底改变了什么。`,
+      '阻碍不再被当作可以忽略的小插曲。',
+      `接下来需要决定怎样继续${goal}。`,
+    ),
+    createOption(
+      2,
+      '先承认代价',
+      `${subject}先承认「${cost}」，不急着为自己寻找轻松的绕法。`,
+      '代价被清楚地摆到眼前。',
+      '这份承认会影响之后的取舍。',
+    ),
+    createOption(
+      3,
+      '先放下旧办法',
+      `${subject}暂时放下最熟悉的办法，为「${goal}」找一个不回避代价的起点。`,
+      '主角不再把原来的做法当作唯一道路。',
+      '新的起点仍需要经过下一次选择来落实。',
+    ),
+  ]
 }
 
 export function createSystemDraftStoryTurnFallback(
@@ -4109,6 +4495,48 @@ function validateSystemDraftStoryTurnOptionContinuation(
   )
 }
 
+export function validateConfirmedCurveStoryTurnContinuation(
+  request: SystemDraftContinuationRequest,
+  turn: StoryTurn,
+) {
+  validateConfirmedCurveContinuationFields(
+    request,
+    getStoryTurnContinuationFields(turn, '当前回合'),
+    '逐步发展',
+  )
+}
+
+function validateConfirmedCurveStoryTurnOptionContinuation(
+  request: StoryTurnOptionRefinementGenerationRequest,
+  option: StoryTurnOption,
+) {
+  validateConfirmedCurveContinuationFields(
+    request,
+    getStoryTurnOptionContinuationFields(option, '修改后的选择'),
+    '逐步发展',
+  )
+}
+
+function validateConfirmedCurveContinuationFields(
+  request: SystemDraftContinuationRequest,
+  fields: readonly GeneratedTextField[],
+  stage: string,
+) {
+  if (!request.confirmedCurve) return
+
+  const issue = findFirstUnsupportedGeneratedField(
+    getConfirmedCurveContinuationSourceTexts(request),
+    createFieldGroundingChecks(fields, confirmedCurveContinuationUnsupportedDetailRules),
+  )
+  if (!issue?.detail) return
+
+  throw new AppError(
+    `已确认曲线后的${stage}${issue.field.label}加入了未确认的${issue.detail.label}“${issue.detail.value}”，请重试。`,
+    invalidModelOutputContext.statusCode,
+    'INVALID_MODEL_OUTPUT',
+  )
+}
+
 function validateSystemDraftContinuationFields(
   request: SystemDraftContinuationRequest,
   fields: readonly GeneratedTextField[],
@@ -4274,6 +4702,9 @@ export async function generateSessionHeadTailOptions(
   request: StoryHeadTailSessionRequest,
 ): Promise<StoryHeadTailResponse> {
   const session = getStorySession(request.storyId, request.revision)
+  if (session.workflow === 'co-creation') {
+    throw new AppError('暂定主线确认前不能生成故事两端。', 409, 'STORY_CURVE_NOT_CONFIRMED')
+  }
   const predicament = session.selectedPredicament?.id === request.predicamentId
     ? session.selectedPredicament
     : undefined
@@ -4298,10 +4729,20 @@ export async function generateSessionStoryTurn(
   request: StoryTurnSessionRequest,
 ): Promise<StoryTurnResponse> {
   const session = getStorySession(request.storyId, request.revision)
+  if (session.workflow === 'co-creation' && !session.confirmedCurve) {
+    throw new AppError('请先确认暂定故事曲线，再进入剧情推演。', 409, 'STORY_CURVE_NOT_CONFIRMED')
+  }
+  if (session.workflow === 'co-creation' && request.mode === 'start') {
+    throw new AppError('请从已确认的故事曲线进入剧情推演。', 409, 'STORY_CURVE_START_REQUIRED')
+  }
   const { predicament, approach, headTailOptions } = requireStoryTurnContext(session)
-  return request.mode === 'start'
-    ? startSessionStoryTurn(session, request, predicament, approach, headTailOptions)
-    : continueSessionStoryTurn(session, request, predicament, approach)
+  if (request.mode === 'start') {
+    if (!headTailOptions) {
+      throw new AppError('请先确认故事两端。', 409, 'STORY_SESSION_CONFLICT')
+    }
+    return startSessionStoryTurn(session, request, predicament, approach, headTailOptions)
+  }
+  return continueSessionStoryTurn(session, request, predicament, approach)
 }
 
 export async function generateSessionStoryTurnOptionRefinement(
@@ -4325,6 +4766,7 @@ export async function generateSessionStoryTurnOptionRefinement(
     seed: session.seed,
     predicament,
     approach,
+    confirmedCurve: session.workflow === 'co-creation' ? session.confirmedCurve : undefined,
     headTail,
     history: session.history,
     currentTurn,
@@ -4346,9 +4788,9 @@ export async function generateSessionStoryTurnOptionRefinement(
 function requireStoryTurnContext(session: StorySessionRecord): {
   predicament: StoryPredicament
   approach: StoryPredicamentApproach
-  headTailOptions: StoryHeadTailOptions
+  headTailOptions: StoryHeadTailOptions | undefined
 } {
-  if (!session.selectedPredicament || !session.selectedApproach || !session.headTailOptions) {
+  if (!session.selectedPredicament || !session.selectedApproach || (!session.headTailOptions && !session.selectedHeadTail)) {
     throw new AppError('请先确认具体困境中的应对方向并生成故事两端。', 409, 'STORY_SESSION_CONFLICT')
   }
 
@@ -4376,6 +4818,7 @@ async function startSessionStoryTurn(
     seed: session.seed,
     predicament,
     approach,
+    confirmedCurve: session.workflow === 'co-creation' ? session.confirmedCurve : undefined,
     headTail,
     mode: 'start',
     history: [],
@@ -4496,6 +4939,9 @@ export async function generateSessionStory(
   request: StoryGenerationSessionRequest,
 ): Promise<StoryGenerationResponse> {
   const session = getStorySession(request.storyId, request.revision)
+  if (session.workflow === 'co-creation' && !session.confirmedCurve) {
+    throw new AppError('请先确认暂定故事曲线，再进入剧情推演。', 409, 'STORY_CURVE_NOT_CONFIRMED')
+  }
   const {
     selectedPredicament: predicament,
     selectedApproach: approach,
@@ -4526,7 +4972,25 @@ function createStorySession(idea: string, seed: StorySeed, conflictCores: Stored
     id: `story-${randomUUID()}`,
     idea,
     seed,
+    workflow: 'legacy',
     conflictCores,
+    history: [],
+    revision: 0,
+    updatedAt: Date.now(),
+  }
+}
+
+function createCoCreationSession(
+  idea: string,
+  seed: StorySeed,
+  curve: ProvisionalCurve,
+): StorySessionRecord {
+  return {
+    id: `story-${randomUUID()}`,
+    idea,
+    seed,
+    workflow: 'co-creation',
+    provisionalCurve: curve,
     history: [],
     revision: 0,
     updatedAt: Date.now(),
@@ -4664,11 +5128,14 @@ function isPersistedStorySessionStore(value: unknown): value is PersistedStorySe
 
 function isPersistedStorySession(value: unknown): value is StorySessionRecord {
   if (!isPlainRecord(value)) return false
+  const isCoCreation = value.workflow === 'co-creation'
+  const hasSupportedWorkflow = value.workflow === undefined || value.workflow === 'legacy' || isCoCreation
 
   return typeof value.id === 'string'
     && typeof value.idea === 'string'
     && isPlainRecord(value.seed)
-    && Array.isArray(value.conflictCores)
+    && hasSupportedWorkflow
+    && (isCoCreation ? isPlainRecord(value.provisionalCurve) : Array.isArray(value.conflictCores))
     && Array.isArray(value.history)
     && typeof value.revision === 'number'
     && Number.isInteger(value.revision)
@@ -5873,6 +6340,13 @@ function getSystemDraftContinuationSourceTexts(request: SystemDraftContinuationR
   ]
 }
 
+function getConfirmedCurveContinuationSourceTexts(request: SystemDraftContinuationRequest): string[] {
+  return [
+    ...getSystemDraftContinuationSourceTexts(request),
+    ...(request.confirmedCurve?.beats.map((beat) => beat.detail) ?? []),
+  ]
+}
+
 function getExpansionScopeInstruction(scope: StoryExpansionScope): string {
   if (scope === 'grounded-obstacle') {
     return '加入一点现实阻碍：可增加一项与当下行动直接相关的实际困难，但不要补写永久背景。'
@@ -5947,7 +6421,7 @@ optionId 必须照抄输入，恰好审查全部三条。严格使用以下 JSON
 }
 
 function buildStoryTurnPrompt(
-  { idea, seed, predicament, approach, headTail, history, mode }: StoryTurnRequest,
+  { idea, seed, predicament, approach, headTail, history, mode, confirmedCurve }: StoryTurnRequest,
   state: StoryNarrativeState,
   repairMessage?: string,
   outputFormat: StoryTurnOutputFormat = 'detailed',
@@ -5969,6 +6443,7 @@ ${JSON.stringify(state)}
 
 本次任务：${modeInstruction}
 ${getSystemDraftTurnDirectionInstruction(seed, predicament, approach)}
+${getConfirmedCurveTurnConstraintInstruction(confirmedCurve)}
 ${getStoryTurnRepairInstruction(repairMessage, outputFormat)}
 
 请只生成这一次推进的结果，不要补写未来大纲。node.event 必须是一个可视、可行动的当前局面；node.purpose 要准确说明它如何由前一步的选择而来，以及它将怎样把故事推向预定高潮语义和结尾。conflict.action 描述主角此刻面临的行动方向，但不要代替用户从 options 中作选择。故事两端中的 climaxActionId 只说明最初方案的状态依据，不是收束回合必须复用的动作 ID。
@@ -5979,6 +6454,12 @@ ${getStoryTurnStateProtocolInstruction(outputFormat)}
 
 严格使用以下 JSON 结构：
 ${responseSchema}`
+}
+
+function getConfirmedCurveTurnConstraintInstruction(confirmedCurve: ConfirmedCurve | undefined): string {
+  if (!confirmedCurve) return ''
+
+  return '\n曲线约束：本回合建立在作者已确认的故事曲线上。曲线节点是唯一可用的结构前提；不要把抽象阻碍擅自具体化为未提出过的票券、会员或特权、预约、账号、设备、工作人员流程、使用记录、过去经历或他人决定。若缺少原因或条件，保留为尚待处理的未知，而不是为了制造戏剧性补设事实。'
 }
 
 function buildStoryTurnOptionRefinementPrompt(

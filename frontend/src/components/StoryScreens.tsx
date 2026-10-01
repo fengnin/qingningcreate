@@ -82,13 +82,13 @@ export function OpeningScreen({ session }: { session: StorySession }) {
       <section className="opening-content">
         <p className="opening-kicker"><Sparkles size={15} /> 从一句话开始</p>
         <h1>时光川行<br />青柠创作平台</h1>
-        <p>先把念头变成困境，保持这件事原来的大小，再定下故事两端，一步一步让它发生。</p>
+        <p>先由你决定它要讲什么，系统再把想法整理成可编辑的故事曲线；确认主线后，才开始让它发生。</p>
         <label className="idea-field">
-          <span>此刻浮现的想法</span>
+          <span className="idea-field-label">此刻浮现的想法 <small>一个人想做的一件事就够了</small></span>
           <textarea
             value={session.idea}
             onChange={(event) => session.updateIdea(event.target.value)}
-            placeholder="例如：毕业前最后一晚，林夏在社团仓库整理器材时发现一台借来的相机。"
+            placeholder="例如：青柠想去游乐园玩"
             maxLength={maximumStoryIdeaLength}
           />
           <span className="field-footer">
@@ -96,8 +96,8 @@ export function OpeningScreen({ session }: { session: StorySession }) {
             <small>{session.idea.length} / {maximumStoryIdeaLength}</small>
           </span>
         </label>
-        <button className="primary-action opening-action" type="button" onClick={() => void session.openConflictCorePicker()} disabled={!session.trimmedIdea}>
-          生成三条冲突核心 <ArrowRight size={18} />
+        <button className="primary-action opening-action" type="button" onClick={session.openCreativeBrief} disabled={!session.trimmedIdea}>
+          先定创意方向 <ArrowRight size={18} />
         </button>
       </section>
       <footer className="opening-footer"><StoryJourney current={0} /></footer>

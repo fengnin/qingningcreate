@@ -130,6 +130,9 @@ function createInitialNarrativeState(
 }
 
 function createSystemDraftFacts(seed: StorySeed): StoryFact[] {
+  // Co-creation sessions materialize only author-confirmed curve beats.
+  // A system draft must never become a path fact in that workflow.
+  if (seed.creativeBrief) return []
   if (!seed.systemDraft) return []
 
   const knownStatements = new Set(

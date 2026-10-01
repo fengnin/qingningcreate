@@ -1,18 +1,34 @@
 const lastStoryIdeaExampleStorageKey = 'qingning-story-last-example'
 
 export const storyIdeaExamples = [
-  '毕业前最后一晚，林夏在社团仓库整理器材时发现一台借来的相机。相机必须在明早归还，里面存着她和已经断联的朋友拍下的一段视频。她答应过不再打扰对方，却想在离校前决定，要不要把视频发给她。',
-  '演出前夜，许棠在借来的录音笔里找到和断联搭档录的歌。录音笔必须在明早归还，她答应不再联系，却想在开演前决定要不要把歌发给他。',
-  '搬家前夜，顾言在借来的旧书里发现断联朋友留下的便笺。旧书必须在明早归还，他答应不再联系，却想在搬家前决定要不要把便笺寄给她。',
-  '毕业展布置前，沈乔在借来的投影仪里看到和前队友剪的短片。投影仪今晚要归还，她答应不再改动作品，却想在展出前决定要不要删掉自己的名字。',
-  '比赛提交前，程遥在借来的相机里发现同伴拍下的一张照片。相机明早要归还，她答应不替对方做决定，却想在截止前决定要不要用它参赛。',
-  '火车开走前，闻溪在借来的行李箱夹层里找到断联姐姐留下的钥匙。行李箱今晚要归还，她答应不再追问，却想在上车前决定要不要带走它。',
-  '外婆出院前，黎安在借来的相册里找到母亲年轻时的一张照片。相册明早要还回去，母亲说暂时别提往事，她却想在探望前决定要不要带上它。',
-  '开店前夜，苏禾在借来的收银本里发现前合伙人留下的账页。收银本明早要归还，她答应不再替对方收尾，却想在开门前决定要不要核对它。',
-  '雨停前，江禾在借来的雨伞夹层里发现同学写给别人的信。雨伞今晚要归还，她答应只负责归还，却想在对方来取前决定要不要提醒他。',
-  '婚礼彩排前，安澜在借来的礼服口袋里找到断联朋友的耳环。礼服明早要还，她答应不再联系，却想在仪式前决定要不要送回去。',
-  '录取通知寄出前，林舟在借来的电脑里看到和父亲共同写的申请信。电脑今晚要还，他答应不擅自改动，却想在截止前决定要不要删掉一段话。',
-  '停电前，白栀在借来的手电筒里找到邻居托她保管的门卡。手电筒今晚要还，她答应不替对方开门，却想在天黑前决定要不要送过去。',
+  '青柠想去游乐园玩',
+  '阿南想向朋友道歉',
+  '周岚要提交报告',
+  '小满想参加学校比赛',
+  '林夏准备离开这座城市',
+  '阿禾想归还捡到的东西',
+  '陈默想去看一场演出',
+  '小雨想学会骑自行车',
+  '安安准备第一次上台唱歌',
+  '叶子想把一封信寄出去',
+  '小海要找回丢失的钥匙',
+  '阿宁想给家人做顿饭',
+  '林舟想参加一次长跑',
+  '许诺要把画送给老师',
+  '小北想学会游泳',
+  '江河想修好爷爷的收音机',
+  '琪琪想在班会上发言',
+  '周野要拒绝一次邀请',
+  '小禾想找一个安静的地方',
+  '阿川想把秘密说出来',
+  '小陶想把旧照片保存下来',
+  '阿远想赢一场比赛',
+  '叶青想把房间换个样子',
+  '小树想和新同学说话',
+  '陈安要完成第一次演讲',
+  '小希想去看一场日出',
+  '小璇想把借来的书还回去',
+  '顾言想学会做一道菜',
 ] as const
 
 export function getNextStoryIdeaExample(currentIdea?: string): string {
@@ -26,17 +42,6 @@ export function getNextStoryIdeaExample(currentIdea?: string): string {
 
   writeLastStoryIdeaExample(example)
   return example
-}
-
-export function getInitialStoryIdeaExample(): string {
-  const lastExample = readLastStoryIdeaExample()
-  const availableExamples = storyIdeaExamples.filter((example) => example !== lastExample)
-
-  return availableExamples[Math.floor(Math.random() * availableExamples.length)] ?? storyIdeaExamples[0]
-}
-
-export function rememberStoryIdeaExample(example: string): void {
-  writeLastStoryIdeaExample(example)
 }
 
 function readLastStoryIdeaExample(): string | undefined {

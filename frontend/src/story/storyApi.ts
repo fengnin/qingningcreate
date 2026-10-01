@@ -29,6 +29,20 @@ import type {
   StoryAction,
   StoryTransition,
   StorySessionVersion,
+  ConfirmedCurve,
+  AuthorInstruction,
+  CreativeBrief,
+  CurveBeat,
+  ProvisionalCurve,
+  StoryCoCreationResponse,
+  StoryCoCreationStartRequest,
+  StoryCurveBeatRegenerationRequest,
+  StoryCurveBeatUpdateRequest,
+  StoryCurveConfirmationResponse,
+  StoryCurveConfirmRequest,
+  StoryCurveMutationResponse,
+  StoryCurveSpineResponse,
+  StoryCurveStartSpineRequest,
 } from '../../../shared/story-contract.js'
 
 const INVALID_RESPONSE_MESSAGE = '故事服务返回的数据不完整，请重试。'
@@ -48,6 +62,28 @@ export class StoryApiError extends Error {
 
 export function requestConflictCores(request: StoryDirectionsRequest): Promise<StoryDirectionsResponse> {
   return postJson('/api/story-directions', request, parseConflictCoresResponse)
+}
+
+export function requestStoryCoCreationStart(request: StoryCoCreationStartRequest): Promise<StoryCoCreationResponse> {
+  return postJson('/api/story/co-create/start', request, parseStoryCoCreationResponse)
+}
+
+export function requestCurveBeatUpdate(request: StoryCurveBeatUpdateRequest): Promise<StoryCurveMutationResponse> {
+  return postJson('/api/story/curve/beat', request, parseStoryCurveMutationResponse)
+}
+
+export function requestCurveBeatRegeneration(
+  request: StoryCurveBeatRegenerationRequest,
+): Promise<StoryCurveMutationResponse> {
+  return postJson('/api/story/curve/beat/regenerate', request, parseStoryCurveMutationResponse)
+}
+
+export function requestCurveConfirmation(request: StoryCurveConfirmRequest): Promise<StoryCurveConfirmationResponse> {
+  return postJson('/api/story/curve/confirm', request, parseStoryCurveConfirmationResponse)
+}
+
+export function requestCurveStorySpine(request: StoryCurveStartSpineRequest): Promise<StoryCurveSpineResponse> {
+  return postJson('/api/story/curve/start-spine', request, parseStoryCurveSpineResponse)
 }
 
 export function requestStoryPredicament(request: StoryPredicamentSessionRequest): Promise<StoryPredicamentResponse> {
@@ -121,6 +157,45 @@ function parseConflictCoresResponse(payload: unknown): StoryDirectionsResponse {
   }
 }
 
+function parseStoryCoCreationResponse(payload: unknown): StoryCoCreationResponse {
+  const record = expectRecord(payload)
+  return {
+    ...parseStorySessionVersion(record),
+    seed: parseStorySeed(record.seed),
+    brief: parseCreativeBrief(record.brief),
+    curve: parseProvisionalCurve(record.curve),
+  }
+}
+
+function parseStoryCurveMutationResponse(payload: unknown): StoryCurveMutationResponse {
+  const record = expectRecord(payload)
+  return {
+    ...parseStorySessionVersion(record),
+    curve: parseProvisionalCurve(record.curve),
+    affectedBeatIds: readIdentifierList(record, 'affectedBeatIds'),
+  }
+}
+
+function parseStoryCurveConfirmationResponse(payload: unknown): StoryCurveConfirmationResponse {
+  const record = expectRecord(payload)
+  return {
+    ...parseStorySessionVersion(record),
+    curve: parseProvisionalCurve(record.curve),
+    confirmedCurve: parseConfirmedCurve(record.confirmedCurve),
+  }
+}
+
+function parseStoryCurveSpineResponse(payload: unknown): StoryCurveSpineResponse {
+  const record = expectRecord(payload)
+  return {
+    ...parseStoryTurnResponse(record),
+    seed: parseStorySeed(record.seed),
+    predicament: parseStoryPredicament(record.predicament),
+    approach: parsePredicamentApproach(record.approach),
+    headTail: parseHeadTailOption(record.headTail),
+  }
+}
+
 function parsePredicamentResponse(payload: unknown): StoryPredicamentResponse {
   const record = expectRecord(payload)
   return {
@@ -176,6 +251,9 @@ function parseStorySeed(value: unknown): StorySeed {
     throwInvalidResponse()
   }
   const systemDraft = parseSystemConflictCoreDraft(record.systemDraft)
+  const creativeBrief = record.creativeBrief === undefined || record.creativeBrief === null
+    ? undefined
+    : parseCreativeBrief(record.creativeBrief)
 
   return {
     subject: readText(record, 'subject'),
@@ -183,6 +261,7 @@ function parseStorySeed(value: unknown): StorySeed {
     lockedGoal: typeof lockedGoal === 'string' ? lockedGoal.trim() : null,
     lockedFacts: readTextList(record, 'lockedFacts', 1, 5),
     ...(systemDraft ? { systemDraft } : {}),
+    ...(creativeBrief ? { creativeBrief } : {}),
     worldMode,
     expansionScope,
     unknowns: readTextList(record, 'unknowns', 1, 6),
@@ -250,6 +329,109 @@ function readSystemDraftMechanismType(value: unknown): StoryConflictCoreMechanis
   throwInvalidResponse()
 }
 
+function parseCreativeBrief(value: unknown): CreativeBrief {
+  const record = expectRecord(value)
+  const tones = parseCreativeEnumList(record.tones, ['comedy', 'warm', 'friendship', 'romance', 'growth', 'mystery', 'fantasy'] as const)
+  const dramaticForces = parseCreativeEnumList(record.dramaticForces, ['misunderstanding', 'cost', 'surprise', 'contrast', 'relationship-tension'] as const)
+  if (typeof record.allowSystemNamedCharacters !== 'boolean') throwInvalidResponse()
+  const note = readOptionalGeneratedText(record.note, 180)
+  return {
+    tones,
+    dramaticForces,
+    allowSystemNamedCharacters: record.allowSystemNamedCharacters,
+    ...(note ? { note } : {}),
+  }
+}
+
+function parseCreativeEnumList<T extends string>(value: unknown, allowed: readonly T[]): T[] {
+  if (!Array.isArray(value) || value.length > 2 || value.some((item) => typeof item !== 'string' || !allowed.includes(item as T))) {
+    throwInvalidResponse()
+  }
+  return [...new Set(value as T[])]
+}
+
+function parseProvisionalCurve(value: unknown): ProvisionalCurve {
+  const record = expectRecord(value)
+  const status = record.status
+  if (status !== 'draft' && status !== 'confirmed' && status !== 'superseded') throwInvalidResponse()
+  const beats = parseCurveBeats(record.beats)
+  const instructions = parseAuthorInstructions(record.instructions)
+  return {
+    id: readIdentifier(record, 'id'),
+    title: readText(record, 'title'),
+    status,
+    brief: parseCreativeBrief(record.brief),
+    beats,
+    instructions,
+    createdAt: readTimestamp(record, 'createdAt'),
+    updatedAt: readTimestamp(record, 'updatedAt'),
+  }
+}
+
+function parseConfirmedCurve(value: unknown): ConfirmedCurve {
+  const record = expectRecord(value)
+  return {
+    id: readIdentifier(record, 'id'),
+    provisionalCurveId: readIdentifier(record, 'provisionalCurveId'),
+    title: readText(record, 'title'),
+    brief: parseCreativeBrief(record.brief),
+    beats: parseCurveBeats(record.beats),
+    confirmedAt: readTimestamp(record, 'confirmedAt'),
+  }
+}
+
+function parseCurveBeats(value: unknown): CurveBeat[] {
+  if (!Array.isArray(value) || value.length < 5 || value.length > 7) throwInvalidResponse()
+  return value.map((item) => {
+    const record = expectRecord(item)
+    const kind = record.kind
+    if (
+      kind !== 'current-state'
+      && kind !== 'character-tension'
+      && kind !== 'trigger'
+      && kind !== 'escalation'
+      && kind !== 'midpoint-turn'
+      && kind !== 'climax-choice'
+      && kind !== 'resolution'
+    ) throwInvalidResponse()
+    const source = record.source
+    if (source !== 'user-input' && source !== 'system-proposal' && source !== 'user-edit' && source !== 'undecided') throwInvalidResponse()
+    const status = record.status
+    if (status !== 'proposed' && status !== 'edited' && status !== 'confirmed' && status !== 'stale' && status !== 'rejected') throwInvalidResponse()
+    return {
+      id: readIdentifier(record, 'id'),
+      kind,
+      title: readText(record, 'title'),
+      detail: readText(record, 'detail'),
+      source,
+      status,
+      dependsOn: readIdentifierList(record, 'dependsOn'),
+    }
+  })
+}
+
+function parseAuthorInstructions(value: unknown): AuthorInstruction[] {
+  if (!Array.isArray(value)) throwInvalidResponse()
+  return value.map((item) => {
+    const record = expectRecord(item)
+    const kind = record.kind
+    if (kind !== 'replace' && kind !== 'remove' && kind !== 'regenerate') throwInvalidResponse()
+    return {
+      id: readIdentifier(record, 'id'),
+      kind,
+      text: readText(record, 'text'),
+      targetBeatId: readIdentifier(record, 'targetBeatId'),
+      createdAt: readTimestamp(record, 'createdAt'),
+    }
+  })
+}
+
+function readTimestamp(record: Record<string, unknown>, field: string): number {
+  const value = record[field]
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) throwInvalidResponse()
+  return value
+}
+
 function parseStoryPredicament(value: unknown): StoryPredicament {
   const record = expectRecord(value)
 
@@ -285,15 +467,17 @@ function parseStoryConflictCore(value: unknown): StoryConflictCore {
 }
 
 function parsePredicamentApproaches(value: unknown): StoryPredicament['approaches'] {
-  if (!Array.isArray(value) || value.length !== 2) throwInvalidResponse()
-  return value.map((item) => {
-    const record = expectRecord(item)
-    return {
-      id: readIdentifier(record, 'id'),
-      intent: readText(record, 'intent'),
-      cost: readText(record, 'cost'),
-    }
-  })
+  if (!Array.isArray(value) || value.length < 1 || value.length > 2) throwInvalidResponse()
+  return value.map(parsePredicamentApproach)
+}
+
+function parsePredicamentApproach(value: unknown): StoryPredicament['approaches'][number] {
+  const record = expectRecord(value)
+  return {
+    id: readIdentifier(record, 'id'),
+    intent: readText(record, 'intent'),
+    cost: readText(record, 'cost'),
+  }
 }
 
 function parseHeadTailOption(value: unknown): StoryHeadTailOption {
@@ -436,7 +620,7 @@ function parseStoryAction(value: unknown): StoryAction {
 }
 
 function parseStoryFacts(value: unknown): StoryFact[] {
-  if (!Array.isArray(value) || value.length < 2 || value.length > 4) throwInvalidResponse()
+  if (!Array.isArray(value) || value.length < 1 || value.length > 12) throwInvalidResponse()
   return value.map((item) => parseFactRecord(item))
 }
 
@@ -460,6 +644,7 @@ function parseActionFields(
     preconditions: readIdentifierList(record, 'preconditions'),
     effects: readIdentifierList(record, 'effects'),
     source,
+    ...(record.originCurveBeatIds === undefined ? {} : { originCurveBeatIds: readIdentifierList(record, 'originCurveBeatIds') }),
   }
 }
 
@@ -499,7 +684,7 @@ function parseFactRecord(value: unknown): StoryFact {
   const record = expectRecord(value)
   const source = record.source
   const mutability = record.mutability
-  if (source !== 'user' && source !== 'system-draft' && source !== 'predicament' && source !== 'confirmed-action') throwInvalidResponse()
+  if (source !== 'user' && source !== 'system-draft' && source !== 'predicament' && source !== 'confirmed-curve' && source !== 'confirmed-action') throwInvalidResponse()
   if (mutability !== 'fixed' && mutability !== 'changeable' && mutability !== 'unknown') throwInvalidResponse()
 
   return {
@@ -507,6 +692,7 @@ function parseFactRecord(value: unknown): StoryFact {
     statement: readText(record, 'statement'),
     source,
     mutability,
+    ...(record.originCurveBeatIds === undefined ? {} : { originCurveBeatIds: readIdentifierList(record, 'originCurveBeatIds') }),
   }
 }
 
