@@ -6,7 +6,10 @@ import {
   generateProvisionalCurve,
   materializeConfirmedCurve,
   parseCreativeBrief,
+  regenerateAffectedCurveBeats,
   regenerateCurveBeat,
+  rejectCurveBeat,
+  updateCurveSourceFactDisposition,
   updateCurveBeat,
 } from './storyCoCreation.js'
 import { randomUUID } from 'node:crypto'
@@ -69,6 +72,17 @@ import type {
   StoryCurveMutationResponse,
   StoryCurveSpineResponse,
   StoryCurveStartSpineRequest,
+  StoryCurveBeatRejectRequest,
+  StoryCurveDependenciesRegenerationRequest,
+  StorySourceFactDispositionRequest,
+  StoryCurveVersion,
+  StoryCurveVersionSelectionRequest,
+  StorySessionSnapshot,
+  StoryAuthorInstructionRequest,
+  StoryActionProposal,
+  StoryActionProposalConfirmRequest,
+  StoryActionProposalRequest,
+  StoryActionProposalResponse,
 } from '../../shared/story-contract.js'
 
 type ValidationErrorContext = StoryValidationContext
@@ -550,6 +564,8 @@ interface StorySessionRecord {
   conflictCores?: StoredStoryConflictCores
   provisionalCurve?: ProvisionalCurve
   confirmedCurve?: ConfirmedCurve
+  curveVersions?: StoryCurveVersion[]
+  activeCurveVersionId?: string
   selectedConflictCore?: StoredStoryConflictCore
   selectedPredicament?: StoryPredicament
   selectedApproach?: StoryPredicamentApproach
@@ -558,6 +574,8 @@ interface StorySessionRecord {
   state?: StoryNarrativeState
   history: StoryTurnHistoryItem[]
   currentTurn?: StoryTurn
+  pendingActionProposal?: StoryActionProposal
+  generatedStory?: GeneratedStory
   revision: number
   updatedAt: number
 }
@@ -692,10 +710,22 @@ export function parseDirectionRequest(body: unknown): StoryDirectionsRequest {
 }
 
 export function parseStoryCoCreationStartRequest(body: unknown): StoryCoCreationStartRequest {
-  const record = parseRequestRecord(body, ['idea', 'brief'])
+  const record = parseRequestRecord(body, ['idea', 'brief', 'storyId', 'revision', 'versionMode'])
+  const storyId = readOptionalIdentifier(record, 'storyId')
+  const revision = readOptionalNonNegativeInteger(record, 'revision')
+  const versionMode = record.versionMode === 'replace-draft' || record.versionMode === 'new-version'
+    ? record.versionMode
+    : undefined
+  if (!storyId && (revision !== undefined || versionMode !== undefined)) {
+    throw new AppError('新故事不应携带旧版本信息，请从当前草案重新选择版本操作。', 400, 'INVALID_REQUEST')
+  }
+  if (storyId && revision === undefined) {
+    throw new AppError('重新生成主线前需要确认当前会话版本，请刷新后重试。', 409, 'STORY_SESSION_CONFLICT')
+  }
   return {
     idea: readText(record, 'idea', '请先写下一个故事想法。', maximumStoryIdeaLength, invalidRequestContext),
     brief: parseCreativeBrief(record.brief),
+    ...(storyId ? { storyId, revision, ...(versionMode ? { versionMode } : {}) } : {}),
   }
 }
 
@@ -719,6 +749,38 @@ export function parseStoryCurveBeatRegenerationRequest(body: unknown): StoryCurv
   }
 }
 
+export function parseStoryCurveBeatRejectRequest(body: unknown): StoryCurveBeatRejectRequest {
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'beatId', 'reason'])
+  return {
+    ...parseStorySessionReference(record),
+    curveId: readIdentifier(record, 'curveId', '暂定故事曲线不完整，请刷新后重试。', invalidRequestContext),
+    beatId: readIdentifier(record, 'beatId', '请选择要不采用的系统提案。', invalidRequestContext),
+    reason: readOptionalText(record, 'reason', 180),
+  }
+}
+
+export function parseStoryCurveDependenciesRegenerationRequest(body: unknown): StoryCurveDependenciesRegenerationRequest {
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'feedback'])
+  return {
+    ...parseStorySessionReference(record),
+    curveId: readIdentifier(record, 'curveId', '暂定故事曲线不完整，请刷新后重试。', invalidRequestContext),
+    feedback: readOptionalText(record, 'feedback', 180),
+  }
+}
+
+export function parseStorySourceFactDispositionRequest(body: unknown): StorySourceFactDispositionRequest {
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'factId', 'disposition'])
+  if (record.disposition !== 'parked' && record.disposition !== 'integrated') {
+    throw new AppError('原始材料处理方式不正确，请重新选择。', 400, 'INVALID_REQUEST')
+  }
+  return {
+    ...parseStorySessionReference(record),
+    curveId: readIdentifier(record, 'curveId', '暂定故事曲线不完整，请刷新后重试。', invalidRequestContext),
+    factId: readIdentifier(record, 'factId', '请选择要处理的原始材料。', invalidRequestContext),
+    disposition: record.disposition,
+  }
+}
+
 export function parseStoryCurveConfirmRequest(body: unknown): StoryCurveConfirmRequest {
   const record = parseRequestRecord(body, ['storyId', 'revision', 'curveId'])
   return {
@@ -732,6 +794,44 @@ export function parseStoryCurveStartSpineRequest(body: unknown): StoryCurveStart
   return {
     ...parseStorySessionReference(record),
     curveId: readIdentifier(record, 'curveId', '暂定故事曲线不完整，请刷新后重试。', invalidRequestContext),
+  }
+}
+
+export function parseStoryCurveVersionSelectionRequest(body: unknown): StoryCurveVersionSelectionRequest {
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'versionId'])
+  return {
+    ...parseStorySessionReference(record),
+    versionId: readIdentifier(record, 'versionId', '请选择要恢复的主线版本。', invalidRequestContext),
+  }
+}
+
+export function parseStoryAuthorInstructionRequest(body: unknown): StoryAuthorInstructionRequest {
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'targetBeatId', 'text'])
+  return {
+    ...parseStorySessionReference(record),
+    targetBeatId: readIdentifier(record, 'targetBeatId', '请选择要调整的主线节点。', invalidRequestContext),
+    text: readText(record, 'text', '请写下想怎样调整故事。', 180, invalidRequestContext),
+  }
+}
+
+export function parseStoryActionProposalRequest(body: unknown): StoryActionProposalRequest {
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'turnId', 'action'])
+  return {
+    ...parseStorySessionReference(record),
+    turnId: readIdentifier(record, 'turnId', '当前情境不完整，请刷新后重试。', invalidRequestContext),
+    action: readText(record, 'action', '请写下希望角色采取的行动。', 180, invalidRequestContext),
+  }
+}
+
+export function parseStoryActionProposalConfirmRequest(body: unknown): StoryActionProposalConfirmRequest {
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'proposalId', 'mode'])
+  if (record.mode !== 'continue' && record.mode !== 'conclude') {
+    throw new AppError('请确认这次角色行动后是继续发展还是开始收束。', 400, 'INVALID_REQUEST')
+  }
+  return {
+    ...parseStorySessionReference(record),
+    proposalId: readIdentifier(record, 'proposalId', '当前角色行动提案不存在，请刷新后重试。', invalidRequestContext),
+    mode: record.mode,
   }
 }
 
@@ -2245,17 +2345,38 @@ export async function startStoryCoCreation(
     creativeBrief: request.brief,
   }
   const curve = await generateProvisionalCurve(request.idea, seed, request.brief)
+  if (request.storyId) {
+    const session = getStorySession(request.storyId, request.revision)
+    if (session.workflow !== 'co-creation') {
+      throw new AppError('当前会话不是共创主线工作区，请新建故事后再生成曲线。', 409, 'STORY_CO_CREATION_WORKFLOW')
+    }
+    if (session.idea !== request.idea) {
+      throw new AppError('修改原始想法会创建新故事，请先返回开场页。', 409, 'STORY_SESSION_CONFLICT')
+    }
+    if (!request.versionMode) {
+      throw new AppError('请先选择保留旧版还是更新当前草案。', 409, 'STORY_VERSION_DECISION_REQUIRED')
+    }
+
+    syncActiveCurveVersion(session)
+    const version = createCurveVersion(
+      curve,
+      getNextCurveVersionLabel(session.curveVersions),
+    )
+    session.seed = seed
+    session.provisionalCurve = curve
+    session.confirmedCurve = undefined
+    session.curveVersions = [...(session.curveVersions ?? []), version]
+    session.activeCurveVersionId = version.id
+    clearCoCreationStoryPath(session)
+    commitStorySessionChanges(session)
+    return createCoCreationResponse(session, curve)
+  }
+
   const session = createCoCreationSession(request.idea, seed, curve)
   storySessions.set(session.id, session)
   persistStorySessions()
 
-  return {
-    storyId: session.id,
-    revision: session.revision,
-    seed,
-    brief: request.brief,
-    curve,
-  }
+  return createCoCreationResponse(session, curve)
 }
 
 export async function updateSessionCurveBeat(
@@ -2266,12 +2387,7 @@ export async function updateSessionCurveBeat(
   const result = updateCurveBeat(curve, request.beatId, request.detail)
   session.provisionalCurve = result.curve
   commitStorySessionChanges(session)
-  return {
-    storyId: session.id,
-    revision: session.revision,
-    curve: result.curve,
-    affectedBeatIds: result.affectedBeatIds,
-  }
+  return createCurveMutationResponse(session, result)
 }
 
 export async function regenerateSessionCurveBeat(
@@ -2283,12 +2399,41 @@ export async function regenerateSessionCurveBeat(
   assertStorySessionRevision(session, request.revision)
   session.provisionalCurve = result.curve
   commitStorySessionChanges(session)
-  return {
-    storyId: session.id,
-    revision: session.revision,
-    curve: result.curve,
-    affectedBeatIds: result.affectedBeatIds,
-  }
+  return createCurveMutationResponse(session, result)
+}
+
+export async function rejectSessionCurveBeat(
+  request: StoryCurveBeatRejectRequest,
+): Promise<StoryCurveMutationResponse> {
+  const session = getStorySession(request.storyId, request.revision)
+  const curve = requireDraftCurve(session, request.curveId)
+  const result = rejectCurveBeat(curve, request.beatId, request.reason)
+  session.provisionalCurve = result.curve
+  commitStorySessionChanges(session)
+  return createCurveMutationResponse(session, result)
+}
+
+export async function regenerateSessionCurveDependencies(
+  request: StoryCurveDependenciesRegenerationRequest,
+): Promise<StoryCurveMutationResponse> {
+  const session = getStorySession(request.storyId, request.revision)
+  const curve = requireDraftCurve(session, request.curveId)
+  const result = await regenerateAffectedCurveBeats(session.idea, session.seed, curve, request.feedback)
+  assertStorySessionRevision(session, request.revision)
+  session.provisionalCurve = result.curve
+  commitStorySessionChanges(session)
+  return createCurveMutationResponse(session, result)
+}
+
+export async function updateSessionSourceFactDisposition(
+  request: StorySourceFactDispositionRequest,
+): Promise<StoryCurveMutationResponse> {
+  const session = getStorySession(request.storyId, request.revision)
+  const curve = requireDraftCurve(session, request.curveId)
+  const result = updateCurveSourceFactDisposition(curve, request.factId, request.disposition)
+  session.provisionalCurve = result.curve
+  commitStorySessionChanges(session)
+  return createCurveMutationResponse(session, result)
 }
 
 export async function confirmSessionCurve(
@@ -2306,6 +2451,8 @@ export async function confirmSessionCurve(
     revision: session.revision,
     curve: result.curve,
     confirmedCurve: result.confirmedCurve,
+    curveVersions: session.curveVersions,
+    activeCurveVersionId: session.activeCurveVersionId,
   }
 }
 
@@ -2345,6 +2492,176 @@ export async function startSessionStorySpineFromCurve(
     approach: foundation.approach,
     headTail: foundation.headTail,
   }
+}
+
+export async function applySessionAuthorInstruction(
+  request: StoryAuthorInstructionRequest,
+): Promise<StoryCurveMutationResponse> {
+  const session = getStorySession(request.storyId, request.revision)
+  if (session.workflow !== 'co-creation' || !session.provisionalCurve || !session.confirmedCurve) {
+    throw new AppError('作者调整需要从已确认的主线开始。', 409, 'STORY_CURVE_NOT_CONFIRMED')
+  }
+  const originalCurve = session.provisionalCurve
+  const target = originalCurve.beats.find((beat) => beat.id === request.targetBeatId && beat.status !== 'rejected')
+  if (!target) throw new AppError('要调整的主线节点不存在，请刷新后重试。', 409, 'STORY_SESSION_CONFLICT')
+
+  // Preserve the confirmed path as a version before returning to author mode.
+  syncActiveCurveVersion(session)
+  const now = Date.now()
+  const draftCurve: ProvisionalCurve = {
+    ...structuredClone(originalCurve),
+    id: `curve-${randomUUID()}`,
+    status: 'draft',
+    beats: originalCurve.beats.map((beat) => ({
+      ...structuredClone(beat),
+      status: beat.status === 'rejected'
+        ? 'rejected'
+        : beat.source === 'user-input' ? 'confirmed' : beat.source === 'user-edit' ? 'edited' : 'proposed',
+    })),
+    instructions: [
+      ...originalCurve.instructions,
+      {
+        id: `instruction-${randomUUID()}`,
+        kind: 'author-revision',
+        text: request.text,
+        targetBeatId: request.targetBeatId,
+        createdAt: now,
+      },
+    ],
+    createdAt: now,
+    updatedAt: now,
+  }
+  const result = updateCurveBeat(draftCurve, request.targetBeatId, request.text)
+  const version = createCurveVersion(result.curve, getNextCurveVersionLabel(session.curveVersions))
+  session.provisionalCurve = result.curve
+  session.confirmedCurve = undefined
+  session.curveVersions = [...(session.curveVersions ?? []), version]
+  session.activeCurveVersionId = version.id
+  clearCoCreationStoryPath(session)
+  commitStorySessionChanges(session)
+  return createCurveMutationResponse(session, result)
+}
+
+export async function createSessionStoryActionProposal(
+  request: StoryActionProposalRequest,
+): Promise<StoryActionProposalResponse> {
+  const session = getStorySession(request.storyId, request.revision)
+  if (session.workflow === 'co-creation' && !session.confirmedCurve) {
+    throw new AppError('请先确认暂定故事曲线，再提出角色行动。', 409, 'STORY_CURVE_NOT_CONFIRMED')
+  }
+  const { predicament, approach } = requireStoryTurnContext(session)
+  const currentTurn = session.currentTurn
+  const state = session.state
+  if (!currentTurn || !state || currentTurn.isConclusion || currentTurn.id !== request.turnId) {
+    throw new AppError('当前情境已经变化，请刷新后再提出角色行动。', 409, 'STORY_SESSION_CONFLICT')
+  }
+  if (looksLikeAuthorInstruction(request.action)) {
+    throw new AppError('这更像是在改故事。请使用“作者调整主线”，不要把作者指令当成角色行动。', 400, 'AUTHOR_INSTRUCTION_REQUIRED')
+  }
+
+  const proposal = createGroundedActionProposal(session, currentTurn, state, request.action, predicament, approach)
+  session.pendingActionProposal = proposal
+  commitStorySessionChanges(session)
+  return { storyId: session.id, revision: session.revision, proposal }
+}
+
+export async function confirmSessionStoryActionProposal(
+  request: StoryActionProposalConfirmRequest,
+): Promise<StoryTurnResponse> {
+  const session = getStorySession(request.storyId, request.revision)
+  if (session.workflow === 'co-creation' && !session.confirmedCurve) {
+    throw new AppError('请先确认暂定故事曲线，再进入剧情推演。', 409, 'STORY_CURVE_NOT_CONFIRMED')
+  }
+  const proposal = session.pendingActionProposal
+  const currentTurn = session.currentTurn
+  const { predicament, approach } = requireStoryTurnContext(session)
+  if (!proposal || proposal.id !== request.proposalId || !currentTurn || proposal.turnId !== currentTurn.id) {
+    throw new AppError('这份角色行动提案已经失效，请重新提出。', 409, 'STORY_ACTION_PROPOSAL_NOT_FOUND')
+  }
+  validateSessionTurnRequest(session, {
+    storyId: request.storyId,
+    revision: request.revision,
+    mode: request.mode,
+    turnId: currentTurn.id,
+    optionId: proposal.option.id,
+  }, currentTurn)
+  return advanceSessionStoryTurn(
+    session,
+    request.revision,
+    request.mode,
+    currentTurn,
+    proposal.option,
+    predicament,
+    approach,
+  )
+}
+
+function createGroundedActionProposal(
+  session: StorySessionRecord,
+  currentTurn: StoryTurn,
+  state: StoryNarrativeState,
+  action: string,
+  predicament: StoryPredicament,
+  approach: StoryPredicamentApproach,
+): StoryActionProposal {
+  const id = `action-proposal-${randomUUID()}`
+  const groundedFacts = state.facts
+    .filter((fact) => fact.source === 'user' || fact.source === 'confirmed-curve' || fact.source === 'confirmed-action')
+    .slice(0, 3)
+    .map((fact) => fact.statement)
+  const grounding = groundedFacts.length
+    ? `行动只依据已确认材料：${groundedFacts.join('；')}`
+    : `行动依据当前阻力：${currentTurn.conflict.conflict}`
+  const factId = `fact-custom-action-${randomUUID()}`
+  const narrativeAction: StoryAction = {
+    id: `action-custom-${randomUUID()}`,
+    intent: action,
+    preconditions: [],
+    effects: [],
+    source: 'user-choice',
+    originCurveBeatIds: session.confirmedCurve?.beats
+      .filter((beat) => beat.status !== 'rejected')
+      .filter((beat) => ['trigger', 'escalation', 'midpoint-turn'].includes(beat.kind))
+      .slice(0, 3)
+      .map((beat) => beat.id),
+  }
+  const option: StoryTurnOption = {
+    id: `option-custom-${randomUUID()}`,
+    label: '你提出的角色行动',
+    action,
+    immediateConsequence: '主角会先尝试这项行动，但不能预设他人回应、资源可得或问题已解决。',
+    laterEffect: `这次尝试会让“${currentTurn.conflict.conflict}”获得一个需要继续面对的具体后果。`,
+    narrativeAction,
+    transition: {
+      actionId: narrativeAction.id,
+      consumedFacts: [],
+      changedFacts: [],
+      introducedFacts: [{
+        id: factId,
+        statement: `主角已尝试“${action}”，结果仍需在后续情境中检验。`,
+        source: 'confirmed-action',
+        mutability: 'changeable',
+        originCurveBeatIds: narrativeAction.originCurveBeatIds,
+      }],
+    },
+  }
+  // The state machine remains the final authority for the action transition.
+  narrativeState.validateTurnOption(state, option, invalidRequestContext, '这项角色行动不满足当前故事状态。')
+  return {
+    id,
+    turnId: currentTurn.id,
+    action,
+    grounding: `${grounding}。当前主线目标是：${predicament.preservedGoal}；当前应对方向是：${approach.intent}`,
+    preconditions: ['没有额外假定资源、权限或他人配合。'],
+    immediateConsequence: option.immediateConsequence,
+    laterEffect: option.laterEffect,
+    option,
+    createdAt: Date.now(),
+  }
+}
+
+function looksLikeAuthorInstruction(text: string): boolean {
+  return /(?:改成|改为|删掉|删除|移除|重写|调整(?:主线|结局|主题|人物|曲线)|不要(?:这个人物|悬疑|结局)|主题|故事方向)/u.test(text)
 }
 
 function createDirectCoCreationSeed(idea: string): StorySeed | undefined {
@@ -4847,6 +5164,32 @@ async function continueSessionStoryTurn(
 
   validateSessionTurnRequest(session, request, currentTurn)
   const selectedOption = findSelectedTurnOption(currentTurn, request.optionId)
+  const mode: Extract<StoryTurnMode, 'continue' | 'conclude'> = request.mode === 'conclude' ? 'conclude' : 'continue'
+  return advanceSessionStoryTurn(
+    session,
+    request.revision,
+    mode,
+    currentTurn,
+    selectedOption,
+    predicament,
+    approach,
+  )
+}
+
+async function advanceSessionStoryTurn(
+  session: StorySessionRecord,
+  expectedRevision: number,
+  mode: Extract<StoryTurnMode, 'continue' | 'conclude'>,
+  currentTurn: StoryTurn,
+  selectedOption: StoryTurnOption,
+  predicament: StoryPredicament,
+  approach: StoryPredicamentApproach,
+): Promise<StoryTurnResponse> {
+  const headTail = session.selectedHeadTail
+  const state = session.state
+  if (!headTail || !state) {
+    throw new AppError('当前故事路径无法继续，请返回上一步重新生成。', 409, 'STORY_SESSION_CONFLICT')
+  }
   narrativeState.validateTurnOption(state, selectedOption, invalidRequestContext, '所选行动不满足当前故事状态。')
 
   const nextHistory = appendStoryTurnHistory(session.history, currentTurn, selectedOption)
@@ -4857,11 +5200,11 @@ async function continueSessionStoryTurn(
     predicament,
     approach,
     headTail,
-    mode: request.mode,
+    mode,
     history: nextHistory,
   })
 
-  assertStorySessionRevision(session, request.revision)
+  assertStorySessionRevision(session, expectedRevision)
   session.history = nextHistory
   session.currentTurn = turn
   session.state = turn.isConclusion
@@ -4873,6 +5216,7 @@ async function continueSessionStoryTurn(
       '故事收束没有有效地承接已确认路径。',
     )
     : advancedState
+  session.pendingActionProposal = undefined
   commitStorySessionChanges(session)
   return createStoryTurnResponse(session, turn)
 }
@@ -4964,7 +5308,162 @@ export async function generateSessionStory(
     },
   })
   assertStorySessionRevision(session, request.revision)
+  session.generatedStory = story
+  commitStorySessionChanges(session)
   return { storyId: session.id, revision: session.revision, story }
+}
+
+export function getStorySessionSnapshot(storyId: string): StorySessionSnapshot {
+  const session = storySessions.get(storyId)
+  if (!session) throw new AppError('没有找到这个故事会话。', 404, 'STORY_SESSION_NOT_FOUND')
+  if (session.workflow !== 'co-creation') {
+    throw new AppError('这个会话尚未使用共创主线工作区，无法在此恢复。', 409, 'STORY_CO_CREATION_WORKFLOW')
+  }
+  return createStorySessionSnapshot(session)
+}
+
+export async function selectSessionCurveVersion(
+  request: StoryCurveVersionSelectionRequest,
+): Promise<StorySessionSnapshot> {
+  const session = getStorySession(request.storyId, request.revision)
+  if (session.workflow !== 'co-creation') {
+    throw new AppError('当前会话不是共创主线工作区。', 409, 'STORY_CO_CREATION_WORKFLOW')
+  }
+  syncActiveCurveVersion(session)
+  const version = session.curveVersions?.find((candidate) => candidate.id === request.versionId)
+  if (!version) throw new AppError('要恢复的主线版本不存在，请刷新后重试。', 409, 'STORY_SESSION_CONFLICT')
+
+  session.activeCurveVersionId = version.id
+  session.provisionalCurve = structuredClone(version.curve)
+  session.confirmedCurve = version.confirmedCurve ? structuredClone(version.confirmedCurve) : undefined
+  const path = version.path
+  session.seed = structuredClone(path?.seed ?? session.seed)
+  session.selectedPredicament = path?.predicament ? structuredClone(path.predicament) : undefined
+  session.selectedApproach = path?.approach ? structuredClone(path.approach) : undefined
+  session.headTailOptions = undefined
+  session.selectedHeadTail = path?.headTail ? structuredClone(path.headTail) : undefined
+  session.state = path?.state ? structuredClone(path.state) : undefined
+  session.history = structuredClone(path?.history ?? [])
+  session.currentTurn = path?.currentTurn ? structuredClone(path.currentTurn) : undefined
+  session.generatedStory = path?.generatedStory ? structuredClone(path.generatedStory) : undefined
+  session.pendingActionProposal = undefined
+  commitStorySessionChanges(session)
+  return createStorySessionSnapshot(session)
+}
+
+function createCoCreationResponse(
+  session: StorySessionRecord,
+  curve: ProvisionalCurve,
+): StoryCoCreationResponse {
+  return {
+    storyId: session.id,
+    revision: session.revision,
+    seed: session.seed,
+    brief: curve.brief,
+    curve,
+    curveVersions: session.curveVersions,
+    activeCurveVersionId: session.activeCurveVersionId,
+  }
+}
+
+function createCurveMutationResponse(
+  session: StorySessionRecord,
+  result: { curve: ProvisionalCurve; affectedBeatIds: string[] },
+): StoryCurveMutationResponse {
+  return {
+    storyId: session.id,
+    revision: session.revision,
+    curve: result.curve,
+    affectedBeatIds: result.affectedBeatIds,
+    curveVersions: session.curveVersions,
+    activeCurveVersionId: session.activeCurveVersionId,
+  }
+}
+
+function createCurveVersion(curve: ProvisionalCurve, label: string): StoryCurveVersion {
+  const now = Date.now()
+  return {
+    id: `curve-version-${randomUUID()}`,
+    label,
+    curve: structuredClone(curve),
+    createdAt: now,
+    updatedAt: now,
+  }
+}
+
+function getNextCurveVersionLabel(versions: StoryCurveVersion[] | undefined): string {
+  return `主线草案 ${(versions?.length ?? 0) + 1}`
+}
+
+function syncActiveCurveVersion(session: StorySessionRecord) {
+  if (session.workflow !== 'co-creation' || !session.provisionalCurve) return
+  const versions = session.curveVersions ?? []
+  let activeId = session.activeCurveVersionId
+  let index = activeId ? versions.findIndex((version) => version.id === activeId) : -1
+  if (index < 0) {
+    const version = createCurveVersion(session.provisionalCurve, getNextCurveVersionLabel(versions))
+    session.curveVersions = [...versions, version]
+    session.activeCurveVersionId = version.id
+    activeId = version.id
+    index = session.curveVersions.length - 1
+  }
+  const active = session.curveVersions![index]
+  if (!active) return
+  session.curveVersions![index] = {
+    ...active,
+    curve: structuredClone(session.provisionalCurve),
+    ...(session.confirmedCurve ? { confirmedCurve: structuredClone(session.confirmedCurve) } : {}),
+    path: createStoryPathSnapshot(session),
+    updatedAt: Date.now(),
+  }
+}
+
+function createStoryPathSnapshot(session: StorySessionRecord) {
+  return {
+    seed: structuredClone(session.seed),
+    ...(session.selectedPredicament ? { predicament: structuredClone(session.selectedPredicament) } : {}),
+    ...(session.selectedApproach ? { approach: structuredClone(session.selectedApproach) } : {}),
+    ...(session.selectedHeadTail ? { headTail: structuredClone(session.selectedHeadTail) } : {}),
+    ...(session.state ? { state: structuredClone(session.state) } : {}),
+    history: structuredClone(session.history),
+    ...(session.currentTurn ? { currentTurn: structuredClone(session.currentTurn) } : {}),
+    ...(session.generatedStory ? { generatedStory: structuredClone(session.generatedStory) } : {}),
+  }
+}
+
+function clearCoCreationStoryPath(session: StorySessionRecord) {
+  session.selectedConflictCore = undefined
+  session.selectedPredicament = undefined
+  clearSessionApproachAndStoryPath(session)
+}
+
+function createStorySessionSnapshot(session: StorySessionRecord): StorySessionSnapshot {
+  const curve = session.provisionalCurve
+  const resumeStage = session.generatedStory
+    ? 'complete'
+    : session.currentTurn
+      ? 'story-spine'
+      : curve
+        ? 'provisional-curve'
+        : 'creative-brief'
+  return {
+    storyId: session.id,
+    revision: session.revision,
+    idea: session.idea,
+    seed: structuredClone(session.seed),
+    brief: curve?.brief ?? session.seed.creativeBrief ?? { tones: [], dramaticForces: [], allowSystemNamedCharacters: false },
+    ...(curve ? { curve: structuredClone(curve) } : {}),
+    ...(session.confirmedCurve ? { confirmedCurve: structuredClone(session.confirmedCurve) } : {}),
+    curveVersions: structuredClone(session.curveVersions ?? []),
+    ...(session.activeCurveVersionId ? { activeCurveVersionId: session.activeCurveVersionId } : {}),
+    ...(session.selectedPredicament ? { predicament: structuredClone(session.selectedPredicament) } : {}),
+    ...(session.selectedApproach ? { approach: structuredClone(session.selectedApproach) } : {}),
+    ...(session.selectedHeadTail ? { headTail: structuredClone(session.selectedHeadTail) } : {}),
+    history: structuredClone(session.history),
+    ...(session.currentTurn ? { currentTurn: structuredClone(session.currentTurn) } : {}),
+    ...(session.generatedStory ? { generatedStory: structuredClone(session.generatedStory) } : {}),
+    resumeStage,
+  }
 }
 
 function createStorySession(idea: string, seed: StorySeed, conflictCores: StoredStoryConflictCores): StorySessionRecord {
@@ -4985,12 +5484,15 @@ function createCoCreationSession(
   seed: StorySeed,
   curve: ProvisionalCurve,
 ): StorySessionRecord {
+  const version = createCurveVersion(curve, '主线草案 1')
   return {
     id: `story-${randomUUID()}`,
     idea,
     seed,
     workflow: 'co-creation',
     provisionalCurve: curve,
+    curveVersions: [version],
+    activeCurveVersionId: version.id,
     history: [],
     revision: 0,
     updatedAt: Date.now(),
@@ -5045,6 +5547,8 @@ function clearSessionApproachAndStoryPath(session: StorySessionRecord) {
   session.state = undefined
   session.history = []
   session.currentTurn = undefined
+  session.pendingActionProposal = undefined
+  session.generatedStory = undefined
 }
 
 function replaceSessionHeadTailOptions(
@@ -5079,6 +5583,7 @@ function assertStorySessionRevision(session: StorySessionRecord, revision: numbe
 }
 
 function commitStorySessionChanges(session: StorySessionRecord) {
+  syncActiveCurveVersion(session)
   session.revision += 1
   session.updatedAt = Date.now()
   persistStorySessions()

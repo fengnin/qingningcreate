@@ -17,13 +17,28 @@ import {
   startStoryCoCreation,
   updateSessionCurveBeat,
   regenerateSessionCurveBeat,
+  rejectSessionCurveBeat,
+  regenerateSessionCurveDependencies,
+  updateSessionSourceFactDisposition,
   confirmSessionCurve,
   startSessionStorySpineFromCurve,
+  getStorySessionSnapshot,
+  selectSessionCurveVersion,
+  applySessionAuthorInstruction,
+  createSessionStoryActionProposal,
+  confirmSessionStoryActionProposal,
   parseStoryCoCreationStartRequest,
   parseStoryCurveBeatUpdateRequest,
   parseStoryCurveBeatRegenerationRequest,
+  parseStoryCurveBeatRejectRequest,
+  parseStoryCurveDependenciesRegenerationRequest,
+  parseStorySourceFactDispositionRequest,
   parseStoryCurveConfirmRequest,
   parseStoryCurveStartSpineRequest,
+  parseStoryCurveVersionSelectionRequest,
+  parseStoryAuthorInstructionRequest,
+  parseStoryActionProposalRequest,
+  parseStoryActionProposalConfirmRequest,
 } from './storyService.js'
 import type {
   ApiErrorResponse,
@@ -39,6 +54,8 @@ import type {
   StoryCurveMutationResponse,
   StoryCurveConfirmationResponse,
   StoryCurveSpineResponse,
+  StorySessionSnapshot,
+  StoryActionProposalResponse,
 } from '../../shared/story-contract.js'
 
 const app = express()
@@ -55,6 +72,15 @@ app.get('/health', (_request, response: Response<HealthResponse>) => {
   }
 
   response.json(health)
+})
+
+app.get('/api/story/session/:storyId', (request, response: Response<StorySessionSnapshot>, next) => {
+  try {
+    response.setHeader('Cache-Control', 'no-store')
+    response.json(getStorySessionSnapshot(request.params.storyId))
+  } catch (error) {
+    next(error)
+  }
 })
 
 registerStoryStage(
@@ -86,6 +112,27 @@ registerStoryStage(
 )
 
 registerStoryStage(
+  '/api/story/curve/beat/reject',
+  parseStoryCurveBeatRejectRequest,
+  rejectSessionCurveBeat,
+  (result) => result satisfies StoryCurveMutationResponse,
+)
+
+registerStoryStage(
+  '/api/story/curve/regenerate-affected',
+  parseStoryCurveDependenciesRegenerationRequest,
+  regenerateSessionCurveDependencies,
+  (result) => result satisfies StoryCurveMutationResponse,
+)
+
+registerStoryStage(
+  '/api/story/curve/source-fact',
+  parseStorySourceFactDispositionRequest,
+  updateSessionSourceFactDisposition,
+  (result) => result satisfies StoryCurveMutationResponse,
+)
+
+registerStoryStage(
   '/api/story/curve/confirm',
   parseStoryCurveConfirmRequest,
   confirmSessionCurve,
@@ -97,6 +144,34 @@ registerStoryStage(
   parseStoryCurveStartSpineRequest,
   startSessionStorySpineFromCurve,
   (result) => result satisfies StoryCurveSpineResponse,
+)
+
+registerStoryStage(
+  '/api/story/curve/version/select',
+  parseStoryCurveVersionSelectionRequest,
+  selectSessionCurveVersion,
+  (result) => result satisfies StorySessionSnapshot,
+)
+
+registerStoryStage(
+  '/api/story/author-instruction',
+  parseStoryAuthorInstructionRequest,
+  applySessionAuthorInstruction,
+  (result) => result satisfies StoryCurveMutationResponse,
+)
+
+registerStoryStage(
+  '/api/story/action-proposal',
+  parseStoryActionProposalRequest,
+  createSessionStoryActionProposal,
+  (result) => result satisfies StoryActionProposalResponse,
+)
+
+registerStoryStage(
+  '/api/story/action-proposal/confirm',
+  parseStoryActionProposalConfirmRequest,
+  confirmSessionStoryActionProposal,
+  (result) => result satisfies StoryTurnResponse,
 )
 
 registerStoryStage(

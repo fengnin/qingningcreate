@@ -96,6 +96,39 @@ export type CurveBeatSource = 'user-input' | 'system-proposal' | 'user-edit' | '
 
 export type CurveBeatStatus = 'proposed' | 'edited' | 'confirmed' | 'stale' | 'rejected'
 
+/** A verbatim or lightly segmented piece of material supplied by the author. */
+export interface StorySourceFact {
+  id: string
+  text: string
+  source: 'user-input'
+  /**
+   * A fact may only be parked after the author explicitly chooses not to use
+   * it in this version. A pending fact blocks curve confirmation.
+   */
+  disposition: 'integrated' | 'needs-author-decision' | 'parked'
+  coveredByBeatIds: string[]
+}
+
+/**
+ * The single pre-story design record. It ties source material to the curve's
+ * conflict, concrete predicament, endpoints and middle development instead
+ * of treating the curve as a parallel generator.
+ */
+export interface StoryDesignRecord {
+  id: string
+  sourceFacts: StorySourceFact[]
+  conflictCoreBeatIds: string[]
+  predicamentBeatIds: string[]
+  storyEndBeatIds: string[]
+  middleDevelopmentBeatIds: string[]
+}
+
+export interface CurveGenerationMetadata {
+  origin: 'model' | 'fact-preserving-fallback'
+  notice?: string
+  dramaticMechanism: string
+}
+
 export interface CurveBeat {
   id: string
   kind: CurveBeatKind
@@ -104,16 +137,18 @@ export interface CurveBeat {
   source: CurveBeatSource
   status: CurveBeatStatus
   dependsOn: string[]
+  /** User-source facts this node must preserve or develop. */
+  sourceFactIds?: string[]
 }
 
-export type AuthorInstructionKind = 'replace' | 'remove' | 'regenerate'
+export type AuthorInstructionKind = 'replace' | 'remove' | 'regenerate' | 'author-revision' | 'park-fact'
 
 /** A deliberate author-level edit. It is never a character action. */
 export interface AuthorInstruction {
   id: string
   kind: AuthorInstructionKind
   text: string
-  targetBeatId: string
+  targetBeatId?: string
   createdAt: number
 }
 
@@ -130,6 +165,8 @@ export interface ProvisionalCurve {
   brief: CreativeBrief
   beats: CurveBeat[]
   instructions: AuthorInstruction[]
+  design?: StoryDesignRecord
+  generation?: CurveGenerationMetadata
   createdAt: number
   updatedAt: number
 }
@@ -140,6 +177,8 @@ export interface ConfirmedCurve {
   title: string
   brief: CreativeBrief
   beats: CurveBeat[]
+  design?: StoryDesignRecord
+  generation?: CurveGenerationMetadata
   confirmedAt: number
 }
 
@@ -369,6 +408,48 @@ export interface GeneratedStory {
   review: StoryReviewItem[]
 }
 
+/** Persisted progress for one curve version. */
+export interface StoryPathSnapshot {
+  seed: StorySeed
+  predicament?: StoryPredicament
+  approach?: StoryPredicamentApproach
+  headTail?: StoryHeadTailOption
+  state?: StoryNarrativeState
+  history: StoryTurnHistoryItem[]
+  currentTurn?: StoryTurn
+  generatedStory?: GeneratedStory
+}
+
+export interface StoryCurveVersion {
+  id: string
+  label: string
+  curve: ProvisionalCurve
+  confirmedCurve?: ConfirmedCurve
+  path?: StoryPathSnapshot
+  createdAt: number
+  updatedAt: number
+}
+
+export type StoryResumeStage = 'creative-brief' | 'provisional-curve' | 'story-spine' | 'complete'
+
+/** A browser-safe projection of a persisted co-creation session. */
+export interface StorySessionSnapshot extends StorySessionVersion {
+  idea: string
+  seed: StorySeed
+  brief: CreativeBrief
+  curve?: ProvisionalCurve
+  confirmedCurve?: ConfirmedCurve
+  curveVersions: StoryCurveVersion[]
+  activeCurveVersionId?: string
+  predicament?: StoryPredicament
+  approach?: StoryPredicamentApproach
+  headTail?: StoryHeadTailOption
+  history: StoryTurnHistoryItem[]
+  currentTurn?: StoryTurn
+  generatedStory?: GeneratedStory
+  resumeStage: StoryResumeStage
+}
+
 export interface StoryDirectionsRequest {
   idea: string
   expansionScope?: StoryExpansionScope
@@ -383,6 +464,10 @@ export interface StoryDirectionsRequest {
 export interface StoryCoCreationStartRequest {
   idea: string
   brief: CreativeBrief
+  /** Present only when the author deliberately creates another curve version. */
+  storyId?: string
+  revision?: number
+  versionMode?: 'replace-draft' | 'new-version'
 }
 
 export interface StoryCurveBeatUpdateRequest extends StorySessionVersion {
@@ -397,12 +482,61 @@ export interface StoryCurveBeatRegenerationRequest extends StorySessionVersion {
   feedback?: string
 }
 
+export interface StoryCurveBeatRejectRequest extends StorySessionVersion {
+  curveId: string
+  beatId: string
+  reason?: string
+}
+
+export interface StoryCurveDependenciesRegenerationRequest extends StorySessionVersion {
+  curveId: string
+  feedback?: string
+}
+
+export interface StorySourceFactDispositionRequest extends StorySessionVersion {
+  curveId: string
+  factId: string
+  disposition: 'parked' | 'integrated'
+}
+
 export interface StoryCurveConfirmRequest extends StorySessionVersion {
   curveId: string
 }
 
 export interface StoryCurveStartSpineRequest extends StorySessionVersion {
   curveId: string
+}
+
+export interface StoryCurveVersionSelectionRequest extends StorySessionVersion {
+  versionId: string
+}
+
+/** A deliberate author-level revision requested after a curve was confirmed. */
+export interface StoryAuthorInstructionRequest extends StorySessionVersion {
+  targetBeatId: string
+  text: string
+}
+
+export interface StoryActionProposalRequest extends StorySessionVersion {
+  turnId: string
+  action: string
+}
+
+export interface StoryActionProposalConfirmRequest extends StorySessionVersion {
+  proposalId: string
+  mode: Extract<StoryTurnMode, 'continue' | 'conclude'>
+}
+
+export interface StoryActionProposal {
+  id: string
+  turnId: string
+  action: string
+  grounding: string
+  preconditions: string[]
+  immediateConsequence: string
+  laterEffect: string
+  option: StoryTurnOption
+  createdAt: number
 }
 
 export interface StoryPredicamentSessionRequest extends StorySessionVersion {
@@ -446,16 +580,26 @@ export interface StoryCoCreationResponse extends StorySessionVersion {
   seed: StorySeed
   brief: CreativeBrief
   curve: ProvisionalCurve
+  curveVersions?: StoryCurveVersion[]
+  activeCurveVersionId?: string
 }
 
 export interface StoryCurveMutationResponse extends StorySessionVersion {
   curve: ProvisionalCurve
   affectedBeatIds: string[]
+  curveVersions?: StoryCurveVersion[]
+  activeCurveVersionId?: string
 }
 
 export interface StoryCurveConfirmationResponse extends StorySessionVersion {
   curve: ProvisionalCurve
   confirmedCurve: ConfirmedCurve
+  curveVersions?: StoryCurveVersion[]
+  activeCurveVersionId?: string
+}
+
+export interface StoryActionProposalResponse extends StorySessionVersion {
+  proposal: StoryActionProposal
 }
 
 export type StoryConflictCoresResponse = StoryDirectionsResponse

@@ -28,7 +28,10 @@ import {
   createProvisionalCurveFallback,
   isSystemCurveProposalSafe,
   materializeConfirmedCurve,
+  rejectCurveBeat,
   regenerateCurveBeat,
+  regenerateAffectedCurveBeats,
+  updateCurveSourceFactDisposition,
   updateCurveBeat,
 } from './storyCoCreation.js'
 import { createNarrativeStateMachine } from './storyState.js'
@@ -307,6 +310,80 @@ test('uses an author-edited current state as the confirmed story goal', () => {
   assert.equal(foundation.seed.lockedGoal, authorGoal)
   assert.equal(foundation.predicament.preservedGoal, authorGoal)
   assert.ok(foundation.predicament.facts.some((fact) => fact.originCurveBeatIds?.includes('beat-current-state')))
+})
+
+test('keeps every rich source fact visible in the fact-preserving curve fallback', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['relationship-tension'],
+    allowSystemNamedCharacters: false,
+  }
+  const richIdea = '毕业展布置前，沈乔在借来的投影仪里看到和前队友剪的短片。投影仪今晚要归还，她答应不再改动作品，却想在展出前决定要不要删掉自己的名字。'
+  const richSeed = {
+    ...sparseSeed,
+    subject: '沈乔',
+    activeSituation: richIdea,
+    lockedGoal: '在展出前决定要不要删掉自己的名字',
+    lockedFacts: ['毕业展布置前', '借来的投影仪', '投影仪今晚要归还', '答应不再改动作品'],
+  }
+  const curve = createProvisionalCurveFallback(richIdea, richSeed, brief)
+
+  assert.equal(curve.generation?.origin, 'fact-preserving-fallback')
+  assert.ok(curve.design)
+  assert.equal(curve.design?.sourceFacts.every((fact) => fact.coveredByBeatIds.length > 0), true)
+  assert.match(JSON.stringify(curve.beats), /毕业展布置前/u)
+  assert.match(JSON.stringify(curve.beats), /投影仪今晚要归还/u)
+  assert.match(JSON.stringify(curve.beats), /答应不再改动作品/u)
+})
+
+test('rejecting a system proposal excludes it and makes only its dependents stale', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const result = rejectCurveBeat(curve, 'beat-trigger', '不想要这个钩子。')
+
+  assert.equal(result.curve.beats.find((beat) => beat.id === 'beat-trigger')?.status, 'rejected')
+  assert.equal(result.curve.beats.find((beat) => beat.id === 'beat-escalation')?.status, 'stale')
+  assert.equal(result.curve.instructions.at(-1)?.kind, 'remove')
+  assert.throws(() => confirmProvisionalCurve(result.curve), /处理被修改影响/u)
+})
+
+test('dependent fallback regeneration carries the author edit into later beats', async () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const edited = updateCurveBeat(
+    curve,
+    'beat-trigger',
+    '暂定：青柠坚持去游乐园，是想证明自己已经能独自作决定。',
+  ).curve
+  const result = await regenerateAffectedCurveBeats(sparseIdea, sparseSeed, edited)
+  const laterDetails = result.curve.beats
+    .filter((beat) => ['escalation', 'midpoint-turn', 'climax-choice', 'resolution'].includes(beat.kind))
+    .map((beat) => beat.detail)
+    .join(' ')
+
+  assert.doesNotMatch(laterDetails, /更重要的事|承担代价，选择比眼前目标/u)
+  assert.match(laterDetails, /独自作决定|青柠坚持去游乐园/u)
+})
+
+test('an author may explicitly park source material before confirmation', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const fact = curve.design?.sourceFacts[0]
+  assert.ok(fact)
+  const result = updateCurveSourceFactDisposition(curve, fact.id, 'parked')
+  assert.equal(result.curve.design?.sourceFacts.find((item) => item.id === fact.id)?.disposition, 'parked')
 })
 
 test('keeps a bare idea actionable when the model seed extraction is unavailable', () => {
