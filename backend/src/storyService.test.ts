@@ -22,6 +22,9 @@ import {
   validatePredicamentForConflictCore,
   validateSystemConflictCoreDraft,
   validateSystemDraftStoryTurnContinuation,
+  parseStoryAuthorInstructionRequest,
+  parseStoryActionProposalRequest,
+  looksLikeAuthorInstruction,
 } from './storyService.js'
 import {
   confirmProvisionalCurve,
@@ -35,6 +38,7 @@ import {
   updateCurveBeat,
 } from './storyCoCreation.js'
 import { createNarrativeStateMachine } from './storyState.js'
+import { createStoryDesignRecord, getMissingStoryDesignSections, updateStoryDesignCoverage } from './storyDesign.js'
 
 const examples = {
   personal: {
@@ -146,6 +150,34 @@ test('uses a system draft for a goal-only idea but not for a detailed seed', () 
   assert.equal(shouldAutoGenerateSystemConflictCoreDraft(seed), false)
 })
 
+test('author revisions and role actions use separate request contracts', () => {
+  const authorRequest = parseStoryAuthorInstructionRequest({
+    storyId: 'story-test',
+    revision: 3,
+    targetBeatId: 'beat-trigger',
+    text: '先让这个转折回应前面的承诺。',
+  })
+  const actionRequest = parseStoryActionProposalRequest({
+    storyId: 'story-test',
+    revision: 3,
+    turnId: 'turn-test',
+    action: '角色先把手里的信息说清楚。',
+  })
+
+  assert.equal(authorRequest.targetBeatId, 'beat-trigger')
+  assert.equal(authorRequest.text.includes('转折'), true)
+  assert.equal(actionRequest.turnId, 'turn-test')
+  assert.equal(actionRequest.action.includes('角色'), true)
+  assert.equal('turnId' in authorRequest, false)
+  assert.equal('targetBeatId' in actionRequest, false)
+})
+
+test('recognizes author-control language across Chinese and English action input', () => {
+  assert.equal(looksLikeAuthorInstruction('把故事改成悬疑，并删掉当前的关系冲突。'), true)
+  assert.equal(looksLikeAuthorInstruction('Change the story genre and remove the current relationship conflict.'), true)
+  assert.equal(looksLikeAuthorInstruction('The character states the known facts before choosing a next step.'), false)
+})
+
 test('creates a provisional curve before any path facts exist', () => {
   const brief: CreativeBrief = {
     tones: ['growth'],
@@ -189,6 +221,68 @@ test('editing an early curve beat marks dependent proposals stale', () => {
   assert.equal(result.curve.beats.find((beat) => beat.id === 'beat-resolution')?.status, 'stale')
 })
 
+test('editing a curve beat recalculates which source facts it still covers', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const sourceFactId = curve.design?.sourceFacts.find((fact) => fact.text === sparseSeed.lockedGoal)?.id
+  assert.ok(sourceFactId)
+
+  const edited = updateCurveBeat(curve, 'beat-trigger', '暂定：主角必须重新判断自己真正愿意承担的选择。').curve
+  const trigger = edited.beats.find((beat) => beat.id === 'beat-trigger')
+  assert.ok(trigger)
+  assert.equal(trigger.sourceFactIds?.includes(sourceFactId), false)
+  assert.equal(edited.design?.sourceFacts.find((fact) => fact.id === sourceFactId)?.coveredByBeatIds.includes('beat-trigger'), false)
+})
+
+test('similar fact prefixes do not silently count as coverage', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const idea = '她答应不再联系旧友。她答应不再改动作品。'
+  const customSeed = {
+    ...sparseSeed,
+    subject: '她',
+    activeSituation: idea,
+    lockedGoal: '完成作品',
+    lockedFacts: ['她答应不再联系旧友', '她答应不再改动作品'],
+  }
+  const curve = createProvisionalCurveFallback(idea, customSeed, brief)
+  const edited = updateCurveBeat(curve, 'beat-trigger', '暂定：她需要重新决定下一步。').curve
+  const secondFact = edited.design?.sourceFacts.find((fact) => fact.text === '她答应不再改动作品')
+  assert.ok(secondFact)
+  assert.equal(secondFact.coveredByBeatIds.includes('beat-trigger'), false)
+})
+
+test('explicit source fact links prevent a verbatim node from claiming every fact', () => {
+  const seed = {
+    ...sparseSeed,
+    activeSituation: '她答应不再联系旧友。她答应不再改动作品。',
+    lockedFacts: ['她答应不再联系旧友', '她答应不再改动作品'],
+  }
+  const design = createStoryDesignRecord(seed.activeSituation, seed)
+  const currentState = {
+    id: 'beat-current-state',
+    kind: 'current-state' as const,
+    title: '此刻想要什么',
+    detail: seed.activeSituation,
+    source: 'user-input' as const,
+    status: 'confirmed' as const,
+    dependsOn: [],
+    sourceFactIds: [design.sourceFacts[0]!.id],
+  }
+  const covered = updateStoryDesignCoverage(design, [currentState])
+  assert.deepEqual(
+    covered.sourceFacts.filter((fact) => fact.coveredByBeatIds.length).map((fact) => fact.id),
+    [design.sourceFacts[0]!.id],
+  )
+})
+
 test('does not let regeneration replace the user-provided current state', async () => {
   const brief: CreativeBrief = {
     tones: ['growth'],
@@ -216,6 +310,23 @@ test('a curve cannot be confirmed while dependent beats are stale', () => {
   const foundation = materializeConfirmedCurve(sparseSeed, confirmed)
   assert.equal(foundation.seed.systemDraft, undefined)
   assert.equal(foundation.predicament.facts.every((fact) => fact.source === 'confirmed-curve'), true)
+})
+
+test('design record coverage blocks confirmation when a whole section loses its live beats', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const design = curve.design!
+  const rejected = curve.beats.map((beat) => (
+    ['beat-current-state', 'beat-character-tension'].includes(beat.id)
+      ? { ...beat, status: 'rejected' as const }
+      : beat
+  ))
+  const missing = getMissingStoryDesignSections(design, rejected)
+  assert.deepEqual(missing, ['冲突核心', '故事两端'])
 })
 
 test('materializes only current curve constraints as initial facts', () => {
@@ -351,6 +462,174 @@ test('rejecting a system proposal excludes it and makes only its dependents stal
   assert.throws(() => confirmProvisionalCurve(result.curve), /处理被修改影响/u)
 })
 
+test('parked source material is explicit and does not become a confirmed-curve fact', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const fact = curve.design?.sourceFacts.find((candidate) => candidate.text === sparseSeed.lockedGoal)
+  assert.ok(fact)
+
+  const parked = updateCurveSourceFactDisposition(curve, fact.id, 'parked').curve
+  assert.equal(parked.design?.sourceFacts.find((candidate) => candidate.id === fact.id)?.disposition, 'parked')
+
+  // The author still has to review affected nodes; once their explicit source
+  // links no longer reference the parked fact, the version can be confirmed.
+  const reviewed = {
+    ...parked,
+    beats: parked.beats.map((beat) => beat.status === 'stale' ? { ...beat, status: 'proposed' as const } : beat),
+  }
+  assert.doesNotThrow(
+    () => confirmProvisionalCurve(reviewed),
+    /暂不纳入的原始材料仍出现在/u,
+  )
+  const fullyReviewed = {
+    ...reviewed,
+    beats: reviewed.beats.map((beat) => beat.kind === 'current-state'
+      ? { ...beat, detail: '作者编辑：当前状态不再依赖已暂存的目标。', source: 'user-edit' as const, sourceFactIds: [] }
+      : beat),
+  }
+  const confirmed = confirmProvisionalCurve(fullyReviewed).confirmedCurve
+  const foundation = materializeConfirmedCurve(sparseSeed, confirmed)
+  assert.equal(foundation.predicament.facts.some((candidate) => candidate.statement === fact.text), false)
+  assert.equal(foundation.seed.lockedFacts.includes(fact.text), false)
+  assert.equal(foundation.seed.lockedFacts.includes(sparseSeed.lockedFacts[0]!), false)
+  assert.equal(foundation.seed.lockedGoal, '作者编辑：当前状态不再依赖已暂存的目标。')
+})
+
+test('rejected curve proposals are not used as confirmed-curve grounding', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const rejectedCurve = {
+    ...rejectCurveBeat(curve, 'beat-character-tension').curve,
+    beats: curve.beats.map((beat) => (
+      beat.id === 'beat-character-tension'
+        ? { ...beat, status: 'rejected' as const, detail: '暂定：手机这个未确认工具会决定人物关系。' }
+        : beat.status === 'stale' ? { ...beat, status: 'proposed' as const } : beat
+    )),
+  }
+  const confirmed = confirmProvisionalCurve(rejectedCurve).confirmedCurve
+  const foundation = materializeConfirmedCurve(sparseSeed, confirmed)
+  const turn: StoryTurn = {
+    id: 'turn-rejected-grounding',
+    phase: 'opening',
+    node: {
+      id: 'node-rejected-grounding',
+      title: '未确认细节',
+      event: '主角看见手机上的提示，却还不能把这当成故事前提。',
+      purpose: '验证被拒绝提案不再为后续具体细节提供依据。',
+      goalState: 'blocked',
+    },
+    conflict: {
+      nodeId: 'node-rejected-grounding',
+      conflict: '当前安排仍然需要一个可确认的应对方向。',
+      action: '先判断已知材料能支持什么。',
+      consequence: '未经确认的工具不能改变当前事实。',
+      intensity: 1,
+      anchor: '起点',
+    },
+    question: '现在怎么办？',
+    options: [],
+    narrativeAction: null,
+    transition: null,
+    canConclude: false,
+    isConclusion: false,
+  }
+
+  assert.throws(
+    () => validateConfirmedCurveStoryTurnContinuation({
+      idea: sparseIdea,
+      seed: foundation.seed,
+      predicament: foundation.predicament,
+      approach: foundation.approach,
+      headTail: foundation.headTail,
+      history: [],
+      confirmedCurve: confirmed,
+    }, turn),
+    /手机/u,
+  )
+})
+
+test('a rejected system proposal cannot be edited or regenerated back into the curve', async () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const rejected = rejectCurveBeat(curve, 'beat-trigger').curve
+
+  assert.throws(
+    () => updateCurveBeat(rejected, 'beat-trigger', '作者不再采用这个提案。'),
+    /已被你拒绝/u,
+  )
+  await assert.rejects(
+    regenerateCurveBeat(sparseIdea, sparseSeed, rejected, 'beat-trigger'),
+    /已被你拒绝/u,
+  )
+})
+
+test('a rejected required proposal can be explicitly replaced without reusing it', async () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const originalDetail = curve.beats.find((beat) => beat.id === 'beat-trigger')!.detail
+  const rejected = rejectCurveBeat(curve, 'beat-trigger').curve
+  const replacement = await regenerateCurveBeat(sparseIdea, sparseSeed, rejected, 'beat-trigger', undefined, true)
+  const replacementBeat = replacement.curve.beats.find((beat) => beat.id === 'beat-trigger')
+
+  assert.equal(replacementBeat?.status, 'proposed')
+  assert.equal(replacementBeat?.source, 'system-proposal')
+  assert.notEqual(replacementBeat?.detail, originalDetail)
+  assert.equal(replacement.curve.rejectedProposals?.some((beat) => beat.detail === originalDetail), true)
+})
+
+test('creative directions change the causal mechanism of a fallback curve', () => {
+  const costCurve = createProvisionalCurveFallback(sparseIdea, sparseSeed, {
+    tones: ['growth'],
+    dramaticForces: ['cost'],
+    allowSystemNamedCharacters: false,
+  })
+  const relationshipCurve = createProvisionalCurveFallback(sparseIdea, sparseSeed, {
+    tones: ['friendship'],
+    dramaticForces: ['relationship-tension'],
+    allowSystemNamedCharacters: false,
+  })
+
+  assert.notEqual(
+    costCurve.beats.find((beat) => beat.kind === 'trigger')?.detail,
+    relationshipCurve.beats.find((beat) => beat.kind === 'trigger')?.detail,
+  )
+  const costFoundation = materializeConfirmedCurve(sparseSeed, confirmProvisionalCurve(costCurve).confirmedCurve)
+  const relationshipFoundation = materializeConfirmedCurve(sparseSeed, confirmProvisionalCurve(relationshipCurve).confirmedCurve)
+  assert.notEqual(costFoundation.predicament.variationAxis, relationshipFoundation.predicament.variationAxis)
+  assert.notEqual(costFoundation.predicament.obstacle, relationshipFoundation.predicament.obstacle)
+})
+
+test('a new curve version does not silently reuse a rejected proposal', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const original = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const rejectedDetail = original.beats.find((beat) => beat.kind === 'trigger')!.detail
+  const regenerated = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief, undefined, [rejectedDetail])
+  const regeneratedTrigger = regenerated.beats.find((beat) => beat.kind === 'trigger')!.detail
+
+  assert.notEqual(regeneratedTrigger, rejectedDetail)
+  assert.equal(regeneratedTrigger.includes(rejectedDetail.replace(/^暂定[：:]/u, '')), false)
+})
+
 test('dependent fallback regeneration carries the author edit into later beats', async () => {
   const brief: CreativeBrief = {
     tones: ['growth'],
@@ -373,6 +652,26 @@ test('dependent fallback regeneration carries the author edit into later beats',
   assert.match(laterDetails, /独自作决定|青柠坚持去游乐园/u)
 })
 
+test('dependent fallback regeneration propagates consequences without recursive author-edit text', async () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const authorEdit = '暂定：青柠坚持去游乐园，是想证明自己已经能独自作决定。'
+  const edited = updateCurveBeat(curve, 'beat-trigger', authorEdit).curve
+  const result = await regenerateAffectedCurveBeats(sparseIdea, sparseSeed, edited)
+  const downstream = result.curve.beats
+    .filter((beat) => ['escalation', 'midpoint-turn', 'climax-choice', 'resolution'].includes(beat.kind))
+    .map((beat) => beat.detail)
+
+  assert.match(downstream[0], /独自作决定/u)
+  assert.equal(downstream.slice(1).some((detail) => detail.includes(authorEdit.replace(/^暂定：/u, ''))), false)
+  assert.equal(downstream.some((detail) => /“[^”]*“[^”]*”[^”]*”/u.test(detail)), false)
+  assert.equal(new Set(downstream).size, downstream.length)
+})
+
 test('an author may explicitly park source material before confirmation', () => {
   const brief: CreativeBrief = {
     tones: ['growth'],
@@ -384,6 +683,53 @@ test('an author may explicitly park source material before confirmation', () => 
   assert.ok(fact)
   const result = updateCurveSourceFactDisposition(curve, fact.id, 'parked')
   assert.equal(result.curve.design?.sourceFacts.find((item) => item.id === fact.id)?.disposition, 'parked')
+})
+
+test('parked source material can be explicitly brought back after an author edit', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const fact = curve.design?.sourceFacts.find((candidate) => candidate.text === sparseSeed.lockedGoal)
+  assert.ok(fact)
+
+  const parked = updateCurveSourceFactDisposition(curve, fact.id, 'parked').curve
+  const edited = updateCurveBeat(
+    parked,
+    'beat-trigger',
+    `暂定：继续${sparseSeed.lockedGoal}时，主角必须重新面对这项目标。`,
+  ).curve
+  const coveredParkedFact = edited.design?.sourceFacts.find((candidate) => candidate.id === fact.id)
+  assert.equal(coveredParkedFact?.disposition, 'parked')
+  assert.ok(coveredParkedFact?.coveredByBeatIds.includes('beat-trigger'))
+
+  const reintegrated = updateCurveSourceFactDisposition(edited, fact.id, 'integrated').curve
+  const restoredFact = reintegrated.design?.sourceFacts.find((candidate) => candidate.id === fact.id)
+  assert.equal(restoredFact?.disposition, 'integrated')
+  assert.ok(restoredFact?.coveredByBeatIds.includes('beat-trigger'))
+})
+
+test('parked source material can be restored without losing its prior coverage', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const fact = curve.design?.sourceFacts.find((candidate) => candidate.text === sparseSeed.lockedGoal)
+  assert.ok(fact)
+
+  const parked = updateCurveSourceFactDisposition(curve, fact.id, 'parked').curve
+  const parkedFact = parked.design?.sourceFacts.find((candidate) => candidate.id === fact.id)
+  assert.equal(parkedFact?.disposition, 'parked')
+  assert.ok(parkedFact?.coveredByBeatIds.length)
+
+  const restored = updateCurveSourceFactDisposition(parked, fact.id, 'integrated').curve
+  const restoredFact = restored.design?.sourceFacts.find((candidate) => candidate.id === fact.id)
+  assert.equal(restoredFact?.disposition, 'integrated')
+  assert.ok(restoredFact?.coveredByBeatIds.length)
 })
 
 test('keeps a bare idea actionable when the model seed extraction is unavailable', () => {
@@ -403,6 +749,16 @@ test('keeps a bare idea actionable when the model seed extraction is unavailable
     [report.subject, report.lockedGoal],
     ['周岚', '提交报告'],
   )
+})
+
+test('extracts a conservative subject and goal from rich fallback prose', () => {
+  const idea = '毕业展布置前，沈乔在借来的投影仪里看到和前队友剪的短片。投影仪今晚要归还，她答应不再改动作品，却想在展出前决定要不要删掉自己的名字。'
+  const seed = createOriginalIdeaFallbackSeed(idea, undefined)
+
+  assert.equal(seed.subject, '沈乔')
+  assert.equal(seed.lockedGoal, '在展出前决定要不要删掉自己的名字')
+  assert.equal(seed.activeSituation, idea)
+  assert.ok(seed.lockedFacts.includes(idea))
 })
 
 test('adapts deterministic creative drafts to the target and avoids prior motifs', () => {

@@ -164,6 +164,12 @@ export interface ProvisionalCurve {
   status: ProvisionalCurveStatus
   brief: CreativeBrief
   beats: CurveBeat[]
+  /**
+   * Proposals the author explicitly rejected and that were replaced in the
+   * current slot. Keeping this audit trail prevents a replacement or later
+   * version from silently treating the rejected wording as acceptable.
+   */
+  rejectedProposals?: CurveBeat[]
   instructions: AuthorInstruction[]
   design?: StoryDesignRecord
   generation?: CurveGenerationMetadata
@@ -177,6 +183,7 @@ export interface ConfirmedCurve {
   title: string
   brief: CreativeBrief
   beats: CurveBeat[]
+  rejectedProposals?: CurveBeat[]
   design?: StoryDesignRecord
   generation?: CurveGenerationMetadata
   confirmedAt: number
@@ -417,6 +424,7 @@ export interface StoryPathSnapshot {
   state?: StoryNarrativeState
   history: StoryTurnHistoryItem[]
   currentTurn?: StoryTurn
+  pendingActionProposal?: StoryActionProposal
   generatedStory?: GeneratedStory
 }
 
@@ -446,6 +454,8 @@ export interface StorySessionSnapshot extends StorySessionVersion {
   headTail?: StoryHeadTailOption
   history: StoryTurnHistoryItem[]
   currentTurn?: StoryTurn
+  /** A custom role-action proposal awaiting the author's confirmation. */
+  pendingActionProposal?: StoryActionProposal
   generatedStory?: GeneratedStory
   resumeStage: StoryResumeStage
 }
@@ -480,6 +490,8 @@ export interface StoryCurveBeatRegenerationRequest extends StorySessionVersion {
   curveId: string
   beatId: string
   feedback?: string
+  /** Explicitly request a replacement for a proposal already rejected. */
+  replaceRejected?: boolean
 }
 
 export interface StoryCurveBeatRejectRequest extends StorySessionVersion {

@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { createStorySessionActions, type StorySessionActions } from './storySessionActions'
 import { useStorySessionState } from './useStorySessionState'
 import { useStoryStageRequest } from './useStoryStageRequest'
@@ -54,12 +55,28 @@ export interface StorySession extends StorySessionActions {
   stageErrorContextPrefill: StoryConflictCoreContextPrefill | undefined
   stageErrorSystemDraftPrefill: StoryConflictCoreSystemDraft | undefined
   generatedStory: GeneratedStory | undefined
+  storyId: string | undefined
+  revision: number
+  curveVersions: import('./types').StoryCurveVersion[]
+  activeCurveVersionId: string | undefined
+  pendingActionProposal: import('./types').StoryActionProposal | undefined
+  restoreAttempted: boolean
+  restoreLoading: boolean
+  restoreError: string | undefined
+  retryRestoreSession: () => Promise<void>
 }
 
 export function useStorySession(): StorySession {
   const state = useStorySessionState()
   const stage = useStoryStageRequest()
   const actions = createStorySessionActions(state, stage)
+  const restoreStarted = useRef(false)
+
+  useEffect(() => {
+    if (restoreStarted.current) return
+    restoreStarted.current = true
+    void actions.restoreSession()
+  }, [])
 
   return {
     view: state.view,
@@ -92,6 +109,14 @@ export function useStorySession(): StorySession {
     stageErrorContextPrefill: stage.stageErrorContextPrefill,
     stageErrorSystemDraftPrefill: stage.stageErrorSystemDraftPrefill,
     generatedStory: state.generatedStory,
+    storyId: state.storyId,
+    revision: state.revision,
+    curveVersions: state.curveVersions,
+    activeCurveVersionId: state.activeCurveVersionId,
+    pendingActionProposal: state.pendingActionProposal,
+    restoreAttempted: state.restoreAttempted,
+    restoreLoading: state.restoreLoading,
+    restoreError: state.restoreError,
     ...actions,
   }
 }

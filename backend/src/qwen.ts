@@ -59,6 +59,12 @@ export async function requestQwenJson({
   temperature = 0.8,
   maxTokens = 2_500,
 }: QwenCompletionOptions): Promise<unknown> {
+  // Keep local contract and end-to-end checks deterministic without requiring
+  // network access. Production behavior is unchanged unless this explicit
+  // diagnostic switch is enabled.
+  if (/^(?:1|true|yes)$/iu.test(process.env.STORY_DISABLE_MODEL?.trim() ?? '')) {
+    throw new AppError('当前已关闭模型调用，系统将使用可追溯的本地结构草案。', 503, 'QWEN_NOT_CONFIGURED')
+  }
   const apiKey = process.env.DASHSCOPE_API_KEY?.trim()
 
   if (!apiKey) {

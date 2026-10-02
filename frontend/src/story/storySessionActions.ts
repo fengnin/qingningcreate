@@ -8,12 +8,22 @@ import {
   requestStoryCoCreationStart,
   requestCurveBeatUpdate,
   requestCurveBeatRegeneration,
+  requestCurveBeatRejection,
+  requestAffectedCurveRegeneration,
+  requestSourceFactDisposition,
   requestCurveConfirmation,
   requestCurveStorySpine,
+  requestStorySession,
+  requestCurveVersionSelection,
+  requestAuthorInstruction,
+  requestStoryActionProposal,
+  requestStoryActionProposalConfirmation,
 } from './storyApi'
 import {
   type PendingTurnRequest,
   type StorySessionState,
+  readPersistedStoryId,
+  persistStoryId,
 } from './useStorySessionState'
 import { normalizeConflictCoreContext } from './conflictCoreContext'
 import { getNextStoryIdeaExample } from './storyIdeaExamples'
@@ -25,6 +35,7 @@ import type {
   StoryTurnOptionRefinement,
   StoryTurnResponse,
   StoryView,
+  StoryCurveVersion,
 } from './types'
 import type { StoryStageRequest } from './useStoryStageRequest'
 
@@ -44,9 +55,12 @@ export interface StorySessionActions {
   openConflictCorePicker: () => Promise<void>
   openCreativeBrief: () => void
   updateCreativeBrief: (brief: CreativeBrief) => void
-  generateProvisionalCurve: (brief?: CreativeBrief) => Promise<void>
+  generateProvisionalCurve: (brief?: CreativeBrief, versionMode?: 'replace-draft' | 'new-version') => Promise<void>
   updateCurveBeat: (beatId: string, detail: string) => Promise<void>
-  regenerateCurveBeat: (beatId: string, feedback?: string) => Promise<void>
+  regenerateCurveBeat: (beatId: string, feedback?: string, replaceRejected?: boolean) => Promise<void>
+  rejectCurveBeat: (beatId: string, reason?: string) => Promise<void>
+  regenerateAffectedCurveBeats: (feedback?: string) => Promise<void>
+  setSourceFactDisposition: (factId: string, disposition: 'parked' | 'integrated') => Promise<void>
   confirmProvisionalCurve: () => Promise<void>
   startStorySpineFromCurve: () => Promise<void>
   showDifferentConflictCores: () => Promise<void>
@@ -71,6 +85,12 @@ export interface StorySessionActions {
   goBack: () => void
   goBackToOpening: () => void
   restartStory: () => void
+  restoreSession: () => Promise<void>
+  retryRestoreSession: () => Promise<void>
+  selectCurveVersion: (versionId: string) => Promise<void>
+  applyAuthorInstruction: (targetBeatId: string, text: string) => Promise<void>
+  proposeStoryAction: (action: string) => Promise<void>
+  confirmStoryActionProposal: (mode: Extract<StoryTurnMode, 'continue' | 'conclude'>) => Promise<void>
 }
 
 const previousViewByView: Partial<Record<StoryView, StoryView>> = {
@@ -98,6 +118,8 @@ export function createStorySessionActions(
     ...createStoryPlanningActions(context),
     ...storyProgressActions,
     ...createNavigationActions(context, storyProgressActions.generateFullStory, coCreationActions.generateProvisionalCurve),
+    ...createSessionRecoveryActions(context),
+    ...createAuthorControlActions(context),
   }
 }
 
@@ -116,30 +138,47 @@ function createCoCreationActions(
   | 'generateProvisionalCurve'
   | 'updateCurveBeat'
   | 'regenerateCurveBeat'
+  | 'rejectCurveBeat'
+  | 'regenerateAffectedCurveBeats'
+  | 'setSourceFactDisposition'
   | 'confirmProvisionalCurve'
   | 'startStorySpineFromCurve'
 > {
   const openCreativeBrief = () => {
     if (!state.trimmedIdea) return
-    state.resetStoryFoundation()
+    // Returning from the opening screen is still part of the current author
+    // session. Only a genuinely new session should clear the saved curve and
+    // its version history.
+    if (!state.storyId && !state.provisionalCurve) state.resetStoryFoundation()
     state.setView('creative-brief')
   }
 
-  const generateProvisionalCurve = async (briefOverride?: CreativeBrief) => {
+  const generateProvisionalCurve = async (
+    briefOverride?: CreativeBrief,
+    versionMode: 'replace-draft' | 'new-version' = 'new-version',
+  ) => {
     if (!state.trimmedIdea) return
     const brief = briefOverride ?? state.creativeBrief
-    state.resetStoryFoundation()
+    const existingSession = state.storyId ? { storyId: state.storyId, revision: state.revision } : undefined
+    if (!existingSession) state.resetStoryFoundation()
+    else state.resetPlanAfter('conflict-core')
     state.setCreativeBrief(brief)
     state.setView('provisional-curve')
     await runStorySessionStageRequest(
       state,
       stage,
-      () => requestStoryCoCreationStart({ idea: state.trimmedIdea, brief }),
+      () => requestStoryCoCreationStart({
+        idea: state.trimmedIdea,
+        brief,
+        ...(existingSession ? { ...existingSession, versionMode } : {}),
+      }),
       (result) => {
         state.setSeed(result.seed)
         state.setCreativeBrief(result.brief)
         state.setProvisionalCurve(result.curve)
         state.setConfirmedCurve(undefined)
+        state.setCurveVersions(result.curveVersions ?? [])
+        state.setActiveCurveVersionId(result.activeCurveVersionId)
       },
     )
   }
@@ -158,12 +197,12 @@ function createCoCreationActions(
         detail,
       }),
       (result) => {
-        state.setProvisionalCurve(result.curve)
+        applyCurveMutationState(state, result)
       },
     )
   }
 
-  const regenerateCurveBeat = async (beatId: string, feedback?: string) => {
+  const regenerateCurveBeat = async (beatId: string, feedback?: string, replaceRejected = false) => {
     const curve = state.provisionalCurve
     if (!curve || !state.storyId) return
     await runStorySessionStageRequest(
@@ -175,10 +214,44 @@ function createCoCreationActions(
         curveId: curve.id,
         beatId,
         feedback: feedback?.trim() || undefined,
+        replaceRejected: replaceRejected || undefined,
       }),
       (result) => {
-        state.setProvisionalCurve(result.curve)
+        applyCurveMutationState(state, result)
       },
+    )
+  }
+
+  const rejectCurveBeat = async (beatId: string, reason?: string) => {
+    const curve = state.provisionalCurve
+    if (!curve || !state.storyId) return
+    await runStorySessionStageRequest(
+      state,
+      stage,
+      () => requestCurveBeatRejection({ storyId: state.storyId!, revision: state.revision, curveId: curve.id, beatId, reason }),
+      (result) => applyCurveMutationState(state, result),
+    )
+  }
+
+  const regenerateAffectedCurveBeats = async (feedback?: string) => {
+    const curve = state.provisionalCurve
+    if (!curve || !state.storyId) return
+    await runStorySessionStageRequest(
+      state,
+      stage,
+      () => requestAffectedCurveRegeneration({ storyId: state.storyId!, revision: state.revision, curveId: curve.id, feedback }),
+      (result) => applyCurveMutationState(state, result),
+    )
+  }
+
+  const setSourceFactDisposition = async (factId: string, disposition: 'parked' | 'integrated') => {
+    const curve = state.provisionalCurve
+    if (!curve || !state.storyId) return
+    await runStorySessionStageRequest(
+      state,
+      stage,
+      () => requestSourceFactDisposition({ storyId: state.storyId!, revision: state.revision, curveId: curve.id, factId, disposition }),
+      (result) => applyCurveMutationState(state, result),
     )
   }
 
@@ -196,6 +269,8 @@ function createCoCreationActions(
       (result) => {
         state.setProvisionalCurve(result.curve)
         state.setConfirmedCurve(result.confirmedCurve)
+        state.setCurveVersions(result.curveVersions ?? [])
+        state.setActiveCurveVersionId(result.activeCurveVersionId)
       },
     )
   }
@@ -231,6 +306,9 @@ function createCoCreationActions(
     generateProvisionalCurve,
     updateCurveBeat,
     regenerateCurveBeat,
+    rejectCurveBeat,
+    regenerateAffectedCurveBeats,
+    setSourceFactDisposition,
     confirmProvisionalCurve,
     startStorySpineFromCurve,
   }
@@ -461,7 +539,13 @@ function createNavigationActions(
 ): Pick<StorySessionActions, 'retryCurrentStage' | 'goBack' | 'goBackToOpening' | 'restartStory'> {
   const retryCurrentStage = async () => {
     if (state.view === 'provisional-curve') {
-      if (!state.provisionalCurve) await generateProvisionalCurve()
+      // A failed regeneration leaves the previous draft visible so the author
+      // does not lose work. Retrying must still issue the request; create a
+      // preserved new version when an existing session is involved so a retry
+      // cannot silently overwrite the visible draft.
+      if (stage.stageStatus === 'error' || !state.provisionalCurve) {
+        await generateProvisionalCurve(undefined, state.storyId ? 'new-version' : undefined)
+      }
       return
     }
 
@@ -549,6 +633,128 @@ function applyStoryTurnState(state: StorySessionState, result: StoryTurnResponse
   state.setTurnHistory(result.history)
   state.setCurrentTurn(result.turn)
   state.setGeneratedStory(undefined)
+  state.setPendingActionProposal(undefined)
+}
+
+function applyCurveMutationState(
+  state: StorySessionState,
+  result: { curve: import('./types').ProvisionalCurve; curveVersions?: StoryCurveVersion[]; activeCurveVersionId?: string },
+) {
+  state.setProvisionalCurve(result.curve)
+  if (result.curveVersions) state.setCurveVersions(result.curveVersions)
+  state.setActiveCurveVersionId(result.activeCurveVersionId)
+}
+
+function createSessionRecoveryActions(
+  { state, stage }: StorySessionActionContext,
+  ): Pick<StorySessionActions, 'restoreSession' | 'retryRestoreSession' | 'selectCurveVersion'> {
+  const loadPersistedSession = async () => {
+    state.setRestoreLoading(true)
+    const storyId = readPersistedStoryId()
+    if (!storyId) {
+      state.setRestoreLoading(false)
+      return
+    }
+
+    try {
+      const snapshot = await requestStorySession(storyId)
+      state.applySessionSnapshot(snapshot)
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        ? (error as { code?: string }).code
+        : undefined
+      // A temporary network failure must not destroy the only handle to a
+      // persisted session. Remove it only when the server explicitly says the
+      // session no longer exists.
+      if (code === 'STORY_SESSION_NOT_FOUND') persistStoryId(undefined)
+      state.setRestoreError(error instanceof Error ? error.message : '无法恢复上次故事会话。')
+    } finally {
+      state.setRestoreLoading(false)
+    }
+  }
+
+  const restoreSession = async () => {
+    if (state.restoreAttempted) return
+    state.markRestoreAttempted()
+    await loadPersistedSession()
+  }
+
+  const retryRestoreSession = async () => {
+    state.markRestoreAttempted()
+    await loadPersistedSession()
+  }
+
+  const selectCurveVersion = async (versionId: string) => {
+    if (!state.storyId || versionId === state.activeCurveVersionId) return
+    await runStorySessionStageRequest(
+      state,
+      stage,
+      () => requestCurveVersionSelection({ storyId: state.storyId!, revision: state.revision, versionId }),
+      (snapshot) => state.applySessionSnapshot(snapshot),
+    )
+  }
+
+  return { restoreSession, retryRestoreSession, selectCurveVersion }
+}
+
+function createAuthorControlActions(
+  { state, stage }: StorySessionActionContext,
+): Pick<StorySessionActions, 'applyAuthorInstruction' | 'proposeStoryAction' | 'confirmStoryActionProposal'> {
+  const applyAuthorInstruction = async (targetBeatId: string, text: string) => {
+    if (!state.storyId || !state.confirmedCurve || !text.trim()) return
+    await runStorySessionStageRequest(
+      state,
+      stage,
+      () => requestAuthorInstruction({
+        storyId: state.storyId!,
+        revision: state.revision,
+        targetBeatId,
+        text: text.trim(),
+      }),
+      (result) => {
+        applyCurveMutationState(state, result)
+        state.setConfirmedCurve(undefined)
+        // The server intentionally clears the old narrative path when an
+        // author changes the confirmed mainline. Clear the client projection
+        // at the same boundary so it cannot offer a stale "current turn".
+        state.resetPlanAfter('conflict-core')
+        state.setView('provisional-curve')
+      },
+    )
+  }
+
+  const proposeStoryAction = async (action: string) => {
+    if (!state.storyId || !state.currentTurn || state.currentTurn.isConclusion || !action.trim()) return
+    await runStorySessionStageRequest(
+      state,
+      stage,
+      () => requestStoryActionProposal({
+        storyId: state.storyId!,
+        revision: state.revision,
+        turnId: state.currentTurn!.id,
+        action: action.trim(),
+      }),
+      (result) => state.setPendingActionProposal(result.proposal),
+    )
+  }
+
+  const confirmStoryActionProposal = async (mode: Extract<StoryTurnMode, 'continue' | 'conclude'>) => {
+    const proposal = state.pendingActionProposal
+    if (!state.storyId || !proposal) return
+    await runStorySessionStageRequest(
+      state,
+      stage,
+      () => requestStoryActionProposalConfirmation({
+        storyId: state.storyId!,
+        revision: state.revision,
+        proposalId: proposal.id,
+        mode,
+      }),
+      (result) => applyStoryTurnState(state, result),
+    )
+  }
+
+  return { applyAuthorInstruction, proposeStoryAction, confirmStoryActionProposal }
 }
 
 async function runStorySessionStageRequest<Result extends StorySessionVersion>(

@@ -15,6 +15,31 @@ const structuralBeatIds = {
   middleDevelopment: ['beat-escalation', 'beat-midpoint-turn', 'beat-climax-choice'],
 } as const
 
+export type StoryDesignSection = '冲突核心' | '具体困境' | '故事两端' | '中间发展'
+
+/**
+ * Return design areas that no longer have enough live curve material. The
+ * minimums deliberately allow a valid five-beat curve (which has no explicit
+ * midpoint node) while still preventing authors from confirming a curve after
+ * removing the only node that carried a whole design area.
+ */
+export function getMissingStoryDesignSections(
+  design: StoryDesignRecord | undefined,
+  beats: readonly CurveBeat[],
+): StoryDesignSection[] {
+  if (!design) return ['冲突核心', '具体困境', '故事两端', '中间发展']
+  const activeIds = new Set(beats.filter((beat) => beat.status !== 'rejected').map((beat) => beat.id))
+  const sections: Array<[StoryDesignSection, string[], number]> = [
+    ['冲突核心', design.conflictCoreBeatIds, 2],
+    ['具体困境', design.predicamentBeatIds, 2],
+    ['故事两端', design.storyEndBeatIds, 3],
+    ['中间发展', design.middleDevelopmentBeatIds, 2],
+  ]
+  return sections
+    .filter(([, ids, minimum]) => ids.filter((id) => activeIds.has(id)).length < minimum)
+    .map(([label]) => label)
+}
+
 /**
  * Preserve authored material before any model interpretation. The segmentation
  * intentionally keeps the original wording; it is a traceability aid, not an
@@ -51,23 +76,77 @@ export function updateStoryDesignCoverage(
   beats: readonly CurveBeat[],
 ): StoryDesignRecord {
   const activeBeats = beats.filter((beat) => beat.status !== 'rejected')
+  const activeBeatIds = new Set(activeBeats.map((beat) => beat.id))
   const sourceFacts = design.sourceFacts.map((fact) => {
-    const coveredByBeatIds = activeBeats
-      .filter((beat) => beat.sourceFactIds?.includes(fact.id) || isBeatGroundedToFact(beat, fact))
+    const currentCoverage = activeBeats
+      .filter((beat) => {
+        // An explicit sourceFactIds list is the author's/model's traceability
+        // claim. Do not let a long verbatim paragraph in one node accidentally
+        // claim every smaller fact as covered.
+        if (beat.sourceFactIds !== undefined) return beat.sourceFactIds.includes(fact.id)
+        return isBeatGroundedToFact(beat, fact)
+      })
       .map((beat) => beat.id)
+    // Keep prior coverage as an audit trail while a fact is parked. This is
+    // intentionally not treated as live use by getParkedStorySourceFactsUsedByCurve;
+    // it lets the author see what the material used to support and restore it
+    // explicitly without silently reintroducing it into the narrative.
+    const coveredByBeatIds = fact.disposition === 'parked'
+      ? [...new Set([
+          ...fact.coveredByBeatIds.filter((id) => activeBeatIds.has(id)),
+          ...currentCoverage,
+        ])]
+      : currentCoverage
     return {
       ...fact,
       coveredByBeatIds,
-      disposition: coveredByBeatIds.length
-        ? 'integrated' as const
-        : fact.disposition === 'parked' ? 'parked' as const : 'needs-author-decision' as const,
+      // Parking is an explicit author decision. A later edit may show where
+      // the material could fit again, but it remains parked until the author
+      // explicitly brings it back into this version.
+      disposition: fact.disposition === 'parked'
+        ? 'parked' as const
+        : coveredByBeatIds.length
+          ? 'integrated' as const
+          : 'needs-author-decision' as const,
     }
   })
-  return { ...design, sourceFacts }
+  return {
+    ...design,
+    sourceFacts,
+    conflictCoreBeatIds: design.conflictCoreBeatIds.filter((id) => activeBeatIds.has(id)),
+    predicamentBeatIds: design.predicamentBeatIds.filter((id) => activeBeatIds.has(id)),
+    storyEndBeatIds: design.storyEndBeatIds.filter((id) => activeBeatIds.has(id)),
+    middleDevelopmentBeatIds: design.middleDevelopmentBeatIds.filter((id) => activeBeatIds.has(id)),
+  }
 }
 
 export function getUnresolvedStorySourceFacts(design: StoryDesignRecord | undefined): StorySourceFact[] {
   return design?.sourceFacts.filter((fact) => fact.disposition === 'needs-author-decision') ?? []
+}
+
+/**
+ * A parked fact is an explicit author decision to keep material out of this
+ * version. It must not remain embedded in a live curve node through a broad
+ * aggregate sentence or a stale sourceFactIds claim.
+ */
+export function getParkedStorySourceFactsUsedByCurve(
+  design: StoryDesignRecord | undefined,
+  beats: readonly CurveBeat[],
+): StorySourceFact[] {
+  if (!design) return []
+  const activeBeats = beats.filter((beat) => beat.status !== 'rejected')
+  return design.sourceFacts.filter((fact) => (
+    fact.disposition === 'parked'
+    && activeBeats.some((beat) => (
+      // New curve records carry an explicit sourceFactIds list. Once that
+      // list exists, it is the author's/model's traceability decision and must
+      // take precedence over substring matching (for example, a parked goal
+      // can naturally occur inside a larger, still-integrated sentence).
+      beat.sourceFactIds !== undefined
+        ? beat.sourceFactIds.includes(fact.id)
+        : isTextGroundedToFact(beat.detail, fact.text)
+    ))
+  ))
 }
 
 export function setStorySourceFactDisposition(
@@ -91,13 +170,22 @@ export function setStorySourceFactDisposition(
 
 export function getDramaticMechanism(brief: CreativeBrief): string {
   const force = brief.dramaticForces[0]
+  const tonalFocus = brief.tones.includes('mystery')
+    ? '，并把信息缺口留给作者继续判断'
+    : brief.tones.includes('romance')
+      ? '，并让人物不能再回避心意与行动的差距'
+      : brief.tones.includes('friendship')
+        ? '，并让关系中的信任成为选择的一部分'
+        : brief.tones.includes('comedy')
+          ? '，并让尴尬的后果推动人物重新选择'
+          : ''
   switch (force) {
-    case 'misunderstanding': return '误会如何让原计划失效，再通过澄清改变选择'
-    case 'cost': return '目标必须以一项具体放弃或承担为代价'
-    case 'surprise': return '意外改变资源、时机或信息，使原办法失效'
-    case 'contrast': return '主角最依赖的办法反而暴露其弱点'
-    case 'relationship-tension': return '关系中的承诺或分歧迫使主角重新选择'
-    default: return '围绕已知材料逐步增加阻碍、代价和主动选择'
+    case 'misunderstanding': return `误会让原计划失效；主角必须在澄清与承担误解的后果之间决定${tonalFocus}`
+    case 'cost': return `目标必须以一项具体放弃或承担为代价；主角不能同时保住两件重要的事${tonalFocus}`
+    case 'surprise': return `意外改变时机、资源或信息；主角必须放弃原办法的一部分来继续目标${tonalFocus}`
+    case 'contrast': return `主角最依赖的办法反而暴露弱点；主角必须承认旧办法解决不了这次问题${tonalFocus}`
+    case 'relationship-tension': return `关系中的承诺或分歧直接阻断目标；主角必须回应关系而非只完成任务${tonalFocus}`
+    default: return `围绕已知材料逐步增加阻碍、代价和主动选择${tonalFocus}`
   }
 }
 
@@ -108,8 +196,10 @@ export function getSourceFactTexts(design: StoryDesignRecord | undefined): strin
 export function deriveCoveredSourceFactIds(
   design: StoryDesignRecord,
   detail: string,
+  includeParked = false,
 ): string[] {
   return design.sourceFacts
+    .filter((fact) => includeParked || fact.disposition !== 'parked')
     .filter((fact) => isTextGroundedToFact(detail, fact.text))
     .map((fact) => fact.id)
 }
@@ -149,9 +239,9 @@ function isBeatGroundedToFact(beat: CurveBeat, fact: StorySourceFact): boolean {
 function isTextGroundedToFact(detail: string, fact: string): boolean {
   if (detail.includes(fact)) return true
   const compactFact = fact.replace(/[，。！？；、\s]/gu, '')
-  if (compactFact.length < 4) return false
-  const fragment = compactFact.slice(0, Math.min(6, compactFact.length))
-  return detail.includes(fragment)
+  const compactDetail = detail.replace(/[，。！？；、\s]/gu, '')
+  if (compactFact.length < 4 || compactDetail.length < compactFact.length) return false
+  return compactDetail.includes(compactFact)
 }
 
 function normalizeText(value: string): string {

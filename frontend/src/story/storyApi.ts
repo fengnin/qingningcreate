@@ -37,12 +37,23 @@ import type {
   StoryCoCreationResponse,
   StoryCoCreationStartRequest,
   StoryCurveBeatRegenerationRequest,
+  StoryCurveBeatRejectRequest,
+  StoryCurveDependenciesRegenerationRequest,
+  StorySourceFactDispositionRequest,
   StoryCurveBeatUpdateRequest,
   StoryCurveConfirmationResponse,
   StoryCurveConfirmRequest,
   StoryCurveMutationResponse,
   StoryCurveSpineResponse,
   StoryCurveStartSpineRequest,
+  StoryCurveVersion,
+  StoryCurveVersionSelectionRequest,
+  StorySessionSnapshot,
+  StoryAuthorInstructionRequest,
+  StoryActionProposalRequest,
+  StoryActionProposalConfirmRequest,
+  StoryActionProposalResponse,
+  StoryActionProposal,
 } from '../../../shared/story-contract.js'
 
 const INVALID_RESPONSE_MESSAGE = '故事服务返回的数据不完整，请重试。'
@@ -78,12 +89,56 @@ export function requestCurveBeatRegeneration(
   return postJson('/api/story/curve/beat/regenerate', request, parseStoryCurveMutationResponse)
 }
 
+export function requestCurveBeatRejection(request: StoryCurveBeatRejectRequest): Promise<StoryCurveMutationResponse> {
+  return postJson('/api/story/curve/beat/reject', request, parseStoryCurveMutationResponse)
+}
+
+export function requestAffectedCurveRegeneration(
+  request: StoryCurveDependenciesRegenerationRequest,
+): Promise<StoryCurveMutationResponse> {
+  return postJson('/api/story/curve/regenerate-affected', request, parseStoryCurveMutationResponse)
+}
+
+export function requestSourceFactDisposition(
+  request: StorySourceFactDispositionRequest,
+): Promise<StoryCurveMutationResponse> {
+  return postJson('/api/story/curve/source-fact', request, parseStoryCurveMutationResponse)
+}
+
 export function requestCurveConfirmation(request: StoryCurveConfirmRequest): Promise<StoryCurveConfirmationResponse> {
   return postJson('/api/story/curve/confirm', request, parseStoryCurveConfirmationResponse)
 }
 
 export function requestCurveStorySpine(request: StoryCurveStartSpineRequest): Promise<StoryCurveSpineResponse> {
   return postJson('/api/story/curve/start-spine', request, parseStoryCurveSpineResponse)
+}
+
+export function requestStorySession(storyId: string): Promise<StorySessionSnapshot> {
+  return getJson(`/api/story/session/${encodeURIComponent(storyId)}`, parseStorySessionSnapshot)
+}
+
+export function requestCurveVersionSelection(
+  request: StoryCurveVersionSelectionRequest,
+): Promise<StorySessionSnapshot> {
+  return postJson('/api/story/curve/version/select', request, parseStorySessionSnapshot)
+}
+
+export function requestAuthorInstruction(
+  request: StoryAuthorInstructionRequest,
+): Promise<StoryCurveMutationResponse> {
+  return postJson('/api/story/author-instruction', request, parseStoryCurveMutationResponse)
+}
+
+export function requestStoryActionProposal(
+  request: StoryActionProposalRequest,
+): Promise<StoryActionProposalResponse> {
+  return postJson('/api/story/action-proposal', request, parseStoryActionProposalResponse)
+}
+
+export function requestStoryActionProposalConfirmation(
+  request: StoryActionProposalConfirmRequest,
+): Promise<StoryTurnResponse> {
+  return postJson('/api/story/action-proposal/confirm', request, parseStoryTurnResponse)
 }
 
 export function requestStoryPredicament(request: StoryPredicamentSessionRequest): Promise<StoryPredicamentResponse> {
@@ -139,6 +194,30 @@ async function postJson<T>(
   return parseResponse(payload)
 }
 
+async function getJson<T>(
+  path: string,
+  parseResponse: (payload: unknown) => T,
+): Promise<T> {
+  let response: Response
+  try {
+    response = await fetch(path, { method: 'GET' })
+  } catch {
+    throw new StoryApiError('暂时连不上故事服务，请确认后端已启动。', 'NETWORK_ERROR')
+  }
+
+  const payload = await readJson(response)
+  if (!response.ok) {
+    const error = parseApiErrorResponse(payload)
+    throw new StoryApiError(
+      error?.error.message ?? '读取故事会话没有完成，请稍后重试。',
+      error?.error.code,
+      error?.error.conflictCoreContextPrefill,
+      error?.error.systemDraftPrefill,
+    )
+  }
+  return parseResponse(payload)
+}
+
 async function readJson(response: Response): Promise<unknown> {
   try {
     return await response.json()
@@ -164,6 +243,8 @@ function parseStoryCoCreationResponse(payload: unknown): StoryCoCreationResponse
     seed: parseStorySeed(record.seed),
     brief: parseCreativeBrief(record.brief),
     curve: parseProvisionalCurve(record.curve),
+    ...(record.curveVersions === undefined ? {} : { curveVersions: parseCurveVersions(record.curveVersions) }),
+    ...(record.activeCurveVersionId === undefined ? {} : { activeCurveVersionId: readIdentifier(record, 'activeCurveVersionId') }),
   }
 }
 
@@ -173,6 +254,8 @@ function parseStoryCurveMutationResponse(payload: unknown): StoryCurveMutationRe
     ...parseStorySessionVersion(record),
     curve: parseProvisionalCurve(record.curve),
     affectedBeatIds: readIdentifierList(record, 'affectedBeatIds'),
+    ...(record.curveVersions === undefined ? {} : { curveVersions: parseCurveVersions(record.curveVersions) }),
+    ...(record.activeCurveVersionId === undefined ? {} : { activeCurveVersionId: readIdentifier(record, 'activeCurveVersionId') }),
   }
 }
 
@@ -182,10 +265,45 @@ function parseStoryCurveConfirmationResponse(payload: unknown): StoryCurveConfir
     ...parseStorySessionVersion(record),
     curve: parseProvisionalCurve(record.curve),
     confirmedCurve: parseConfirmedCurve(record.confirmedCurve),
+    ...(record.curveVersions === undefined ? {} : { curveVersions: parseCurveVersions(record.curveVersions) }),
+    ...(record.activeCurveVersionId === undefined ? {} : { activeCurveVersionId: readIdentifier(record, 'activeCurveVersionId') }),
   }
 }
 
-function parseStoryCurveSpineResponse(payload: unknown): StoryCurveSpineResponse {
+function parseStorySessionSnapshot(payload: unknown): StorySessionSnapshot {
+  const record = expectRecord(payload)
+  const resumeStage = record.resumeStage
+  if (resumeStage !== 'creative-brief' && resumeStage !== 'provisional-curve' && resumeStage !== 'story-spine' && resumeStage !== 'complete') {
+    throwInvalidResponse()
+  }
+  const curve = record.curve === undefined ? undefined : parseProvisionalCurve(record.curve)
+  const confirmedCurve = record.confirmedCurve === undefined ? undefined : parseConfirmedCurve(record.confirmedCurve)
+  const predicament = record.predicament === undefined ? undefined : parseStoryPredicament(record.predicament)
+  const approach = record.approach === undefined ? undefined : parsePredicamentApproach(record.approach)
+  const headTail = record.headTail === undefined ? undefined : parseHeadTailOption(record.headTail)
+  const currentTurn = record.currentTurn === undefined ? undefined : parseStoryTurn(record.currentTurn)
+  const generatedStory = record.generatedStory === undefined ? undefined : parseGeneratedStory(record.generatedStory)
+  return {
+    ...parseStorySessionVersion(record),
+    idea: readText(record, 'idea'),
+    seed: parseStorySeed(record.seed),
+    brief: parseCreativeBrief(record.brief),
+    ...(curve ? { curve } : {}),
+    ...(confirmedCurve ? { confirmedCurve } : {}),
+    curveVersions: parseCurveVersions(record.curveVersions),
+    ...(record.activeCurveVersionId === undefined ? {} : { activeCurveVersionId: readIdentifier(record, 'activeCurveVersionId') }),
+    ...(predicament ? { predicament } : {}),
+    ...(approach ? { approach } : {}),
+    ...(headTail ? { headTail } : {}),
+    history: parseTurnHistory(record.history),
+    ...(currentTurn ? { currentTurn } : {}),
+    ...(record.pendingActionProposal === undefined ? {} : { pendingActionProposal: parseStoryActionProposal(record.pendingActionProposal) }),
+    ...(generatedStory ? { generatedStory } : {}),
+    resumeStage,
+  }
+}
+
+export function parseStoryCurveSpineResponse(payload: unknown): StoryCurveSpineResponse {
   const record = expectRecord(payload)
   return {
     ...parseStoryTurnResponse(record),
@@ -219,6 +337,30 @@ function parseStoryTurnResponse(payload: unknown): StoryTurnResponse {
     ...parseStorySessionVersion(record),
     history: parseTurnHistory(record.history),
     turn: parseStoryTurn(record.turn),
+  }
+}
+
+function parseStoryActionProposalResponse(payload: unknown): StoryActionProposalResponse {
+  const record = expectRecord(payload)
+  const proposalRecord = expectRecord(record.proposal)
+  return {
+    ...parseStorySessionVersion(record),
+    proposal: parseStoryActionProposal(proposalRecord),
+  }
+}
+
+function parseStoryActionProposal(value: unknown): StoryActionProposal {
+  const record = expectRecord(value)
+  return {
+    id: readIdentifier(record, 'id'),
+    turnId: readIdentifier(record, 'turnId'),
+    action: readText(record, 'action'),
+    grounding: readText(record, 'grounding'),
+    preconditions: readTextList(record, 'preconditions', 0, 8),
+    immediateConsequence: readText(record, 'immediateConsequence'),
+    laterEffect: readText(record, 'laterEffect'),
+    option: parseStoryTurnOption(record.option),
+    createdAt: readTimestamp(record, 'createdAt'),
   }
 }
 
@@ -259,12 +401,12 @@ function parseStorySeed(value: unknown): StorySeed {
     subject: readText(record, 'subject'),
     activeSituation: readText(record, 'activeSituation'),
     lockedGoal: typeof lockedGoal === 'string' ? lockedGoal.trim() : null,
-    lockedFacts: readTextList(record, 'lockedFacts', 1, 5),
+    lockedFacts: readTextList(record, 'lockedFacts', 0, 5),
     ...(systemDraft ? { systemDraft } : {}),
     ...(creativeBrief ? { creativeBrief } : {}),
     worldMode,
     expansionScope,
-    unknowns: readTextList(record, 'unknowns', 1, 6),
+    unknowns: readTextList(record, 'unknowns', 0, 6),
   }
 }
 
@@ -356,13 +498,19 @@ function parseProvisionalCurve(value: unknown): ProvisionalCurve {
   if (status !== 'draft' && status !== 'confirmed' && status !== 'superseded') throwInvalidResponse()
   const beats = parseCurveBeats(record.beats)
   const instructions = parseAuthorInstructions(record.instructions)
+  const rejectedProposals = record.rejectedProposals === undefined
+    ? undefined
+    : parseCurveBeatList(record.rejectedProposals, 0, 100)
   return {
     id: readIdentifier(record, 'id'),
     title: readText(record, 'title'),
     status,
     brief: parseCreativeBrief(record.brief),
     beats,
+    ...(rejectedProposals ? { rejectedProposals } : {}),
     instructions,
+    ...(record.design === undefined ? {} : { design: parseStoryDesignRecord(record.design) }),
+    ...(record.generation === undefined ? {} : { generation: parseCurveGenerationMetadata(record.generation) }),
     createdAt: readTimestamp(record, 'createdAt'),
     updatedAt: readTimestamp(record, 'updatedAt'),
   }
@@ -376,12 +524,73 @@ function parseConfirmedCurve(value: unknown): ConfirmedCurve {
     title: readText(record, 'title'),
     brief: parseCreativeBrief(record.brief),
     beats: parseCurveBeats(record.beats),
+    ...(record.rejectedProposals === undefined ? {} : { rejectedProposals: parseCurveBeatList(record.rejectedProposals, 0, 100) }),
+    ...(record.design === undefined ? {} : { design: parseStoryDesignRecord(record.design) }),
+    ...(record.generation === undefined ? {} : { generation: parseCurveGenerationMetadata(record.generation) }),
     confirmedAt: readTimestamp(record, 'confirmedAt'),
   }
 }
 
+function parseCurveVersions(value: unknown): StoryCurveVersion[] {
+  if (!Array.isArray(value)) throwInvalidResponse()
+  return value.map((item) => {
+    const record = expectRecord(item)
+    const curve = parseProvisionalCurve(record.curve)
+    const confirmedCurve = record.confirmedCurve === undefined ? undefined : parseConfirmedCurve(record.confirmedCurve)
+    return {
+      id: readIdentifier(record, 'id'),
+      label: readText(record, 'label'),
+      curve,
+      ...(confirmedCurve ? { confirmedCurve } : {}),
+      createdAt: readTimestamp(record, 'createdAt'),
+      updatedAt: readTimestamp(record, 'updatedAt'),
+    }
+  })
+}
+
+function parseStoryDesignRecord(value: unknown): NonNullable<ProvisionalCurve['design']> {
+  const record = expectRecord(value)
+  const sourceFacts = record.sourceFacts
+  if (!Array.isArray(sourceFacts)) throwInvalidResponse()
+  return {
+    id: readIdentifier(record, 'id'),
+    sourceFacts: sourceFacts.map((item) => {
+      const fact = expectRecord(item)
+      const disposition = fact.disposition
+      if (disposition !== 'integrated' && disposition !== 'needs-author-decision' && disposition !== 'parked') throwInvalidResponse()
+      return {
+        id: readIdentifier(fact, 'id'),
+        text: readText(fact, 'text'),
+        source: 'user-input' as const,
+        disposition,
+        coveredByBeatIds: readIdentifierList(fact, 'coveredByBeatIds'),
+      }
+    }),
+    conflictCoreBeatIds: readIdentifierList(record, 'conflictCoreBeatIds'),
+    predicamentBeatIds: readIdentifierList(record, 'predicamentBeatIds'),
+    storyEndBeatIds: readIdentifierList(record, 'storyEndBeatIds'),
+    middleDevelopmentBeatIds: readIdentifierList(record, 'middleDevelopmentBeatIds'),
+  }
+}
+
+function parseCurveGenerationMetadata(value: unknown): NonNullable<ProvisionalCurve['generation']> {
+  const record = expectRecord(value)
+  const origin = record.origin
+  if (origin !== 'model' && origin !== 'fact-preserving-fallback') throwInvalidResponse()
+  const notice = readOptionalGeneratedText(record.notice, 220)
+  return {
+    origin,
+    dramaticMechanism: readText(record, 'dramaticMechanism'),
+    ...(notice ? { notice } : {}),
+  }
+}
+
 function parseCurveBeats(value: unknown): CurveBeat[] {
-  if (!Array.isArray(value) || value.length < 5 || value.length > 7) throwInvalidResponse()
+  return parseCurveBeatList(value, 5, 7)
+}
+
+function parseCurveBeatList(value: unknown, minimumLength: number, maximumLength: number): CurveBeat[] {
+  if (!Array.isArray(value) || value.length < minimumLength || value.length > maximumLength) throwInvalidResponse()
   return value.map((item) => {
     const record = expectRecord(item)
     const kind = record.kind
@@ -406,6 +615,7 @@ function parseCurveBeats(value: unknown): CurveBeat[] {
       source,
       status,
       dependsOn: readIdentifierList(record, 'dependsOn'),
+      ...(record.sourceFactIds === undefined ? {} : { sourceFactIds: readIdentifierList(record, 'sourceFactIds') }),
     }
   })
 }
@@ -415,12 +625,12 @@ function parseAuthorInstructions(value: unknown): AuthorInstruction[] {
   return value.map((item) => {
     const record = expectRecord(item)
     const kind = record.kind
-    if (kind !== 'replace' && kind !== 'remove' && kind !== 'regenerate') throwInvalidResponse()
+    if (kind !== 'replace' && kind !== 'remove' && kind !== 'regenerate' && kind !== 'author-revision' && kind !== 'park-fact') throwInvalidResponse()
     return {
       id: readIdentifier(record, 'id'),
       kind,
       text: readText(record, 'text'),
-      targetBeatId: readIdentifier(record, 'targetBeatId'),
+      ...(record.targetBeatId === undefined ? {} : { targetBeatId: readIdentifier(record, 'targetBeatId') }),
       createdAt: readTimestamp(record, 'createdAt'),
     }
   })

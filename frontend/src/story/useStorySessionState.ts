@@ -13,6 +13,9 @@ import type {
   StoryPredicamentApproach,
   StorySeed,
   StorySessionVersion,
+  StoryCurveVersion,
+  StoryActionProposal,
+  StorySessionSnapshot,
   StoryTurn,
   StoryTurnHistoryItem,
   StoryTurnMode,
@@ -81,6 +84,49 @@ export interface StorySessionState {
   resetPlanAfter: (resetPoint: StoryPlanResetPoint) => void
   resetStoryFoundation: () => void
   applySessionVersion: (result: StorySessionVersion) => void
+  curveVersions: StoryCurveVersion[]
+  setCurveVersions: (versions: StoryCurveVersion[]) => void
+  activeCurveVersionId: string | undefined
+  setActiveCurveVersionId: (versionId: string | undefined) => void
+  pendingActionProposal: StoryActionProposal | undefined
+  setPendingActionProposal: (proposal: StoryActionProposal | undefined) => void
+  applySessionSnapshot: (snapshot: StorySessionSnapshot) => void
+  restoreAttempted: boolean
+  restoreLoading: boolean
+  setRestoreLoading: (loading: boolean) => void
+  markRestoreAttempted: () => void
+  resetRestoreAttempted: () => void
+  restoreError: string | undefined
+  setRestoreError: (message: string | undefined) => void
+}
+
+const activeStoryStorageKey = 'story-lens.active-story-id'
+
+export function readPersistedStoryId(): string | undefined {
+  try {
+    const queryStoryId = new URLSearchParams(window.location.search).get('story')?.trim()
+    return queryStoryId || window.localStorage.getItem(activeStoryStorageKey)?.trim() || undefined
+  } catch {
+    return undefined
+  }
+}
+
+export function persistStoryId(storyId: string | undefined): void {
+  try {
+    if (storyId) {
+      window.localStorage.setItem(activeStoryStorageKey, storyId)
+      const url = new URL(window.location.href)
+      url.searchParams.set('story', storyId)
+      window.history.replaceState({}, '', url)
+    } else {
+      window.localStorage.removeItem(activeStoryStorageKey)
+      const url = new URL(window.location.href)
+      url.searchParams.delete('story')
+      window.history.replaceState({}, '', url)
+    }
+  } catch {
+    // Storage and history may be unavailable in embedded/private contexts.
+  }
 }
 
 export function useStorySessionState(): StorySessionState {
@@ -106,6 +152,12 @@ export function useStorySessionState(): StorySessionState {
   const [generatedStory, setGeneratedStory] = useState<GeneratedStory>()
   const [storyId, setStoryId] = useState<string>()
   const [revision, setRevision] = useState(0)
+  const [curveVersions, setCurveVersions] = useState<StoryCurveVersion[]>([])
+  const [activeCurveVersionId, setActiveCurveVersionId] = useState<string>()
+  const [pendingActionProposal, setPendingActionProposal] = useState<StoryActionProposal>()
+  const [restoreAttempted, setRestoreAttempted] = useState(false)
+  const [restoreLoading, setRestoreLoading] = useState(false)
+  const [restoreError, setRestoreError] = useState<string>()
 
   const trimmedIdea = idea.trim()
 
@@ -174,10 +226,15 @@ export function useStorySessionState(): StorySessionState {
   }
 
   const resetStoryFoundation = () => {
+    persistStoryId(undefined)
     setStoryId(undefined)
     setRevision(0)
     setSeed(undefined)
     setConflictCoreContext({})
+    setCurveVersions([])
+    setActiveCurveVersionId(undefined)
+    setPendingActionProposal(undefined)
+    setRestoreError(undefined)
     clearCoCreation()
     clearConflictCoreSelection()
     resetPlanAfter('conflict-core')
@@ -186,7 +243,37 @@ export function useStorySessionState(): StorySessionState {
   const applySessionVersion = (result: StorySessionVersion) => {
     setStoryId(result.storyId)
     setRevision(result.revision)
+    persistStoryId(result.storyId)
   }
+
+  const applySessionSnapshot = (snapshot: StorySessionSnapshot) => {
+    setStoryId(snapshot.storyId)
+    setRevision(snapshot.revision)
+    setIdea(snapshot.idea)
+    setSeed(snapshot.seed)
+    setCreativeBrief(snapshot.brief)
+    setProvisionalCurve(snapshot.curve)
+    setConfirmedCurve(snapshot.confirmedCurve)
+    setCurveVersions(snapshot.curveVersions)
+    setActiveCurveVersionId(snapshot.activeCurveVersionId)
+    setPredicament(snapshot.predicament)
+    setSelectedApproachId(snapshot.approach?.id)
+    setHeadTailOptions(snapshot.headTail ? [snapshot.headTail] : [])
+    setSelectedHeadTailId(snapshot.headTail?.id)
+    setCommittedHeadTailId(snapshot.headTail?.id)
+    setTurnHistory(snapshot.history)
+    setCurrentTurn(snapshot.currentTurn)
+    setPendingActionProposal(snapshot.pendingActionProposal)
+    setGeneratedStory(snapshot.generatedStory)
+    setSelectedTurnOptionId(undefined)
+    setPendingTurnRequest(undefined)
+    setView(snapshot.resumeStage)
+    setRestoreAttempted(true)
+    setRestoreError(undefined)
+  }
+
+  const markRestoreAttempted = () => setRestoreAttempted(true)
+  const resetRestoreAttempted = () => setRestoreAttempted(false)
 
   return {
     view,
@@ -240,6 +327,20 @@ export function useStorySessionState(): StorySessionState {
     resetPlanAfter,
     resetStoryFoundation,
     applySessionVersion,
+    curveVersions,
+    setCurveVersions,
+    activeCurveVersionId,
+    setActiveCurveVersionId,
+    pendingActionProposal,
+    setPendingActionProposal,
+    applySessionSnapshot,
+    restoreAttempted,
+    restoreLoading,
+    setRestoreLoading,
+    markRestoreAttempted,
+    resetRestoreAttempted,
+    restoreError,
+    setRestoreError,
   }
 }
 

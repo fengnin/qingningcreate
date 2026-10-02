@@ -8,8 +8,10 @@ import {
   FileText,
   GitBranch,
   Lightbulb,
+  PencilLine,
   RefreshCcw,
   Route,
+  Send,
   Sparkles,
   Target,
   Waypoints,
@@ -80,24 +82,26 @@ export function OpeningScreen({ session }: { session: StorySession }) {
         <span className="model-label"><span className="status-dot" /> 通义千问</span>
       </header>
       <section className="opening-content">
+        {session.restoreError && <p className="cocreation-error" role="alert"><CircleAlert size={16} /> {session.restoreError} <button className="text-action" type="button" onClick={() => void session.retryRestoreSession()}>重试恢复</button></p>}
         <p className="opening-kicker"><Sparkles size={15} /> 从一句话开始</p>
         <h1>时光川行<br />青柠创作平台</h1>
         <p>先由你决定它要讲什么，系统再把想法整理成可编辑的故事曲线；确认主线后，才开始让它发生。</p>
         <label className="idea-field">
           <span className="idea-field-label">此刻浮现的想法 <small>一个人想做的一件事就够了</small></span>
-          <textarea
-            value={session.idea}
-            onChange={(event) => session.updateIdea(event.target.value)}
-            placeholder="例如：青柠想去游乐园玩"
-            maxLength={maximumStoryIdeaLength}
-          />
+            <textarea
+              value={session.idea}
+              onChange={(event) => session.updateIdea(event.target.value)}
+              placeholder="例如：青柠想去游乐园玩"
+              maxLength={maximumStoryIdeaLength}
+              disabled={session.restoreLoading}
+            />
           <span className="field-footer">
             <button className="text-action" type="button" onClick={session.useExample}><RefreshCcw size={15} /> 换个示例</button>
             <small>{session.idea.length} / {maximumStoryIdeaLength}</small>
           </span>
         </label>
-        <button className="primary-action opening-action" type="button" onClick={session.openCreativeBrief} disabled={!session.trimmedIdea}>
-          先定创意方向 <ArrowRight size={18} />
+        <button className="primary-action opening-action" type="button" onClick={session.openCreativeBrief} disabled={!session.trimmedIdea || session.restoreLoading}>
+          {session.restoreLoading ? '正在恢复上次会话…' : '先定创意方向'} {!session.restoreLoading && <ArrowRight size={18} />}
         </button>
       </section>
       <footer className="opening-footer"><StoryJourney current={0} /></footer>
@@ -457,6 +461,7 @@ export function StorySpineScreen({ session }: { session: StorySession }) {
         >
           <StoryTurnHistory history={session.turnHistory} />
           {currentTurnPanel}
+          {session.confirmedCurve && currentTurn && <StoryControlPanel session={session} currentTurn={currentTurn} />}
           <TurnActions
             canConclude={canConclude}
             disabled={!canAdvance}
@@ -985,6 +990,90 @@ function TurnOption({ option, selected, onSelect, onRefineOption, disabled }: {
       </button>
       <StoryTurnOptionRefinementControl option={option} disabled={disabled} onRefine={onRefineOption} />
     </div>
+  )
+}
+
+function StoryControlPanel({ session, currentTurn }: {
+  session: StorySession
+  currentTurn: StoryTurn
+}) {
+  const confirmedBeats = session.confirmedCurve?.beats.filter((beat) => beat.status !== 'rejected') ?? []
+  const [authorBeatId, setAuthorBeatId] = useState(confirmedBeats[0]?.id ?? '')
+  const [authorText, setAuthorText] = useState('')
+  const [roleAction, setRoleAction] = useState('')
+  const pendingProposal = session.pendingActionProposal?.turnId === currentTurn.id
+    ? session.pendingActionProposal
+    : undefined
+  const disabled = session.stageStatus === 'loading'
+
+  const submitAuthorInstruction = async () => {
+    if (!authorBeatId || !authorText.trim()) return
+    await session.applyAuthorInstruction(authorBeatId, authorText.trim())
+    setAuthorText('')
+  }
+
+  const submitRoleAction = async () => {
+    if (!roleAction.trim()) return
+    await session.proposeStoryAction(roleAction.trim())
+  }
+
+  return (
+    <section className="story-control-panel" aria-label="作者控制与角色行动">
+      <div className="author-control-block">
+        <header className="control-block-heading">
+          <span><PencilLine size={15} /> 作者调整主线</span>
+          <small>修改故事设计，提交后回到主线确认</small>
+        </header>
+        <div className="author-control-fields">
+          <label>
+            <span>调整节点</span>
+            <select value={authorBeatId} onChange={(event) => setAuthorBeatId(event.target.value)} disabled={disabled}>
+              {confirmedBeats.map((beat) => <option value={beat.id} key={beat.id}>{beat.title}</option>)}
+            </select>
+          </label>
+          <label className="control-wide-field">
+            <span>作者指令</span>
+            <textarea value={authorText} onChange={(event) => setAuthorText(event.target.value)} maxLength={180} placeholder="例如：让这个转折先回应前面的承诺，再决定是否继续。" disabled={disabled} />
+          </label>
+          <button className="text-action" type="button" onClick={() => void submitAuthorInstruction()} disabled={disabled || !authorBeatId || !authorText.trim()}>
+            <PencilLine size={14} /> 提交作者调整
+          </button>
+        </div>
+      </div>
+
+      {!currentTurn.isConclusion && (
+        <div className="role-action-block">
+          <header className="control-block-heading">
+            <span><Send size={15} /> 提出角色行动</span>
+            <small>只改变当前回合的角色选择，不修改主线</small>
+          </header>
+          <div className="role-action-fields">
+            <label>
+              <span>这一次，角色可以怎么做</span>
+              <textarea value={roleAction} onChange={(event) => setRoleAction(event.target.value)} maxLength={180} placeholder="例如：先把手里的信息说清楚，再回应眼前的阻碍。" disabled={disabled} />
+            </label>
+            <button className="text-action" type="button" onClick={() => void submitRoleAction()} disabled={disabled || !roleAction.trim()}>
+              <Send size={14} /> 生成行动提案
+            </button>
+          </div>
+          {pendingProposal && (
+            <div className="pending-action-proposal">
+              <div className="pending-action-heading"><strong>角色行动提案</strong><span>尚未写入故事</span></div>
+              <p>{pendingProposal.action}</p>
+              <dl>
+                <div><dt>依据</dt><dd>{pendingProposal.grounding}</dd></div>
+                <div><dt>眼前结果</dt><dd>{pendingProposal.immediateConsequence}</dd></div>
+                <div><dt>后续影响</dt><dd>{pendingProposal.laterEffect}</dd></div>
+              </dl>
+              <div className="pending-action-buttons">
+                <button className="text-action" type="button" onClick={() => void session.confirmStoryActionProposal('continue')} disabled={disabled}>接受并继续发展 <ArrowRight size={14} /></button>
+                {currentTurn.canConclude && <button className="text-action" type="button" onClick={() => void session.confirmStoryActionProposal('conclude')} disabled={disabled}>接受并进入收束 <Check size={14} /></button>}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
   )
 }
 

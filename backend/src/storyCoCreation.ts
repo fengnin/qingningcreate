@@ -5,6 +5,8 @@ import {
   deriveCoveredSourceFactIds,
   ensureStoryDesignRecord,
   getDramaticMechanism,
+  getMissingStoryDesignSections,
+  getParkedStorySourceFactsUsedByCurve,
   getUnresolvedStorySourceFacts,
   setStorySourceFactDisposition,
   updateStoryDesignCoverage,
@@ -120,22 +122,23 @@ export async function generateProvisionalCurve(
   idea: string,
   seed: StorySeed,
   brief: CreativeBrief,
+  excludedProposalDetails: readonly string[] = [],
 ): Promise<ProvisionalCurve> {
   const design = createStoryDesignRecord(idea, seed)
   try {
     const modelOutput = await requestQwenJson({
       systemPrompt: curveGenerationSystemPrompt,
-      userPrompt: buildCurveGenerationPrompt(idea, seed, brief),
+      userPrompt: buildCurveGenerationPrompt(idea, seed, brief, excludedProposalDetails),
       temperature: 0.72,
       maxTokens: 1_700,
     })
-    const curve = parseModelCurve(modelOutput, idea, seed, brief, design)
+    const curve = parseModelCurve(modelOutput, idea, seed, brief, design, excludedProposalDetails)
     if (curve) return curve
   } catch (error) {
     if (!(error instanceof AppError)) throw error
   }
 
-  return createProvisionalCurveFallback(idea, seed, brief, design)
+  return createProvisionalCurveFallback(idea, seed, brief, design, excludedProposalDetails)
 }
 
 export function updateCurveBeat(
@@ -145,6 +148,9 @@ export function updateCurveBeat(
 ): CurveMutationResult {
   const normalizedDetail = normalizeCurveText(detail, '曲线节点内容不能为空。')
   const target = curve.beats.find((beat) => beat.id === beatId)
+  if (target?.status === 'rejected') {
+    throw new AppError('这条提案已被你拒绝，不能直接恢复。请编辑其他节点，或创建一个新的主线版本。', 409, 'STORY_CURVE_REJECTED_IMMUTABLE')
+  }
   if (!target) throw new AppError('要编辑的曲线节点不存在，请刷新后重试。', 409, 'STORY_SESSION_CONFLICT')
   if (curve.status !== 'draft') throw new AppError('主线已经确认，请从确认前的版本重新编辑。', 409, 'STORY_CURVE_ALREADY_CONFIRMED')
 
@@ -164,6 +170,9 @@ export function updateCurveBeat(
         detail: normalizedDetail,
         source: 'user-edit' as const,
         status: 'edited' as const,
+        sourceFactIds: curve.design
+          ? deriveCoveredSourceFactIds(curve.design, normalizedDetail, true)
+          : beat.sourceFactIds,
       }
     }
     if (affectedBeatIds.includes(beat.id) && beat.source !== 'user-input') {
@@ -193,12 +202,20 @@ export async function regenerateCurveBeat(
   curve: ProvisionalCurve,
   beatId: string,
   feedback?: string,
+  replaceRejected = false,
 ): Promise<CurveMutationResult> {
   const target = curve.beats.find((beat) => beat.id === beatId)
+  const targetWasRejected = target?.status === 'rejected'
+  if (targetWasRejected && !replaceRejected) {
+    throw new AppError('这条提案已被你拒绝，不能重新生成。请编辑其他节点，或创建一个新的主线版本。', 409, 'STORY_CURVE_REJECTED_IMMUTABLE')
+  }
   if (!target) throw new AppError('要重推的曲线节点不存在，请刷新后重试。', 409, 'STORY_SESSION_CONFLICT')
   if (curve.status !== 'draft') throw new AppError('主线已经确认，请从确认前的版本重新编辑。', 409, 'STORY_CURVE_ALREADY_CONFIRMED')
   if (target.source === 'user-input' || target.kind === 'current-state') {
     throw new AppError('当前状态来自你的原始想法，请直接编辑它，不要让系统重写。', 400, 'STORY_CURVE_USER_NODE_REGENERATE_FORBIDDEN')
+  }
+  if (target.source === 'user-edit') {
+    throw new AppError('这条内容是你的作者编辑。请继续编辑它，或先修改上游节点后再决定如何调整，系统不会覆盖它。', 400, 'STORY_CURVE_AUTHOR_NODE_REGENERATE_FORBIDDEN')
   }
 
   const normalizedFeedback = feedback ? normalizeCurveText(feedback, '重推说明不能为空。') : undefined
@@ -219,6 +236,21 @@ export async function regenerateCurveBeat(
     }
   } catch (error) {
     if (!(error instanceof AppError)) throw error
+  }
+
+  if (targetWasRejected && repeatsRejectedProposal(detail, curve)) {
+    // A replacement is an explicit new proposal, never a resurrection of the
+    // wording the author rejected. Keep the fallback deterministic when the
+    // model returns the same premise again.
+    const alternateBrief = getAlternativeFallbackBrief(curve.brief, [target.detail])
+    const relatedFact = curve.design?.sourceFacts.find((fact) => target.sourceFactIds?.includes(fact.id))?.text
+      ?? curve.design?.sourceFacts.find((fact) => fact.disposition !== 'parked')?.text
+      ?? getGoal(seed, seed.activeSituation)
+    detail = getFallbackDetailForKind(target.kind, getSubject(seed), getGoal(seed, seed.activeSituation), alternateBrief, relatedFact)
+    if (repeatsRejectedProposal(detail, curve)) {
+      detail = `暂定：${getSubject(seed)}需要围绕“${shortenCurveContext(relatedFact)}”重新判断如何继续，具体代价留待作者决定。`
+    }
+    usedFallback = true
   }
 
   const affectedBeatIds = getDependentBeatIds(curve.beats, beatId)
@@ -247,6 +279,15 @@ export async function regenerateCurveBeat(
     }
     return beat
   })
+  const rejectedProposals = targetWasRejected
+    ? [
+        ...(curve.rejectedProposals ?? []),
+        {
+          ...target,
+          status: 'rejected' as const,
+        },
+      ]
+    : curve.rejectedProposals
   const design = curve.design
     ? updateStoryDesignCoverage(curve.design, beats)
     : undefined
@@ -255,6 +296,7 @@ export async function regenerateCurveBeat(
     curve: {
       ...curve,
       beats,
+      ...(rejectedProposals ? { rejectedProposals } : {}),
       ...(design ? { design } : {}),
       generation: usedFallback
         ? {
@@ -280,6 +322,9 @@ export function rejectCurveBeat(
   if (curve.status !== 'draft') throw new AppError('主线已经确认，请从确认前的版本重新编辑。', 409, 'STORY_CURVE_ALREADY_CONFIRMED')
   if (target.source === 'user-input') {
     throw new AppError('这条内容来自你的原始想法，请编辑它或标记为暂不纳入，而不是删除。', 400, 'STORY_CURVE_USER_NODE_REJECT_FORBIDDEN')
+  }
+  if (target.source !== 'system-proposal') {
+    throw new AppError('只有系统提出的内容可以标记为不采用。你的编辑请直接修改或恢复。', 400, 'STORY_CURVE_AUTHOR_NODE_REJECT_FORBIDDEN')
   }
 
   const affectedBeatIds = getDependentBeatIds(curve.beats, beatId)
@@ -323,7 +368,12 @@ export async function regenerateAffectedCurveBeats(
     .filter((beat) => beat.status === 'stale')
     .map((beat) => beat.id)
 
+  // Batch regeneration is only allowed to replace system proposals. An
+  // author-edited downstream node stays visibly stale until the author edits
+  // it, rather than being silently overwritten by a convenient re-generation.
   for (const beatId of affectedBeatIds) {
+    const beat = nextCurve.beats.find((candidate) => candidate.id === beatId)
+    if (!beat || beat.source !== 'system-proposal') continue
     const result = await regenerateCurveBeat(idea, seed, nextCurve, beatId, feedback)
     nextCurve = result.curve
   }
@@ -346,11 +396,49 @@ export function updateCurveSourceFactDisposition(
     expansionScope: 'keep-scale',
     unknowns: [],
   })
+  const coverageBeforeDisposition = updateStoryDesignCoverage(design, curve.beats)
+  const targetBeforeDisposition = coverageBeforeDisposition.sourceFacts.find((fact) => fact.id === factId)
   const updatedDesign = setStorySourceFactDisposition(
-    updateStoryDesignCoverage(design, curve.beats),
+    coverageBeforeDisposition,
     factId,
     disposition,
   )
+  const affectedBeatIds = disposition === 'parked'
+    ? curve.beats
+      .filter((beat) => beat.status !== 'rejected' && beat.sourceFactIds?.includes(factId))
+      .map((beat) => beat.id)
+    : targetBeforeDisposition?.disposition === 'parked'
+      ? targetBeforeDisposition.coveredByBeatIds.filter((beatId) => (
+          curve.beats.some((beat) => beat.id === beatId && beat.status !== 'rejected')
+        ))
+    : []
+  const beats = disposition === 'parked'
+    ? curve.beats.map((beat) => {
+      if (!affectedBeatIds.includes(beat.id)) return beat
+      // Remove the live traceability claim immediately. The text remains
+      // visible for author review, and updateStoryDesignCoverage keeps the
+      // prior beat ids as history. If the author edits a node to mention this
+      // fact again, updateCurveBeat will create a fresh explicit claim and the
+      // parked-material guard will require an explicit reintegration decision.
+      return {
+        ...beat,
+        status: 'stale' as const,
+        sourceFactIds: beat.sourceFactIds?.filter((sourceFactId) => sourceFactId !== factId),
+      }
+    })
+    : targetBeforeDisposition?.disposition === 'parked'
+      ? curve.beats.map((beat) => {
+          if (!affectedBeatIds.includes(beat.id)) return beat
+          return {
+            ...beat,
+            // Restoring a parked fact is an explicit author decision. Restore
+            // its former traceability links, but require another review before
+            // the old material can be confirmed as part of this version.
+            status: 'stale' as const,
+            sourceFactIds: [...new Set([...(beat.sourceFactIds ?? []), factId])],
+          }
+        })
+      : curve.beats
   const instruction: AuthorInstruction = {
     id: `instruction-${randomUUID()}`,
     kind: 'park-fact',
@@ -360,11 +448,12 @@ export function updateCurveSourceFactDisposition(
   return {
     curve: {
       ...curve,
-      design: updatedDesign,
+      beats,
+      design: updateStoryDesignCoverage(updatedDesign, beats),
       instructions: [...curve.instructions, instruction],
       updatedAt: Date.now(),
     },
-    affectedBeatIds: [],
+    affectedBeatIds,
   }
 }
 
@@ -390,6 +479,22 @@ export function confirmProvisionalCurve(curve: ProvisionalCurve): {
   const design = curve.design ? updateStoryDesignCoverage(curve.design, curve.beats) : undefined
   if (getUnresolvedStorySourceFacts(design).length) {
     throw new AppError('还有原始材料尚未纳入或明确暂不采用，请先由你决定。', 400, 'STORY_SOURCE_FACTS_UNRESOLVED')
+  }
+  const parkedFactsStillUsed = getParkedStorySourceFactsUsedByCurve(design, curve.beats)
+  if (parkedFactsStillUsed.length) {
+    throw new AppError(
+      `你已选择暂不纳入的原始材料仍出现在${parkedFactsStillUsed.length}个曲线节点中，请先编辑或重推这些节点，或重新纳入材料。`,
+      400,
+      'STORY_PARKED_FACT_STILL_USED',
+    )
+  }
+  const missingDesignSections = getMissingStoryDesignSections(design, curve.beats)
+  if (missingDesignSections.length) {
+    throw new AppError(
+      `故事设计记录还缺少有效的${missingDesignSections.join('、')}节点，请补回或编辑后再确认。`,
+      400,
+      'STORY_DESIGN_INCOMPLETE',
+    )
   }
 
   const confirmedAt = Date.now()
@@ -436,13 +541,62 @@ export function materializeConfirmedCurve(
   const characterTension = confirmedCurve.beats.find((beat) => beat.kind === 'character-tension' && beat.status !== 'rejected')
   const midpoint = confirmedCurve.beats.find((beat) => beat.kind === 'midpoint-turn' && beat.status !== 'rejected')
   const materializedSeed = applyCurrentCurveEditToSeed(seed, confirmedCurve)
-  const confirmedGoal = getConfirmedCurveGoal(materializedSeed, currentState)
+  const parkedSourceFactTexts = (confirmedCurve.design?.sourceFacts ?? [])
+    .filter((fact) => fact.disposition === 'parked')
+    .map((fact) => fact.text.trim())
+  const isParkedMaterial = (value: string) => parkedSourceFactTexts.some((parked) => {
+    const normalizedValue = value.trim()
+    return normalizedValue === parked || (parked.length >= 4 && normalizedValue.includes(parked))
+  })
+  const narrativeSeed: StorySeed = {
+    ...materializedSeed,
+    lockedFacts: materializedSeed.lockedFacts.filter((fact) => !isParkedMaterial(fact)),
+    lockedGoal: materializedSeed.lockedGoal && !isParkedMaterial(materializedSeed.lockedGoal)
+      ? materializedSeed.lockedGoal
+      : null,
+  }
+  const confirmedGoal = getConfirmedCurveGoal(narrativeSeed, currentState)
   // Only the present obstacle and middle-development constraints belong in
   // the initial narrative state. The climax and resolution remain future
   // commitments in the confirmed curve, rather than facts that already
   // happened before the first turn.
-  const curveFacts = confirmedCurve.beats
-    .filter((beat) => beat.source !== 'user-input' && beat.status !== 'rejected')
+  // Materialize every source fact that the author elected to integrate. The
+  // curve is no longer merely a visible outline: these entries become the
+  // factual contract for subsequent turns. Parked material is deliberately
+  // absent even when it still appears in an older version record.
+  const seedFactStatements = new Set(seed.lockedFacts.map((statement) => statement.trim()))
+  const sourceFacts = (confirmedCurve.design?.sourceFacts ?? [])
+    .filter((fact) => fact.disposition === 'integrated')
+    // The narrative state already carries seed.lockedFacts as user-owned
+    // facts. Do not materialize the same statement a second time merely
+    // because the design ledger also tracks it.
+    .filter((fact) => !seedFactStatements.has(fact.text.trim()))
+    .map((fact): StoryFact => ({
+      id: `fact-source-${fact.id}`,
+      statement: fact.text,
+      source: 'confirmed-curve',
+      mutability: 'fixed',
+      ...(fact.coveredByBeatIds.length
+        ? {
+            // A source fact may also be referenced by the curve's future
+            // choices. Keep those references in the design ledger, but do
+            // not make a climax or resolution look like it already happened
+            // in the opening state.
+            originCurveBeatIds: fact.coveredByBeatIds.filter((beatId) => {
+              const beat = confirmedCurve.beats.find((candidate) => candidate.id === beatId)
+              return beat && ['current-state', 'character-tension', 'trigger', 'escalation', 'midpoint-turn'].includes(beat.kind)
+            }),
+          }
+        : {}),
+    }))
+  const sourceFactStatements = new Set(sourceFacts.map((fact) => fact.statement))
+  const proposalFactLimit = Math.max(0, 4 - sourceFacts.length)
+  const proposalFacts = confirmedCurve.beats
+    .filter((beat) => beat.status !== 'rejected')
+    .filter((beat) => (
+      beat.source === 'system-proposal'
+      || (beat.kind === 'current-state' && beat.source === 'user-edit')
+    ))
     .filter((beat) => (
       beat.kind === 'current-state'
       || beat.kind === 'character-tension'
@@ -450,7 +604,8 @@ export function materializeConfirmedCurve(
       || beat.kind === 'escalation'
       || beat.kind === 'midpoint-turn'
     ))
-    .slice(0, 4)
+    .filter((beat) => !sourceFactStatements.has(beat.detail))
+    .slice(0, proposalFactLimit)
     .map((beat): StoryFact => ({
       id: `fact-curve-${beat.id}`,
       statement: beat.detail,
@@ -458,6 +613,7 @@ export function materializeConfirmedCurve(
       mutability: 'fixed',
       originCurveBeatIds: [beat.id],
     }))
+  const curveFacts = [...sourceFacts, ...proposalFacts]
   const climaxAction: StoryAction = {
     id: 'curve-climax-action',
     intent: climax.detail,
@@ -504,13 +660,13 @@ export function materializeConfirmedCurve(
     climaxActionId: climaxAction.id,
     transition,
   }
-  const { systemDraft: _systemDraft, ...seedWithoutDraft } = seed
+  const { systemDraft: _systemDraft, ...seedWithoutDraft } = narrativeSeed
 
   return {
     seed: {
       ...seedWithoutDraft,
-      activeSituation: materializedSeed.activeSituation,
-      lockedGoal: materializedSeed.lockedGoal,
+      activeSituation: narrativeSeed.activeSituation,
+      lockedGoal: narrativeSeed.lockedGoal,
       creativeBrief: confirmedCurve.brief,
     },
     predicament,
@@ -540,11 +696,15 @@ export function createProvisionalCurveFallback(
   seed: StorySeed,
   brief: CreativeBrief,
   existingDesign?: StoryDesignRecord,
+  excludedProposalDetails: readonly string[] = [],
 ): ProvisionalCurve {
   const design = ensureStoryDesignRecord(existingDesign, idea, seed)
   const subject = getSubject(seed)
   const goal = getGoal(seed, idea)
-  const sourceFacts = design.sourceFacts
+  // A fact the author has parked belongs to this version's record, but is not
+  // eligible as material for a new proposal. This keeps a rejected direction
+  // from leaking back in through a deterministic fallback.
+  const sourceFacts = design.sourceFacts.filter((fact) => fact.disposition !== 'parked')
   const sourceFact = (index: number) => sourceFacts[Math.min(index, sourceFacts.length - 1)]
   const factText = (index: number, fallback: string) => sourceFact(index)?.text || fallback
   const factIds = (...indexes: number[]) => indexes
@@ -557,15 +717,27 @@ export function createProvisionalCurveFallback(
   const decisionMaterial = factText(4, commitmentMaterial)
   const hook = getFallbackHook(subject, goal, brief, pressureMaterial)
   const tension = getFallbackTension(subject, goal, brief, observedMaterial)
+  const currentStateDetail = seed.lockedGoal?.trim()
+    ? `${seed.activeSituation.trim() || idea.trim()}（当前目标：${seed.lockedGoal.trim()}）`
+    : seed.activeSituation.trim() || idea.trim()
   const now = Date.now()
+  const proposalBrief = getAlternativeFallbackBrief(brief, excludedProposalDetails)
   const beats: CurveBeat[] = [
-    createCurveBeat('current-state', '此刻想要什么', `${subject}此刻面对“${currentMaterial}”，想${goal}。`, 'user-input', 'confirmed', [], factIds(0)),
-    createCurveBeat('character-tension', '人物的矛盾', tension, 'system-proposal', 'proposed', ['beat-current-state'], factIds(1)),
-    createCurveBeat('trigger', '让目标停住的钩子', hook, 'system-proposal', 'proposed', ['beat-current-state', 'beat-character-tension'], factIds(2)),
+    createCurveBeat(
+      'current-state',
+      '此刻想要什么',
+      currentStateDetail,
+      'user-input',
+      'confirmed',
+      [],
+      deriveCoveredSourceFactIds(design, currentStateDetail),
+    ),
+    createCurveBeat('character-tension', '人物的矛盾', avoidExcludedProposal(tension, 'character-tension', subject, goal, proposalBrief, observedMaterial, excludedProposalDetails), 'system-proposal', 'proposed', ['beat-current-state'], factIds(1)),
+    createCurveBeat('trigger', '让目标停住的钩子', avoidExcludedProposal(hook, 'trigger', subject, goal, proposalBrief, pressureMaterial, excludedProposalDetails), 'system-proposal', 'proposed', ['beat-current-state', 'beat-character-tension'], factIds(2)),
     createCurveBeat(
       'escalation',
       '阻碍开始升级',
-      `暂定：“${commitmentMaterial}”让${subject}不能只解决眼前问题，继续${goal}必须明确取舍。`,
+      avoidExcludedProposal(getFallbackEscalation(subject, goal, brief, commitmentMaterial), 'escalation', subject, goal, proposalBrief, commitmentMaterial, excludedProposalDetails),
       'system-proposal',
       'proposed',
       ['beat-trigger'],
@@ -574,7 +746,7 @@ export function createProvisionalCurveFallback(
     createCurveBeat(
       'midpoint-turn',
       '中段转折',
-      `暂定：围绕“${decisionMaterial}”的一次应对暴露出更大的代价，${subject}必须重新判断真正想守住什么。`,
+      avoidExcludedProposal(getFallbackMidpointTurn(subject, goal, brief, decisionMaterial), 'midpoint-turn', subject, goal, proposalBrief, decisionMaterial, excludedProposalDetails),
       'system-proposal',
       'proposed',
       ['beat-escalation'],
@@ -583,7 +755,7 @@ export function createProvisionalCurveFallback(
     createCurveBeat(
       'climax-choice',
       '高潮时的选择与代价',
-      `暂定：${subject}必须围绕“${decisionMaterial}”主动放下更轻松的办法，并承担由此带来的代价。`,
+      avoidExcludedProposal(getFallbackClimaxChoice(subject, goal, brief, decisionMaterial), 'climax-choice', subject, goal, proposalBrief, decisionMaterial, excludedProposalDetails),
       'system-proposal',
       'proposed',
       ['beat-midpoint-turn'],
@@ -592,7 +764,7 @@ export function createProvisionalCurveFallback(
     createCurveBeat(
       'resolution',
       '结局中的变化',
-      `暂定：${subject}对“${currentMaterial}”得到一个有代价的回应，并在${getPrimaryToneLabel(brief)}上发生可见变化。`,
+      avoidExcludedProposal(getFallbackResolution(subject, goal, brief, currentMaterial), 'resolution', subject, goal, proposalBrief, currentMaterial, excludedProposalDetails),
       'system-proposal',
       'proposed',
       ['beat-climax-choice'],
@@ -639,12 +811,69 @@ function createCurveBeat(
   }
 }
 
+function getAlternativeFallbackBrief(
+  brief: CreativeBrief,
+  excludedProposalDetails: readonly string[],
+): CreativeBrief {
+  if (!excludedProposalDetails.length) return brief
+  const availableForces = dramaticForces.filter((force) => !brief.dramaticForces.includes(force))
+  const alternateForce = availableForces[0] ?? dramaticForces.find((force) => force !== brief.dramaticForces[0])
+  return alternateForce
+    ? { ...brief, dramaticForces: [alternateForce, ...brief.dramaticForces.filter((force) => force !== alternateForce).slice(0, 1)] }
+    : brief
+}
+
+function avoidExcludedProposal(
+  detail: string,
+  kind: CurveBeatKind,
+  subject: string,
+  goal: string,
+  alternateBrief: CreativeBrief,
+  material: string,
+  excludedProposalDetails: readonly string[],
+): string {
+  if (!repeatsExcludedProposal(detail, excludedProposalDetails)) return detail
+
+  const alternate = getFallbackDetailForKind(kind, subject, goal, alternateBrief, material)
+  if (!repeatsExcludedProposal(alternate, excludedProposalDetails)) return alternate
+
+  // This final guard keeps a rejected proposal from leaking through even if a
+  // future dramatic-mechanism template happens to converge with the original.
+  return `暂定：${subject}需要围绕“${material}”重新判断如何继续${goal}，具体代价留待作者决定。`
+}
+
+function getFallbackDetailForKind(
+  kind: CurveBeatKind,
+  subject: string,
+  goal: string,
+  brief: CreativeBrief,
+  material: string,
+): string {
+  switch (kind) {
+    case 'character-tension':
+      return getFallbackTension(subject, goal, brief, material)
+    case 'trigger':
+      return getFallbackHook(subject, goal, brief, material)
+    case 'escalation':
+      return getFallbackEscalation(subject, goal, brief, material)
+    case 'midpoint-turn':
+      return getFallbackMidpointTurn(subject, goal, brief, material)
+    case 'climax-choice':
+      return getFallbackClimaxChoice(subject, goal, brief, material)
+    case 'resolution':
+      return getFallbackResolution(subject, goal, brief, material)
+    case 'current-state':
+      return material
+  }
+}
+
 function parseModelCurve(
   value: unknown,
   idea: string,
   seed: StorySeed,
   brief: CreativeBrief,
   design: StoryDesignRecord,
+  excludedProposalDetails: readonly string[] = [],
 ): ProvisionalCurve | undefined {
   if (!isRecord(value) || !Array.isArray(value.beats)) return undefined
   if (value.beats.length < 5 || value.beats.length > 7) return undefined
@@ -660,6 +889,7 @@ function parseModelCurve(
       !detail
       || (!brief.allowSystemNamedCharacters && hasNewNamedCharacter(detail, seed))
       || (item.kind !== 'current-state' && !isSystemCurveProposalSafe(item.kind, detail))
+      || (item.kind !== 'current-state' && repeatsExcludedProposal(detail, excludedProposalDetails))
     ) return undefined
     seenKinds.add(item.kind)
     const sourceFactIds = parseSourceFactIds(item.sourceFactIds, design)
@@ -700,6 +930,23 @@ function parseModelCurve(
     createdAt: now,
     updatedAt: now,
   }
+}
+
+function normalizeProposalForComparison(value: string): string {
+  return value
+    .replace(/^暂定[：:]/u, '')
+    .replace(/[“”"']/gu, '')
+    .replace(/\s+/gu, '')
+    .trim()
+}
+
+function repeatsExcludedProposal(detail: string, excludedProposalDetails: readonly string[]): boolean {
+  const normalizedDetail = normalizeProposalForComparison(detail)
+  if (normalizedDetail.length < 12) return false
+  return excludedProposalDetails
+    .map(normalizeProposalForComparison)
+    .filter((value) => value.length >= 12)
+    .some((excluded) => normalizedDetail === excluded || normalizedDetail.includes(excluded) || excluded.includes(normalizedDetail))
 }
 
 function parseSourceFactIds(value: unknown, design: StoryDesignRecord): string[] | undefined {
@@ -751,8 +998,22 @@ function parseRegeneratedBeatDetail(
     || (!brief.allowSystemNamedCharacters && hasNewNamedCharacter(detail, seed))
     || !isCurveDetailGroundedToContext(detail, seed, curve, target)
     || !isSystemCurveProposalSafe(kind, detail)
+    || repeatsRejectedProposal(detail, curve)
   ) return undefined
   return detail
+}
+
+function repeatsRejectedProposal(detail: string, curve: ProvisionalCurve): boolean {
+  const normalizedDetail = detail.replace(/^暂定[：:]/u, '').replace(/[“”"']/gu, '').trim()
+  if (normalizedDetail.length < 12) return false
+  return [
+    ...curve.beats.filter((beat) => beat.status === 'rejected' && beat.source === 'system-proposal'),
+    ...(curve.rejectedProposals ?? []),
+  ]
+    .some((beat) => {
+      const rejected = beat.detail.replace(/^暂定[：:]/u, '').replace(/[“”"']/gu, '').trim()
+      return rejected.length >= 12 && normalizedDetail.includes(rejected)
+    })
 }
 
 function isCurveDetailGroundedToContext(
@@ -888,13 +1149,13 @@ function createReplacementDetail(
     case 'trigger':
       return getFallbackHook(subject, goal, brief, relatedFact)
     case 'escalation':
-      return `暂定：围绕“${premise}”，继续${goal}会让${subject}无法继续回避自己必须承担的取舍。`
+      return getFallbackEscalation(subject, goal, brief, premise)
     case 'midpoint-turn':
-      return `暂定：${subject}发现，若只按原办法处理“${premise}”，只能解决表面问题，真正的取舍会更清楚。`
+      return getFallbackMidpointTurn(subject, goal, brief, premise)
     case 'climax-choice':
-      return `暂定：为了回应“${premise}”，${subject}必须亲自作出一个不能再靠回避解决的决定，并接受它带来的具体代价。`
+      return getFallbackClimaxChoice(subject, goal, brief, premise)
     case 'resolution':
-      return `暂定：${subject}的决定让“${premise}”得到一个有代价的回应，也让最初目标出现可见变化。`
+      return getFallbackResolution(subject, goal, brief, premise)
   }
 }
 
@@ -918,16 +1179,119 @@ function getFallbackHook(subject: string, goal: string, brief: CreativeBrief, ma
     case 'surprise':
       return `暂定：“${material}”引出一个意外，迫使${subject}原本简单的选择变复杂。`
     case 'relationship-tension':
-      return `暂定：“${material}”迫使${subject}在${goal}前面对一段关系里尚未说开的分歧。`
+      return `暂定：“${material}”迫使${subject}在${stripLeadingLocationMarker(goal)}前面对一段关系里尚未说开的分歧。`
     case 'contrast':
     default:
       return `暂定：“${material}”让${subject}最擅长的办法恰好变成继续${goal}的新阻碍。`
   }
 }
 
+function getFallbackEscalation(subject: string, goal: string, brief: CreativeBrief, material: string): string {
+  switch (brief.dramaticForces[0]) {
+    case 'misunderstanding':
+      return `暂定：“${material}”的含义迟迟无法确认，${subject}若继续${goal}，就必须决定先澄清还是承担误解留下的后果。`
+    case 'cost':
+      return `暂定：“${material}”把继续${goal}的代价具体化，${subject}不能同时保住眼前便利和真正想完成的事。`
+    case 'surprise':
+      return `暂定：“${material}”改变了原本可用的时机或条件，${subject}必须在变化继续扩大前重排${goal}的办法。`
+    case 'relationship-tension':
+      return `暂定：“${material}”让${subject}继续${goal}时不得不回应一段关系里的承诺或分歧，回避本身也会成为代价。`
+    case 'contrast':
+    default:
+      return `暂定：“${material}”让${subject}最依赖的办法反而卡住${goal}，必须承认原来的强项解决不了这次问题。`
+  }
+}
+
+function getFallbackMidpointTurn(subject: string, goal: string, brief: CreativeBrief, material: string): string {
+  switch (brief.dramaticForces[0]) {
+    case 'misunderstanding':
+      return `暂定：${subject}发现，围绕“${material}”继续猜测只会放大误解，必须决定要不要改变处理${goal}的方式。`
+    case 'cost':
+      return `暂定：${subject}发现，“${material}”要求的放弃比预想更接近自己在意的东西，${goal}因此变成真正的取舍。`
+    case 'surprise':
+      return `暂定：${subject}发现，“${material}”带来的变化让原计划失效，必须重新判断还有什么条件可以依靠。`
+    case 'relationship-tension':
+      return `暂定：${subject}发现，若绕开“${material}”中的关系问题，${goal}即使完成也会留下无法回避的裂痕。`
+    case 'contrast':
+    default:
+      return `暂定：${subject}发现，继续用最熟悉的办法处理“${material}”只能遮住问题，必须承认自己真正害怕失去什么。`
+  }
+}
+
+function getFallbackClimaxChoice(subject: string, goal: string, brief: CreativeBrief, material: string): string {
+  switch (brief.dramaticForces[0]) {
+    case 'misunderstanding':
+      return `暂定：面对“${material}”，${subject}必须选择公开澄清并承担可能的误解，还是保留${goal}却让误会继续定义自己。`
+    case 'cost':
+      return `暂定：面对“${material}”，${subject}必须明确放下一项真实利益，才有资格继续${goal}。`
+    case 'surprise':
+      return `暂定：面对“${material}”造成的新条件，${subject}必须主动舍弃原计划的一部分，换取继续${goal}的可能。`
+    case 'relationship-tension':
+      return `暂定：面对“${material}”，${subject}必须亲自说清自己愿意承担什么，不能再用完成${goal}来替代关系里的回答。`
+    case 'contrast':
+    default:
+      return `暂定：面对“${material}”，${subject}必须放下最擅长也最省事的办法，以一种更诚实的选择继续${goal}。`
+  }
+}
+
+function getFallbackResolution(subject: string, goal: string, brief: CreativeBrief, material: string): string {
+  const toneChange = getResolutionToneChange(brief)
+  switch (brief.dramaticForces[0]) {
+    case 'misunderstanding':
+      return `暂定：${subject}对“${material}”作出的澄清或承担，让${goal}的结果不再由误会决定，并${toneChange}。`
+    case 'cost':
+      return `暂定：${subject}为“${material}”付出的代价，让${goal}得到一个明确结果，并${toneChange}。`
+    case 'surprise':
+      return `暂定：${subject}接受“${material}”带来的新条件后，让${goal}出现新的结果，并${toneChange}。`
+    case 'relationship-tension':
+      return `暂定：${subject}回应“${material}”中的关系问题后，让${goal}与这段关系都出现可见结果，并${toneChange}。`
+    case 'contrast':
+    default:
+      return `暂定：${subject}不再依赖旧办法来处理“${material}”，让${goal}出现可见结果，并${toneChange}。`
+  }
+}
+
+function getResolutionToneChange(brief: CreativeBrief): string {
+  if (brief.tones.includes('romance')) return '让心意与行动不再彼此回避'
+  if (brief.tones.includes('friendship')) return '让关系中的信任被重新看见'
+  if (brief.tones.includes('mystery')) return '让仍未解开的信息获得新的位置'
+  if (brief.tones.includes('comedy')) return '让尴尬的代价成为人物关系的新理解'
+  if (brief.tones.includes('fantasy')) return '让人物重新理解这件事背后的规则'
+  return `在${getPrimaryToneLabel(brief)}上发生可见变化`
+}
+
+function stripLeadingLocationMarker(value: string): string {
+  return value.replace(/^(?:在|于)/u, '')
+}
+
 function shortenCurveContext(value: string): string {
   const normalized = value.replace(/^暂定[：:]/u, '').trim()
   return normalized.length > 58 ? `${normalized.slice(0, 58)}…` : normalized || '此前的作者决定'
+}
+
+function extractCausalConsequence(value: string): string {
+  // System proposals usually quote the material they build on. Removing that
+  // quoted premise before selecting a clause keeps the next node focused on
+  // the consequence, instead of recursively embedding the whole prior node.
+  const withoutQuotedMaterial = value
+    .replace(/“[^”]*”/gu, '')
+    .replace(/"[^"]*"/gu, '')
+    .replace(/[“”"']/gu, '')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const clauses = withoutQuotedMaterial
+    .split(/[，。！？；\n]/u)
+    .map((clause) => clause.trim())
+    .filter(Boolean)
+  const usefulClause = clauses.find((clause) => (
+    clause.length >= 8
+    && !/^(?:面对|围绕|关于|由于|因此)$/u.test(clause)
+    && !/(?:发现|意识到|知道)$/u.test(clause)
+  ))
+  return usefulClause
+    ?? clauses.sort((left, right) => right.length - left.length)[0]
+    ?? withoutQuotedMaterial
+    ?? '上一步暴露的后果'
 }
 
 function getCausalAnchor(curve: ProvisionalCurve, target: CurveBeat, fallback: string): string {
@@ -943,9 +1307,15 @@ function getCausalAnchor(curve: ProvisionalCurve, target: CurveBeat, fallback: s
     upstream.push(candidate)
     queue.push(...candidate.dependsOn)
   }
-  const authorEdit = upstream.find((beat) => beat.source === 'user-edit')
   const nearest = upstream[0]
-  return shortenCurveContext(authorEdit?.detail ?? nearest?.detail ?? fallback)
+  // Carry the edit through the nearest causal beat. Looking all the way back
+  // to the first author edit for every downstream node makes each proposal
+  // repeat the same sentence instead of showing how the consequence evolves.
+  if (!nearest) return shortenCurveContext(fallback)
+  const anchor = nearest.source === 'user-edit'
+    ? nearest.detail
+    : extractCausalConsequence(nearest.detail)
+  return shortenCurveContext(anchor)
 }
 
 function getCurveVariationAxis(brief: CreativeBrief): StoryVariationAxis {
@@ -1067,14 +1437,19 @@ const curveGenerationSystemPrompt = `你是故事共创编辑。你的职责是�
 
 const curveBeatRegenerationSystemPrompt = `你是故事共创编辑。只重写一条暂定故事曲线节点，不写连续剧情。返回 JSON：{"detail":"暂定：一句可编辑的系统提案"}。detail 必须以“暂定：”开头，不得把提案写成既定事实、行动结果或长场景；未允许新增具名人物时不得新增名字。`
 
-function buildCurveGenerationPrompt(idea: string, seed: StorySeed, brief: CreativeBrief): string {
+function buildCurveGenerationPrompt(
+  idea: string,
+  seed: StorySeed,
+  brief: CreativeBrief,
+  excludedProposalDetails: readonly string[] = [],
+): string {
   const design = createStoryDesignRecord(idea, seed)
   return `用户原始想法：\n${idea}\n\n不可丢失的原始材料：\n${JSON.stringify(design.sourceFacts.map((fact) => ({ id: fact.id, text: fact.text })))}\n\n可保留的原始信息：\n${JSON.stringify({ subject: seed.subject, activeSituation: seed.activeSituation, lockedGoal: seed.lockedGoal, lockedFacts: seed.lockedFacts })}\n\n作者创意方向：\n${JSON.stringify({
     tones: brief.tones.map((tone) => creativeToneLabels[tone]),
     dramaticForces: brief.dramaticForces.map((force) => dramaticForceLabels[force]),
     allowSystemNamedCharacters: brief.allowSystemNamedCharacters,
     note: brief.note ?? '',
-  })}\n\n戏剧机制必须是：${getDramaticMechanism(brief)}。每条原始材料都必须至少被一个 beat 的 sourceFactIds 引用；无法纳入时不要编造，直接返回空数组让系统向作者说明。请给出一条主张明确、因果递进的暂定曲线。`
+  })}\n\n戏剧机制必须是：${getDramaticMechanism(brief)}。每条原始材料都必须至少被一个 beat 的 sourceFactIds 引用；无法纳入时不要编造，直接返回空数组让系统向作者说明。${excludedProposalDetails.length ? `以下提案已经被作者拒绝，不能在新版本中重现：${JSON.stringify(excludedProposalDetails)}` : ''}\n请给出一条主张明确、因果递进的暂定曲线。`
 }
 
 function buildCurveBeatRegenerationPrompt(
@@ -1090,5 +1465,9 @@ function buildCurveBeatRegenerationPrompt(
   const upstream = curve.beats
     .filter((beat) => target.dependsOn.includes(beat.id) && beat.status !== 'rejected')
     .map((beat) => ({ id: beat.id, detail: beat.detail }))
-  return `用户原始想法：${idea}\n原始信息：${JSON.stringify({ subject: seed.subject, lockedGoal: seed.lockedGoal, lockedFacts: seed.lockedFacts })}\n不可丢失的原始材料：${JSON.stringify(curve.design?.sourceFacts.filter((fact) => fact.disposition !== 'parked').map((fact) => ({ id: fact.id, text: fact.text })) ?? [])}\n创意方向：${JSON.stringify(curve.brief)}\n戏剧机制：${getDramaticMechanism(curve.brief)}\n当前有效曲线：${JSON.stringify(activeBeats)}\n目标节点的上游依据：${JSON.stringify(upstream)}\n\n只重写目标节点：${JSON.stringify({ id: target.id, kind: target.kind, title: target.title, detail: target.detail })}${feedback ? `\n作者说明：${feedback}` : ''}\n重写必须具体承接上游依据或作者说明；不得重新使用已拒绝内容，也不得用“更重要的事”“承担代价”等无对象的泛化句代替因果。`
+  const rejectedProposals = curve.beats
+    .filter((beat) => beat.status === 'rejected' && beat.source === 'system-proposal')
+    .map((beat) => ({ id: beat.id, detail: beat.detail }))
+  const rejectedHistory = (curve.rejectedProposals ?? []).map((beat) => ({ id: beat.id, detail: beat.detail }))
+  return `用户原始想法：${idea}\n原始信息：${JSON.stringify({ subject: seed.subject, lockedGoal: seed.lockedGoal, lockedFacts: seed.lockedFacts })}\n不可丢失的原始材料：${JSON.stringify(curve.design?.sourceFacts.filter((fact) => fact.disposition !== 'parked').map((fact) => ({ id: fact.id, text: fact.text })) ?? [])}\n创意方向：${JSON.stringify(curve.brief)}\n戏剧机制：${getDramaticMechanism(curve.brief)}\n当前有效曲线：${JSON.stringify(activeBeats)}\n目标节点的上游依据：${JSON.stringify(upstream)}\n已拒绝、不可重用的系统提案：${JSON.stringify([...rejectedProposals, ...rejectedHistory])}\n\n只重写目标节点：${JSON.stringify({ id: target.id, kind: target.kind, title: target.title, detail: target.detail })}${feedback ? `\n作者说明：${feedback}` : ''}\n重写必须具体承接上游依据或作者说明；不得重新使用已拒绝内容，也不得用“更重要的事”“承担代价”等无对象的泛化句代替因果。`
 }
