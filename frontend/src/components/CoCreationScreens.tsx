@@ -21,6 +21,19 @@ const forceOptions: Array<{ value: DramaticForce; label: string }> = [
   { value: 'relationship-tension', label: '关系拉扯' },
 ]
 
+const toneLabels = Object.fromEntries(toneOptions.map(({ value, label }) => [value, label])) as Record<CreativeTone, string>
+const forceLabels = Object.fromEntries(forceOptions.map(({ value, label }) => [value, label])) as Record<DramaticForce, string>
+
+const curveBeatKindLabels: Record<CurveBeat['kind'], string> = {
+  'current-state': '起 · 当前状态',
+  'character-tension': '人物 · 内在矛盾',
+  trigger: '起 · 触发钩子',
+  escalation: '承 · 阻碍升级',
+  'midpoint-turn': '转 · 中段转折',
+  'climax-choice': '转 · 高潮选择',
+  resolution: '合 · 结局变化',
+}
+
 const sourceLabel: Record<CurveBeat['source'], string> = {
   'user-input': '来自你的想法',
   'system-proposal': '系统提案',
@@ -155,12 +168,12 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
   const [regeneratingBeatId, setRegeneratingBeatId] = useState<string>()
   const [rejectingBeatId, setRejectingBeatId] = useState<string>()
   const [rejectReason, setRejectReason] = useState('')
-  const [feedback, setFeedback] = useState('')
+  const [regenerationFeedback, setRegenerationFeedback] = useState('')
   const [isRegeneratingAffected, setIsRegeneratingAffected] = useState(false)
   const [busyFactId, setBusyFactId] = useState<string>()
   const [showVersions, setShowVersions] = useState(false)
   const [authorEditBeatId, setAuthorEditBeatId] = useState<string>()
-  const [authorInstruction, setAuthorInstruction] = useState('')
+  const [authorInstructionText, setAuthorInstructionText] = useState('')
   const staleBeats = useMemo(() => curve?.beats.filter((beat) => beat.status === 'stale') ?? [], [curve])
   const staleProposalBeats = useMemo(() => staleBeats.filter((beat) => beat.source === 'system-proposal'), [staleBeats])
   const sourceFacts = curve?.design?.sourceFacts ?? []
@@ -231,20 +244,20 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
     setEditingValue(beat.detail)
   }
 
-  const saveEdit = async () => {
+  const saveBeatEdit = async () => {
     if (!editingBeatId || !editingValue.trim()) return
     await session.updateCurveBeat(editingBeatId, editingValue)
     setEditingBeatId(undefined)
   }
 
-  const regenerate = async (beatId: string, replaceRejected = false) => {
+  const regenerateBeat = async (beatId: string, replaceRejected = false) => {
     setRegeneratingBeatId(beatId)
-    await session.regenerateCurveBeat(beatId, feedback, replaceRejected)
+    await session.regenerateCurveBeat(beatId, regenerationFeedback, replaceRejected)
     setRegeneratingBeatId(undefined)
-    setFeedback('')
+    setRegenerationFeedback('')
   }
 
-  const reject = async (beatId: string) => {
+  const rejectBeat = async (beatId: string) => {
     setRejectingBeatId(beatId)
     await session.rejectCurveBeat(beatId, rejectReason.trim() || undefined)
     setRejectingBeatId(undefined)
@@ -253,22 +266,22 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
 
   const regenerateAffected = async () => {
     setIsRegeneratingAffected(true)
-    await session.regenerateAffectedCurveBeats(feedback.trim() || undefined)
+    await session.regenerateAffectedCurveBeats(regenerationFeedback.trim() || undefined)
     setIsRegeneratingAffected(false)
-    setFeedback('')
+    setRegenerationFeedback('')
   }
 
-  const setFactDisposition = async (fact: StorySourceFact, disposition: 'parked' | 'integrated') => {
+  const updateFactDisposition = async (fact: StorySourceFact, disposition: 'parked' | 'integrated') => {
     setBusyFactId(fact.id)
     await session.setSourceFactDisposition(fact.id, disposition)
     setBusyFactId(undefined)
   }
 
   const applyAuthorRevision = async () => {
-    if (!authorEditBeatId || !authorInstruction.trim()) return
-    await session.applyAuthorInstruction(authorEditBeatId, authorInstruction)
+    if (!authorEditBeatId || !authorInstructionText.trim()) return
+    await session.applyAuthorInstruction(authorEditBeatId, authorInstructionText)
     setAuthorEditBeatId(undefined)
-    setAuthorInstruction('')
+    setAuthorInstructionText('')
   }
 
   const canConfirm = !isLoading
@@ -294,32 +307,40 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
           {curve.generation && <div className={`curve-generation-notice ${curve.generation.origin === 'fact-preserving-fallback' ? 'is-fallback' : ''}`}><Sparkles size={15} /><span><strong>{curve.generation.origin === 'fact-preserving-fallback' ? '已使用保留原始材料的结构草案' : '已完成一版结构提案'}</strong>{curve.generation.notice ?? '新增内容仍是提案，尚未成为故事事实。'}</span></div>}
           <CurveDesignSummary curve={curve} />
           <div className="curve-track">
-            {curve.beats.map((beat, index) => {
-              const isEditing = editingBeatId === beat.id
-              const isRegenerating = regeneratingBeatId === beat.id
-              const isRejecting = rejectingBeatId === beat.id
-              const isAuthorEditing = authorEditBeatId === beat.id
-              const canReject = !session.confirmedCurve && beat.source === 'system-proposal' && beat.status !== 'rejected'
-              return <article className={`curve-beat curve-beat-${beat.kind} ${beat.status === 'stale' ? 'is-stale' : ''} ${beat.status === 'confirmed' ? 'is-confirmed' : ''} ${beat.status === 'rejected' ? 'is-rejected' : ''}`} key={beat.id}>
-                <div className="curve-beat-marker"><span>{String(index + 1).padStart(2, '0')}</span></div>
-                <div className="curve-beat-body">
-                  <div className="curve-beat-topline"><div><span className="curve-beat-kind">{getKindLabel(beat.kind)}</span><h2>{beat.title}</h2></div><span className={`curve-beat-status status-${beat.status}`}>{sourceLabel[beat.source]} · {statusLabel[beat.status]}</span></div>
-                  {isEditing ? <div className="curve-edit-box"><textarea value={editingValue} onChange={(event) => setEditingValue(event.target.value)} maxLength={220} disabled={isLoading} /><div><button className="text-action" type="button" onClick={() => setEditingBeatId(undefined)}>取消</button><button className="primary-action curve-save" type="button" onClick={() => void saveEdit()} disabled={isLoading || !editingValue.trim()}><Check size={15} /> 保存节点</button></div></div> : <p>{beat.detail}</p>}
-                  {beat.sourceFactIds && beat.sourceFactIds.length > 0 && <p className="curve-beat-facts"><Archive size={13} /> 原始材料：{beat.sourceFactIds.map((id) => sourceFacts.find((fact) => fact.id === id)?.text).filter(Boolean).join('；')}</p>}
-                  {!isEditing && !session.confirmedCurve && beat.status !== 'rejected' && <div className="curve-beat-actions"><button className="text-action" type="button" onClick={() => beginEdit(beat)} disabled={isLoading}><PencilLine size={14} /> 编辑节点</button>{beat.source === 'system-proposal' && <button className="text-action" type="button" onClick={() => void regenerate(beat.id)} disabled={isLoading || isRegenerating}>{isRegenerating ? '正在重推…' : <><RefreshCcw size={14} /> 重推提案</>}</button>}{canReject && <button className="text-action danger-action" type="button" onClick={() => setRejectingBeatId(isRejecting ? undefined : beat.id)} disabled={isLoading}><Trash2 size={14} /> 不采用</button>}</div>}
-                  {isRejecting && !session.confirmedCurve && <div className="curve-reject-box"><label><span>不采用的理由 <small>可选，帮助后续重推避开它</small></span><input value={rejectReason} onChange={(event) => setRejectReason(event.target.value)} maxLength={180} placeholder="例如：这条冲突不符合我想写的关系" disabled={isLoading} /></label><div><button className="text-action" type="button" onClick={() => { setRejectingBeatId(undefined); setRejectReason('') }}>取消</button><button className="text-action danger-action" type="button" onClick={() => void reject(beat.id)} disabled={isLoading}><Trash2 size={14} /> 确认不采用</button></div></div>}
-                  {beat.status === 'rejected' && <div className="curve-rejected-note"><span><Trash2 size={13} /> 这条系统提案不会进入确认后的故事事实，也不会作为后续重推依据。</span>{!session.confirmedCurve && <button className="text-action" type="button" onClick={() => void regenerate(beat.id, true)} disabled={isLoading || isRegenerating}>{isRegenerating ? '正在生成替代提案…' : <><RefreshCcw size={14} /> 生成替代提案</>}</button>}</div>}
-                  {session.confirmedCurve && beat.status !== 'rejected' && <div className="curve-beat-actions"><button className="text-action" type="button" onClick={() => { setAuthorEditBeatId(isAuthorEditing ? undefined : beat.id); setAuthorInstruction('') }} disabled={isLoading}><PencilLine size={14} /> 作者调整主线</button></div>}
-                  {isAuthorEditing && session.confirmedCurve && <div className="author-instruction-box"><label><span>作者指令 <small>这是改故事，不是角色行动</small></span><textarea value={authorInstruction} onChange={(event) => setAuthorInstruction(event.target.value)} maxLength={180} placeholder="例如：把这个转折改成两人必须先说清承诺，再决定是否继续。" disabled={isLoading} /></label><div><button className="text-action" type="button" onClick={() => setAuthorEditBeatId(undefined)}>取消</button><button className="primary-action curve-save" type="button" onClick={() => void applyAuthorRevision()} disabled={isLoading || !authorInstruction.trim()}>提交作者调整 <ArrowRight size={15} /></button></div></div>}
-                </div>
-              </article>
-            })}
+            {curve.beats.map((beat, index) => <CurveBeatCard
+              key={beat.id}
+              beat={beat}
+              index={index}
+              sourceFacts={sourceFacts}
+              isLoading={isLoading}
+              isConfirmed={Boolean(session.confirmedCurve)}
+              editingBeatId={editingBeatId}
+              editingValue={editingValue}
+              regeneratingBeatId={regeneratingBeatId}
+              rejectingBeatId={rejectingBeatId}
+              rejectReason={rejectReason}
+              authorEditBeatId={authorEditBeatId}
+              authorInstructionText={authorInstructionText}
+              onBeginEdit={beginEdit}
+              onEditingValueChange={setEditingValue}
+              onSaveEdit={() => void saveBeatEdit()}
+              onCancelEdit={() => setEditingBeatId(undefined)}
+              onRegenerate={(beatId, replaceRejected) => void regenerateBeat(beatId, replaceRejected)}
+              onToggleReject={(beatId) => setRejectingBeatId(rejectingBeatId === beatId ? undefined : beatId)}
+              onRejectReasonChange={setRejectReason}
+              onCancelReject={() => { setRejectingBeatId(undefined); setRejectReason('') }}
+              onReject={(beatId) => void rejectBeat(beatId)}
+              onToggleAuthorEdit={(beatId) => { setAuthorEditBeatId(authorEditBeatId === beatId ? undefined : beatId); setAuthorInstructionText('') }}
+              onAuthorInstructionChange={setAuthorInstructionText}
+              onCancelAuthorEdit={() => setAuthorEditBeatId(undefined)}
+              onApplyAuthorRevision={() => void applyAuthorRevision()}
+            />)}
           </div>
           {!session.confirmedCurve && <RejectedProposalHistory proposals={curve.rejectedProposals ?? []} />}
-          {!session.confirmedCurve && <label className="curve-feedback-field"><span>给系统一句修改方向 <small>可选，作用于下一次重推</small></span><input value={feedback} onChange={(event) => setFeedback(event.target.value)} placeholder="例如：让阻碍来自关系承诺，而不是新增一个外部人物" maxLength={180} disabled={isLoading} /></label>}
+          {!session.confirmedCurve && <label className="curve-feedback-field"><span>给系统一句修改方向 <small>可选，作用于下一次重推</small></span><input value={regenerationFeedback} onChange={(event) => setRegenerationFeedback(event.target.value)} placeholder="例如：让阻碍来自关系承诺，而不是新增一个外部人物" maxLength={180} disabled={isLoading} /></label>}
           {staleBeats.length > 0 && !session.confirmedCurve && <div className="curve-stale-panel"><p className="curve-stale-notice"><CircleAlert size={15} /> 你修改了上游节点，下面的节点需要重新看一遍。作者编辑不会被系统批量覆盖。</p><div className="curve-stale-actions">{staleProposalBeats.length > 0 && <button className="text-action" type="button" onClick={() => void regenerateAffected()} disabled={isLoading || isRegeneratingAffected}>{isRegeneratingAffected ? '正在重推受影响节点…' : <><RefreshCcw size={14} /> 重推受影响系统提案</>}</button>}{staleBeats.length - staleProposalBeats.length > 0 && <span>仍有作者编辑需要逐条重看。</span>}</div></div>}
           {missingDesignSections.length > 0 && !session.confirmedCurve && <p className="curve-stale-notice curve-design-warning"><CircleAlert size={15} /> 故事设计记录还缺少：{missingDesignSections.join('、')}。请恢复或编辑相关节点后再确认。</p>}
-          {!session.confirmedCurve && <SourceFactLedger facts={sourceFacts} beats={curve.beats} busyFactId={busyFactId} disabled={isLoading} onSetDisposition={setFactDisposition} />}
+          {!session.confirmedCurve && <SourceFactLedger facts={sourceFacts} beats={curve.beats} busyFactId={busyFactId} disabled={isLoading} onSetDisposition={updateFactDisposition} />}
           <div className="curve-version-bar"><button className="text-action" type="button" onClick={() => setShowVersions((visible) => !visible)} disabled={isLoading}><History size={15} /> {showVersions ? '收起版本记录' : `查看已保存版本（${session.curveVersions.length}）`}</button>{showVersions && <CurveVersionList versions={session.curveVersions} activeVersionId={session.activeCurveVersionId} disabled={isLoading} onSelect={(versionId) => void session.selectCurveVersion(versionId)} />}</div>
           <div className="curve-footer-actions">
             {session.confirmedCurve ? <button className="primary-action" type="button" onClick={() => hasStartedStoryPath ? void session.continueToStorySpine() : void session.startStorySpineFromCurve()} disabled={isLoading}>{isLoading ? '正在准备第一回合…' : hasStartedStoryPath ? '返回当前推演' : '确认主线后，开始第一回合'} <ArrowRight size={18} /></button> : <button className="primary-action" type="button" onClick={() => void session.confirmProvisionalCurve()} disabled={!canConfirm}>{isLoading ? '正在确认主线…' : '确认主线（仍停留在设计阶段）'} <Check size={18} /></button>}
@@ -328,6 +349,128 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
         <aside className="curve-aside"><div className="curve-aside-title"><Sparkles size={15} /> 共创边界</div><p>你在这里决定故事怎么发展。系统补出的名字、秘密和意外都只是可编辑提案；确认整条主线以前，不会创建连续剧情。</p><div className="curve-aside-divider" /><span>当前状态</span><strong>{session.confirmedCurve ? hasStartedStoryPath ? '主线已确认，正在推演当前情境' : '主线已确认，等待你开始第一回合' : '仍在设计主线，尚未创建剧情回合'}</strong>{!session.confirmedCurve && <small>拒绝的提案不会重新变成故事事实。原始材料必须被纳入，或由你明确暂不纳入。</small>}</aside>
       </div>
     </main>
+  )
+}
+
+interface CurveBeatCardProps {
+  beat: CurveBeat
+  index: number
+  sourceFacts: StorySourceFact[]
+  isLoading: boolean
+  isConfirmed: boolean
+  editingBeatId: string | undefined
+  editingValue: string
+  regeneratingBeatId: string | undefined
+  rejectingBeatId: string | undefined
+  rejectReason: string
+  authorEditBeatId: string | undefined
+  authorInstructionText: string
+  onBeginEdit: (beat: CurveBeat) => void
+  onEditingValueChange: (value: string) => void
+  onSaveEdit: () => void
+  onCancelEdit: () => void
+  onRegenerate: (beatId: string, replaceRejected?: boolean) => void
+  onToggleReject: (beatId: string) => void
+  onRejectReasonChange: (value: string) => void
+  onCancelReject: () => void
+  onReject: (beatId: string) => void
+  onToggleAuthorEdit: (beatId: string) => void
+  onAuthorInstructionChange: (value: string) => void
+  onCancelAuthorEdit: () => void
+  onApplyAuthorRevision: () => void
+}
+
+function CurveBeatCard({
+  beat,
+  index,
+  sourceFacts,
+  isLoading,
+  isConfirmed,
+  editingBeatId,
+  editingValue,
+  regeneratingBeatId,
+  rejectingBeatId,
+  rejectReason,
+  authorEditBeatId,
+  authorInstructionText,
+  onBeginEdit,
+  onEditingValueChange,
+  onSaveEdit,
+  onCancelEdit,
+  onRegenerate,
+  onToggleReject,
+  onRejectReasonChange,
+  onCancelReject,
+  onReject,
+  onToggleAuthorEdit,
+  onAuthorInstructionChange,
+  onCancelAuthorEdit,
+  onApplyAuthorRevision,
+}: CurveBeatCardProps) {
+  const isEditing = editingBeatId === beat.id
+  const isRegenerating = regeneratingBeatId === beat.id
+  const isRejecting = rejectingBeatId === beat.id
+  const isAuthorEditing = authorEditBeatId === beat.id
+  const canReject = !isConfirmed && beat.source === 'system-proposal' && beat.status !== 'rejected'
+  const sourceFactText = (beat.sourceFactIds ?? [])
+    .map((id) => sourceFacts.find((fact) => fact.id === id)?.text)
+    .filter((text): text is string => Boolean(text))
+    .join('；')
+
+  return (
+    <article className={`curve-beat curve-beat-${beat.kind} ${beat.status === 'stale' ? 'is-stale' : ''} ${beat.status === 'confirmed' ? 'is-confirmed' : ''} ${beat.status === 'rejected' ? 'is-rejected' : ''}`}>
+      <div className="curve-beat-marker"><span>{String(index + 1).padStart(2, '0')}</span></div>
+      <div className="curve-beat-body">
+        <div className="curve-beat-topline">
+          <div><span className="curve-beat-kind">{getKindLabel(beat.kind)}</span><h2>{beat.title}</h2></div>
+          <span className={`curve-beat-status status-${beat.status}`}>{sourceLabel[beat.source]} · {statusLabel[beat.status]}</span>
+        </div>
+        {isEditing ? (
+          <div className="curve-edit-box">
+            <textarea value={editingValue} onChange={(event) => onEditingValueChange(event.target.value)} maxLength={220} disabled={isLoading} />
+            <div>
+              <button className="text-action" type="button" onClick={onCancelEdit}>取消</button>
+              <button className="primary-action curve-save" type="button" onClick={onSaveEdit} disabled={isLoading || !editingValue.trim()}><Check size={15} /> 保存节点</button>
+            </div>
+          </div>
+        ) : <p>{beat.detail}</p>}
+        {sourceFactText && <p className="curve-beat-facts"><Archive size={13} /> 原始材料：{sourceFactText}</p>}
+        {!isEditing && !isConfirmed && beat.status !== 'rejected' && (
+          <div className="curve-beat-actions">
+            <button className="text-action" type="button" onClick={() => onBeginEdit(beat)} disabled={isLoading}><PencilLine size={14} /> 编辑节点</button>
+            {beat.source === 'system-proposal' && <button className="text-action" type="button" onClick={() => onRegenerate(beat.id)} disabled={isLoading || isRegenerating}>{isRegenerating ? '正在重推…' : <><RefreshCcw size={14} /> 重推提案</>}</button>}
+            {canReject && <button className="text-action danger-action" type="button" onClick={() => onToggleReject(beat.id)} disabled={isLoading}><Trash2 size={14} /> 不采用</button>}
+          </div>
+        )}
+        {isRejecting && !isConfirmed && (
+          <div className="curve-reject-box">
+            <label><span>不采用的理由 <small>可选，帮助后续重推避开它</small></span><input value={rejectReason} onChange={(event) => onRejectReasonChange(event.target.value)} maxLength={180} placeholder="例如：这条冲突不符合我想写的关系" disabled={isLoading} /></label>
+            <div>
+              <button className="text-action" type="button" onClick={onCancelReject}>取消</button>
+              <button className="text-action danger-action" type="button" onClick={() => onReject(beat.id)} disabled={isLoading}><Trash2 size={14} /> 确认不采用</button>
+            </div>
+          </div>
+        )}
+        {beat.status === 'rejected' && (
+          <div className="curve-rejected-note">
+            <span><Trash2 size={13} /> 这条系统提案不会进入确认后的故事事实，也不会作为后续重推依据。</span>
+            {!isConfirmed && <button className="text-action" type="button" onClick={() => onRegenerate(beat.id, true)} disabled={isLoading || isRegenerating}>{isRegenerating ? '正在生成替代提案…' : <><RefreshCcw size={14} /> 生成替代提案</>}</button>}
+          </div>
+        )}
+        {isConfirmed && beat.status !== 'rejected' && (
+          <div className="curve-beat-actions"><button className="text-action" type="button" onClick={() => onToggleAuthorEdit(beat.id)} disabled={isLoading}><PencilLine size={14} /> 作者调整主线</button></div>
+        )}
+        {isAuthorEditing && isConfirmed && (
+          <div className="author-instruction-box">
+            <label><span>作者指令 <small>这是改故事，不是角色行动</small></span><textarea value={authorInstructionText} onChange={(event) => onAuthorInstructionChange(event.target.value)} maxLength={180} placeholder="例如：把这个转折改成两人必须先说清承诺，再决定是否继续。" disabled={isLoading} /></label>
+            <div>
+              <button className="text-action" type="button" onClick={onCancelAuthorEdit}>取消</button>
+              <button className="primary-action curve-save" type="button" onClick={onApplyAuthorRevision} disabled={isLoading || !authorInstructionText.trim()}>提交作者调整 <ArrowRight size={15} /></button>
+            </div>
+          </div>
+        )}
+      </div>
+    </article>
   )
 }
 
@@ -371,22 +514,11 @@ function CurveVersionList({ versions, activeVersionId, disabled, onSelect }: { v
 }
 
 function getKindLabel(kind: CurveBeat['kind']): string {
-  const labels: Record<CurveBeat['kind'], string> = {
-    'current-state': '起 · 当前状态',
-    'character-tension': '人物 · 内在矛盾',
-    trigger: '起 · 触发钩子',
-    escalation: '承 · 阻碍升级',
-    'midpoint-turn': '转 · 中段转折',
-    'climax-choice': '转 · 高潮选择',
-    resolution: '合 · 结局变化',
-  }
-  return labels[kind]
+  return curveBeatKindLabels[kind]
 }
 
 function getBriefSummary(brief: CreativeBrief): string {
-  const labels: Record<CreativeTone, string> = { comedy: '搞笑', warm: '温暖', friendship: '友情', romance: '恋爱', growth: '成长', mystery: '悬疑', fantasy: '奇幻' }
-  const forceLabels: Record<DramaticForce, string> = { misunderstanding: '误会', cost: '代价', surprise: '意外', contrast: '反差', 'relationship-tension': '关系拉扯' }
-  return [...brief.tones.map((tone) => labels[tone]), ...brief.dramaticForces.map((force) => forceLabels[force])].join(' · ') || '开放方向'
+  return [...brief.tones.map((tone) => toneLabels[tone]), ...brief.dramaticForces.map((force) => forceLabels[force])].join(' · ') || '开放方向'
 }
 
 function getMissingDesignSections(

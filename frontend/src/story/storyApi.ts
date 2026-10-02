@@ -163,59 +163,77 @@ export function requestFullStory(request: StoryGenerationSessionRequest): Promis
   return postJson('/api/stories/generate', request, parseStoryResponse)
 }
 
-async function postJson<T>(
-  path: string,
-  body: unknown,
-  parseResponse: (payload: unknown) => T,
-): Promise<T> {
-  let response: Response
+interface JsonRequestOptions<T> {
+  path: string
+  method: 'GET' | 'POST'
+  body?: unknown
+  parseResponse: (payload: unknown) => T
+  networkErrorMessage: string
+  responseErrorMessage: string
+}
 
+async function requestJson<T>({
+  path,
+  method,
+  body,
+  parseResponse,
+  networkErrorMessage,
+  responseErrorMessage,
+}: JsonRequestOptions<T>): Promise<T> {
+  let response: Response
   try {
     response = await fetch(path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      method,
+      ...(method === 'POST'
+        ? {
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          }
+        : {}),
     })
   } catch {
-    throw new StoryApiError('暂时连不上故事服务，请确认后端已启动。', 'NETWORK_ERROR')
+    throw new StoryApiError(networkErrorMessage, 'NETWORK_ERROR')
   }
 
   const payload = await readJson(response)
   if (!response.ok) {
     const error = parseApiErrorResponse(payload)
     throw new StoryApiError(
-      error?.error.message ?? '生成没有完成，请稍后重试。',
+      error?.error.message ?? responseErrorMessage,
       error?.error.code,
       error?.error.conflictCoreContextPrefill,
       error?.error.systemDraftPrefill,
     )
   }
-
   return parseResponse(payload)
+}
+
+async function postJson<T>(
+  path: string,
+  body: unknown,
+  parseResponse: (payload: unknown) => T,
+): Promise<T> {
+  return requestJson({
+    path,
+    method: 'POST',
+    body,
+    parseResponse,
+    networkErrorMessage: '暂时连不上故事服务，请确认后端已启动。',
+    responseErrorMessage: '生成没有完成，请稍后重试。',
+  })
 }
 
 async function getJson<T>(
   path: string,
   parseResponse: (payload: unknown) => T,
 ): Promise<T> {
-  let response: Response
-  try {
-    response = await fetch(path, { method: 'GET' })
-  } catch {
-    throw new StoryApiError('暂时连不上故事服务，请确认后端已启动。', 'NETWORK_ERROR')
-  }
-
-  const payload = await readJson(response)
-  if (!response.ok) {
-    const error = parseApiErrorResponse(payload)
-    throw new StoryApiError(
-      error?.error.message ?? '读取故事会话没有完成，请稍后重试。',
-      error?.error.code,
-      error?.error.conflictCoreContextPrefill,
-      error?.error.systemDraftPrefill,
-    )
-  }
-  return parseResponse(payload)
+  return requestJson({
+    path,
+    method: 'GET',
+    parseResponse,
+    networkErrorMessage: '暂时连不上故事服务，请确认后端已启动。',
+    responseErrorMessage: '读取故事会话没有完成，请稍后重试。',
+  })
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -496,21 +514,12 @@ function parseProvisionalCurve(value: unknown): ProvisionalCurve {
   const record = expectRecord(value)
   const status = record.status
   if (status !== 'draft' && status !== 'confirmed' && status !== 'superseded') throwInvalidResponse()
-  const beats = parseCurveBeats(record.beats)
+  const fields = parseCurveFields(record)
   const instructions = parseAuthorInstructions(record.instructions)
-  const rejectedProposals = record.rejectedProposals === undefined
-    ? undefined
-    : parseCurveBeatList(record.rejectedProposals, 0, 100)
   return {
-    id: readIdentifier(record, 'id'),
-    title: readText(record, 'title'),
+    ...fields,
     status,
-    brief: parseCreativeBrief(record.brief),
-    beats,
-    ...(rejectedProposals ? { rejectedProposals } : {}),
     instructions,
-    ...(record.design === undefined ? {} : { design: parseStoryDesignRecord(record.design) }),
-    ...(record.generation === undefined ? {} : { generation: parseCurveGenerationMetadata(record.generation) }),
     createdAt: readTimestamp(record, 'createdAt'),
     updatedAt: readTimestamp(record, 'updatedAt'),
   }
@@ -518,16 +527,31 @@ function parseProvisionalCurve(value: unknown): ProvisionalCurve {
 
 function parseConfirmedCurve(value: unknown): ConfirmedCurve {
   const record = expectRecord(value)
+  const fields = parseCurveFields(record)
+  return {
+    ...fields,
+    provisionalCurveId: readIdentifier(record, 'provisionalCurveId'),
+    confirmedAt: readTimestamp(record, 'confirmedAt'),
+  }
+}
+
+type ParsedCurveFields = Pick<
+  ProvisionalCurve,
+  'id' | 'title' | 'brief' | 'beats' | 'rejectedProposals' | 'design' | 'generation'
+>
+
+function parseCurveFields(record: Record<string, unknown>): ParsedCurveFields {
+  const rejectedProposals = record.rejectedProposals === undefined
+    ? undefined
+    : parseCurveBeatList(record.rejectedProposals, 0, 100)
   return {
     id: readIdentifier(record, 'id'),
-    provisionalCurveId: readIdentifier(record, 'provisionalCurveId'),
     title: readText(record, 'title'),
     brief: parseCreativeBrief(record.brief),
     beats: parseCurveBeats(record.beats),
-    ...(record.rejectedProposals === undefined ? {} : { rejectedProposals: parseCurveBeatList(record.rejectedProposals, 0, 100) }),
+    ...(rejectedProposals ? { rejectedProposals } : {}),
     ...(record.design === undefined ? {} : { design: parseStoryDesignRecord(record.design) }),
     ...(record.generation === undefined ? {} : { generation: parseCurveGenerationMetadata(record.generation) }),
-    confirmedAt: readTimestamp(record, 'confirmedAt'),
   }
 }
 

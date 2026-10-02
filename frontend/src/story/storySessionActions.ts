@@ -36,6 +36,7 @@ import type {
   StoryTurnResponse,
   StoryView,
   StoryCurveVersion,
+  StoryCurveMutationResponse,
 } from './types'
 import type { StoryStageRequest } from './useStoryStageRequest'
 
@@ -184,75 +185,40 @@ function createCoCreationActions(
   }
 
   const updateCurveBeat = async (beatId: string, detail: string) => {
-    const curve = state.provisionalCurve
-    if (!curve || !state.storyId) return
-    await runStorySessionStageRequest(
-      state,
-      stage,
-      () => requestCurveBeatUpdate({
-        storyId: state.storyId!,
-        revision: state.revision,
-        curveId: curve.id,
-        beatId,
-        detail,
-      }),
-      (result) => {
-        applyCurveMutationState(state, result)
-      },
-    )
+    await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => (
+      requestCurveBeatUpdate({ storyId, revision, curveId, beatId, detail })
+    ))
   }
 
   const regenerateCurveBeat = async (beatId: string, feedback?: string, replaceRejected = false) => {
-    const curve = state.provisionalCurve
-    if (!curve || !state.storyId) return
-    await runStorySessionStageRequest(
-      state,
-      stage,
-      () => requestCurveBeatRegeneration({
-        storyId: state.storyId!,
-        revision: state.revision,
-        curveId: curve.id,
+    await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => (
+      requestCurveBeatRegeneration({
+        storyId,
+        revision,
+        curveId,
         beatId,
         feedback: feedback?.trim() || undefined,
         replaceRejected: replaceRejected || undefined,
-      }),
-      (result) => {
-        applyCurveMutationState(state, result)
-      },
-    )
+      })
+    ))
   }
 
   const rejectCurveBeat = async (beatId: string, reason?: string) => {
-    const curve = state.provisionalCurve
-    if (!curve || !state.storyId) return
-    await runStorySessionStageRequest(
-      state,
-      stage,
-      () => requestCurveBeatRejection({ storyId: state.storyId!, revision: state.revision, curveId: curve.id, beatId, reason }),
-      (result) => applyCurveMutationState(state, result),
-    )
+    await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => (
+      requestCurveBeatRejection({ storyId, revision, curveId, beatId, reason })
+    ))
   }
 
   const regenerateAffectedCurveBeats = async (feedback?: string) => {
-    const curve = state.provisionalCurve
-    if (!curve || !state.storyId) return
-    await runStorySessionStageRequest(
-      state,
-      stage,
-      () => requestAffectedCurveRegeneration({ storyId: state.storyId!, revision: state.revision, curveId: curve.id, feedback }),
-      (result) => applyCurveMutationState(state, result),
-    )
+    await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => (
+      requestAffectedCurveRegeneration({ storyId, revision, curveId, feedback })
+    ))
   }
 
   const setSourceFactDisposition = async (factId: string, disposition: 'parked' | 'integrated') => {
-    const curve = state.provisionalCurve
-    if (!curve || !state.storyId) return
-    await runStorySessionStageRequest(
-      state,
-      stage,
-      () => requestSourceFactDisposition({ storyId: state.storyId!, revision: state.revision, curveId: curve.id, factId, disposition }),
-      (result) => applyCurveMutationState(state, result),
-    )
+    await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => (
+      requestSourceFactDisposition({ storyId, revision, curveId, factId, disposition })
+    ))
   }
 
   const confirmProvisionalCurve = async () => {
@@ -767,6 +733,29 @@ async function runStorySessionStageRequest<Result extends StorySessionVersion>(
     state.applySessionVersion(result)
     applyResult(result)
   })
+}
+
+interface CurveMutationRequestContext {
+  storyId: string
+  revision: number
+  curveId: string
+}
+
+async function runCurveMutationRequest(
+  state: StorySessionState,
+  stage: StoryStageRequest,
+  request: (context: CurveMutationRequestContext) => Promise<StoryCurveMutationResponse>,
+): Promise<void> {
+  const curve = state.provisionalCurve
+  const storyId = state.storyId
+  if (!curve || !storyId) return
+
+  await runStorySessionStageRequest(
+    state,
+    stage,
+    () => request({ storyId, revision: state.revision, curveId: curve.id }),
+    (result) => applyCurveMutationState(state, result),
+  )
 }
 
 async function loadConflictCoresFromApi(

@@ -28,7 +28,7 @@ export function getMissingStoryDesignSections(
   beats: readonly CurveBeat[],
 ): StoryDesignSection[] {
   if (!design) return ['冲突核心', '具体困境', '故事两端', '中间发展']
-  const activeIds = new Set(beats.filter((beat) => beat.status !== 'rejected').map((beat) => beat.id))
+  const activeIds = getActiveBeatIds(beats)
   const sections: Array<[StoryDesignSection, string[], number]> = [
     ['冲突核心', design.conflictCoreBeatIds, 2],
     ['具体困境', design.predicamentBeatIds, 2],
@@ -75,18 +75,10 @@ export function updateStoryDesignCoverage(
   design: StoryDesignRecord,
   beats: readonly CurveBeat[],
 ): StoryDesignRecord {
-  const activeBeats = beats.filter((beat) => beat.status !== 'rejected')
+  const activeBeats = getActiveBeats(beats)
   const activeBeatIds = new Set(activeBeats.map((beat) => beat.id))
   const sourceFacts = design.sourceFacts.map((fact) => {
-    const currentCoverage = activeBeats
-      .filter((beat) => {
-        // An explicit sourceFactIds list is the author's/model's traceability
-        // claim. Do not let a long verbatim paragraph in one node accidentally
-        // claim every smaller fact as covered.
-        if (beat.sourceFactIds !== undefined) return beat.sourceFactIds.includes(fact.id)
-        return isBeatGroundedToFact(beat, fact)
-      })
-      .map((beat) => beat.id)
+    const liveCoverage = getLiveCoverageForFact(activeBeats, fact)
     // Keep prior coverage as an audit trail while a fact is parked. This is
     // intentionally not treated as live use by getParkedStorySourceFactsUsedByCurve;
     // it lets the author see what the material used to support and restore it
@@ -94,20 +86,16 @@ export function updateStoryDesignCoverage(
     const coveredByBeatIds = fact.disposition === 'parked'
       ? [...new Set([
           ...fact.coveredByBeatIds.filter((id) => activeBeatIds.has(id)),
-          ...currentCoverage,
+          ...liveCoverage,
         ])]
-      : currentCoverage
+      : liveCoverage
     return {
       ...fact,
       coveredByBeatIds,
       // Parking is an explicit author decision. A later edit may show where
       // the material could fit again, but it remains parked until the author
       // explicitly brings it back into this version.
-      disposition: fact.disposition === 'parked'
-        ? 'parked' as const
-        : coveredByBeatIds.length
-          ? 'integrated' as const
-          : 'needs-author-decision' as const,
+      disposition: getUpdatedFactDisposition(fact.disposition, coveredByBeatIds),
     }
   })
   return {
@@ -134,7 +122,7 @@ export function getParkedStorySourceFactsUsedByCurve(
   beats: readonly CurveBeat[],
 ): StorySourceFact[] {
   if (!design) return []
-  const activeBeats = beats.filter((beat) => beat.status !== 'rejected')
+  const activeBeats = getActiveBeats(beats)
   return design.sourceFacts.filter((fact) => (
     fact.disposition === 'parked'
     && activeBeats.some((beat) => (
@@ -170,15 +158,7 @@ export function setStorySourceFactDisposition(
 
 export function getDramaticMechanism(brief: CreativeBrief): string {
   const force = brief.dramaticForces[0]
-  const tonalFocus = brief.tones.includes('mystery')
-    ? '，并把信息缺口留给作者继续判断'
-    : brief.tones.includes('romance')
-      ? '，并让人物不能再回避心意与行动的差距'
-      : brief.tones.includes('friendship')
-        ? '，并让关系中的信任成为选择的一部分'
-        : brief.tones.includes('comedy')
-          ? '，并让尴尬的后果推动人物重新选择'
-          : ''
+  const tonalFocus = getTonalMechanismFocus(brief)
   switch (force) {
     case 'misunderstanding': return `误会让原计划失效；主角必须在澄清与承担误解的后果之间决定${tonalFocus}`
     case 'cost': return `目标必须以一项具体放弃或承担为代价；主角不能同时保住两件重要的事${tonalFocus}`
@@ -234,6 +214,42 @@ function collectAuthorSourceFacts(idea: string, seed: StorySeed): string[] {
 
 function isBeatGroundedToFact(beat: CurveBeat, fact: StorySourceFact): boolean {
   return isTextGroundedToFact(beat.detail, fact.text)
+}
+
+function getActiveBeats(beats: readonly CurveBeat[]): CurveBeat[] {
+  return beats.filter((beat) => beat.status !== 'rejected')
+}
+
+function getActiveBeatIds(beats: readonly CurveBeat[]): Set<string> {
+  return new Set(getActiveBeats(beats).map((beat) => beat.id))
+}
+
+function getLiveCoverageForFact(beats: readonly CurveBeat[], fact: StorySourceFact): string[] {
+  return beats
+    .filter((beat) => {
+      // An explicit sourceFactIds list is the author's/model's traceability
+      // claim. Do not let a long verbatim paragraph in one node accidentally
+      // claim every smaller fact as covered.
+      if (beat.sourceFactIds !== undefined) return beat.sourceFactIds.includes(fact.id)
+      return isBeatGroundedToFact(beat, fact)
+    })
+    .map((beat) => beat.id)
+}
+
+function getUpdatedFactDisposition(
+  current: StorySourceFact['disposition'],
+  coveredByBeatIds: readonly string[],
+): StorySourceFact['disposition'] {
+  if (current === 'parked') return 'parked'
+  return coveredByBeatIds.length ? 'integrated' : 'needs-author-decision'
+}
+
+function getTonalMechanismFocus(brief: CreativeBrief): string {
+  if (brief.tones.includes('mystery')) return '，并把信息缺口留给作者继续判断'
+  if (brief.tones.includes('romance')) return '，并让人物不能再回避心意与行动的差距'
+  if (brief.tones.includes('friendship')) return '，并让关系中的信任成为选择的一部分'
+  if (brief.tones.includes('comedy')) return '，并让尴尬的后果推动人物重新选择'
+  return ''
 }
 
 function isTextGroundedToFact(detail: string, fact: string): boolean {
