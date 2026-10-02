@@ -998,9 +998,38 @@ function parseRegeneratedBeatDetail(
     || (!brief.allowSystemNamedCharacters && hasNewNamedCharacter(detail, seed))
     || !isCurveDetailGroundedToContext(detail, seed, curve, target)
     || !isSystemCurveProposalSafe(kind, detail)
+    || repeatsFullUpstreamDetail(detail, curve, target)
+    || hasNestedCurveQuotes(detail)
     || repeatsRejectedProposal(detail, curve)
   ) return undefined
   return detail
+}
+
+function repeatsFullUpstreamDetail(
+  detail: string,
+  curve: ProvisionalCurve,
+  target: CurveBeat,
+): boolean {
+  const normalizedDetail = normalizeCausalText(detail)
+  if (normalizedDetail.length < 18) return false
+  return curve.beats
+    .filter((beat) => target.dependsOn.includes(beat.id) && beat.status !== 'rejected')
+    .map((beat) => normalizeCausalText(beat.detail))
+    .filter((upstream) => upstream.length >= 18)
+    .some((upstream) => normalizedDetail.includes(upstream))
+}
+
+function hasNestedCurveQuotes(detail: string): boolean {
+  return /“[^”]*“[^”]*”[^”]*”/u.test(detail)
+    || /"[^"]*"[^"]*"/u.test(detail)
+}
+
+function normalizeCausalText(value: string): string {
+  return value
+    .replace(/^暂定[：:]/u, '')
+    .replace(/[“”"']/gu, '')
+    .replace(/\s+/gu, '')
+    .trim()
 }
 
 function repeatsRejectedProposal(detail: string, curve: ProvisionalCurve): boolean {
@@ -1435,7 +1464,7 @@ const curveGenerationSystemPrompt = `你是故事共创编辑。你的职责是�
 
 输出：{"title":"简短标题","beats":[{"kind":"current-state","title":"节点标题","detail":"节点内容","dependsOn":[],"sourceFactIds":["source-fact-1"]}]}`
 
-const curveBeatRegenerationSystemPrompt = `你是故事共创编辑。只重写一条暂定故事曲线节点，不写连续剧情。返回 JSON：{"detail":"暂定：一句可编辑的系统提案"}。detail 必须以“暂定：”开头，不得把提案写成既定事实、行动结果或长场景；未允许新增具名人物时不得新增名字。`
+const curveBeatRegenerationSystemPrompt = `你是故事共创编辑。只重写一条暂定故事曲线节点，不写连续剧情。返回 JSON：{"detail":"暂定：一句可编辑的系统提案"}。detail 必须以“暂定：”开头，不得把提案写成既定事实、行动结果或长场景；未允许新增具名人物时不得新增名字。只提取上游节点的核心后果，用新的短语推进下一层；不要复制上游整句，不要出现嵌套引号。`
 
 function buildCurveGenerationPrompt(
   idea: string,
@@ -1469,5 +1498,5 @@ function buildCurveBeatRegenerationPrompt(
     .filter((beat) => beat.status === 'rejected' && beat.source === 'system-proposal')
     .map((beat) => ({ id: beat.id, detail: beat.detail }))
   const rejectedHistory = (curve.rejectedProposals ?? []).map((beat) => ({ id: beat.id, detail: beat.detail }))
-  return `用户原始想法：${idea}\n原始信息：${JSON.stringify({ subject: seed.subject, lockedGoal: seed.lockedGoal, lockedFacts: seed.lockedFacts })}\n不可丢失的原始材料：${JSON.stringify(curve.design?.sourceFacts.filter((fact) => fact.disposition !== 'parked').map((fact) => ({ id: fact.id, text: fact.text })) ?? [])}\n创意方向：${JSON.stringify(curve.brief)}\n戏剧机制：${getDramaticMechanism(curve.brief)}\n当前有效曲线：${JSON.stringify(activeBeats)}\n目标节点的上游依据：${JSON.stringify(upstream)}\n已拒绝、不可重用的系统提案：${JSON.stringify([...rejectedProposals, ...rejectedHistory])}\n\n只重写目标节点：${JSON.stringify({ id: target.id, kind: target.kind, title: target.title, detail: target.detail })}${feedback ? `\n作者说明：${feedback}` : ''}\n重写必须具体承接上游依据或作者说明；不得重新使用已拒绝内容，也不得用“更重要的事”“承担代价”等无对象的泛化句代替因果。`
+  return `用户原始想法：${idea}\n原始信息：${JSON.stringify({ subject: seed.subject, lockedGoal: seed.lockedGoal, lockedFacts: seed.lockedFacts })}\n不可丢失的原始材料：${JSON.stringify(curve.design?.sourceFacts.filter((fact) => fact.disposition !== 'parked').map((fact) => ({ id: fact.id, text: fact.text })) ?? [])}\n创意方向：${JSON.stringify(curve.brief)}\n戏剧机制：${getDramaticMechanism(curve.brief)}\n当前有效曲线：${JSON.stringify(activeBeats)}\n目标节点的上游依据：${JSON.stringify(upstream)}\n已拒绝、不可重用的系统提案：${JSON.stringify([...rejectedProposals, ...rejectedHistory])}\n\n只重写目标节点：${JSON.stringify({ id: target.id, kind: target.kind, title: target.title, detail: target.detail })}${feedback ? `\n作者说明：${feedback}` : ''}\n重写必须具体承接上游依据或作者说明；只保留核心后果并推进新的因果，不得复制上游整句或使用嵌套引号；不得重新使用已拒绝内容，也不得用“更重要的事”“承担代价”等无对象的泛化句代替因果。`
 }
