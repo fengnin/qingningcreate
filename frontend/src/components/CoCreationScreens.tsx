@@ -2,6 +2,10 @@ import { useMemo, useState } from 'react'
 import { Archive, ArrowLeft, ArrowRight, Check, CircleAlert, History, PencilLine, RefreshCcw, Sparkles, Trash2 } from 'lucide-react'
 import type { CreativeBrief, CreativeTone, CurveBeat, DramaticForce, StoryCurveVersion, StorySourceFact } from '../story/types'
 import type { StorySession } from '../story/useStorySession'
+import {
+  getMissingStoryDesignSectionLabels,
+  STORY_DESIGN_SECTION_RULES,
+} from '../../../shared/story-design-rules.mjs'
 
 const toneOptions: Array<{ value: CreativeTone; label: string; detail: string }> = [
   { value: 'comedy', label: '搞笑', detail: '用反差和尴尬制造轻快张力' },
@@ -179,9 +183,10 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
   const sourceFacts = curve?.design?.sourceFacts ?? []
   const unresolvedFacts = sourceFacts.filter((fact) => fact.disposition === 'needs-author-decision')
   const hasStartedStoryPath = Boolean(session.currentTurn)
-  const missingDesignSections = curve?.design
-    ? getMissingDesignSections(curve.design, curve.beats)
-    : ['冲突核心', '具体困境', '故事两端', '中间发展']
+  const missingDesignSections = getMissingStoryDesignSectionLabels(
+    curve?.design,
+    new Set(curve?.beats.filter((beat) => beat.status !== 'rejected').map((beat) => beat.id)),
+  )
 
   if (!curve) {
     return (
@@ -477,12 +482,7 @@ function CurveBeatCard({
 function CurveDesignSummary({ curve }: { curve: NonNullable<StorySession['provisionalCurve']> }) {
   const design = curve.design
   if (!design) return null
-  const sections: Array<[string, string[]]> = [
-    ['冲突核心', design.conflictCoreBeatIds],
-    ['具体困境', design.predicamentBeatIds],
-    ['故事两端', design.storyEndBeatIds],
-    ['中间发展', design.middleDevelopmentBeatIds],
-  ]
+  const sections = STORY_DESIGN_SECTION_RULES.map(({ key, label }) => [label, design[key]] as const)
   const beatLabel = (id: string) => curve.beats.find((beat) => beat.id === id)?.title ?? id
   return <section className="curve-design-summary" aria-label="故事设计记录覆盖情况"><header><strong>故事设计记录</strong><small>这条曲线同时承接冲突、困境、两端和中间发展</small></header><div>{sections.map(([label, ids]) => <span key={label}><b>{label}</b>{ids.map(beatLabel).join('、') || '待补充'}</span>)}</div></section>
 }
@@ -519,22 +519,6 @@ function getKindLabel(kind: CurveBeat['kind']): string {
 
 function getBriefSummary(brief: CreativeBrief): string {
   return [...brief.tones.map((tone) => toneLabels[tone]), ...brief.dramaticForces.map((force) => forceLabels[force])].join(' · ') || '开放方向'
-}
-
-function getMissingDesignSections(
-  design: NonNullable<NonNullable<StorySession['provisionalCurve']>['design']>,
-  beats: CurveBeat[],
-): string[] {
-  const activeIds = new Set(beats.filter((beat) => beat.status !== 'rejected').map((beat) => beat.id))
-  const sections: Array<[string, string[], number]> = [
-    ['冲突核心', design.conflictCoreBeatIds, 2],
-    ['具体困境', design.predicamentBeatIds, 2],
-    ['故事两端', design.storyEndBeatIds, 3],
-    ['中间发展', design.middleDevelopmentBeatIds, 2],
-  ]
-  return sections
-    .filter(([, ids, minimum]) => ids.filter((id) => activeIds.has(id)).length < minimum)
-    .map(([label]) => label)
 }
 
 function RouteIcon() {

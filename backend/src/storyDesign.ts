@@ -6,6 +6,8 @@ import type {
   StorySeed,
   StorySourceFact,
 } from '../../shared/story-contract.js'
+import { getMissingStoryDesignSectionLabels } from '../../shared/story-design-rules.mjs'
+import type { StoryDesignSectionLabel } from '../../shared/story-design-rules.mjs'
 import { AppError } from './qwen.js'
 
 const structuralBeatIds = {
@@ -15,7 +17,7 @@ const structuralBeatIds = {
   middleDevelopment: ['beat-escalation', 'beat-midpoint-turn', 'beat-climax-choice'],
 } as const
 
-export type StoryDesignSection = '冲突核心' | '具体困境' | '故事两端' | '中间发展'
+export type StoryDesignSection = StoryDesignSectionLabel
 
 /**
  * Return design areas that no longer have enough live curve material. The
@@ -27,17 +29,7 @@ export function getMissingStoryDesignSections(
   design: StoryDesignRecord | undefined,
   beats: readonly CurveBeat[],
 ): StoryDesignSection[] {
-  if (!design) return ['冲突核心', '具体困境', '故事两端', '中间发展']
-  const activeIds = getActiveBeatIds(beats)
-  const sections: Array<[StoryDesignSection, string[], number]> = [
-    ['冲突核心', design.conflictCoreBeatIds, 2],
-    ['具体困境', design.predicamentBeatIds, 2],
-    ['故事两端', design.storyEndBeatIds, 3],
-    ['中间发展', design.middleDevelopmentBeatIds, 2],
-  ]
-  return sections
-    .filter(([, ids, minimum]) => ids.filter((id) => activeIds.has(id)).length < minimum)
-    .map(([label]) => label)
+  return getMissingStoryDesignSectionLabels(design, getActiveBeatIds(beats))
 }
 
 /**
