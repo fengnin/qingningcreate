@@ -211,7 +211,7 @@ export async function generateProvisionalCurve(
   try {
     const modelOutput = await requestQwenJson({
       systemPrompt: curveGenerationSystemPrompt,
-      userPrompt: buildCurveGenerationPrompt(idea, seed, brief, excludedProposalDetails),
+      userPrompt: buildCurveGenerationPrompt(idea, seed, brief, design, excludedProposalDetails),
       temperature: 0.72,
       maxTokens: 1_700,
     })
@@ -1594,9 +1594,9 @@ function buildCurveGenerationPrompt(
   idea: string,
   seed: StorySeed,
   brief: CreativeBrief,
+  design: StoryDesignRecord,
   excludedProposalDetails: readonly string[] = [],
 ): string {
-  const design = createStoryDesignRecord(idea, seed)
   return `用户原始想法：\n${idea}\n\n不可丢失的原始材料：\n${JSON.stringify(design.sourceFacts.map((fact) => ({ id: fact.id, text: fact.text })))}\n\n可保留的原始信息：\n${JSON.stringify({ subject: seed.subject, activeSituation: seed.activeSituation, lockedGoal: seed.lockedGoal, lockedFacts: seed.lockedFacts })}\n\n作者创意方向：\n${JSON.stringify({
     tones: brief.tones.map((tone) => creativeToneLabels[tone]),
     dramaticForces: brief.dramaticForces.map((force) => dramaticForceLabels[force]),
