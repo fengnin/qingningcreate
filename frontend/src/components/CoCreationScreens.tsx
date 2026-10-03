@@ -189,59 +189,7 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
   )
 
   if (!curve) {
-    return (
-      <main className="app-shell setup-shell cocreation-shell curve-shell">
-        <header className="setup-header cocreation-header">
-          <button className="opening-back" type="button" onClick={session.goBack} disabled={isLoading}>
-            <ArrowLeft size={18} /> 返回创意方向
-          </button>
-          <div className="cocreation-step"><span>02</span><strong>暂定故事曲线</strong><small>先看见要讲什么，再进入剧情</small></div>
-        </header>
-        <section className="curve-empty-state" aria-live="polite">
-          {isLoading ? (
-            <div className="curve-building" role="status" aria-busy="true">
-              <div className="curve-building-copy">
-                <p className="eyebrow"><Sparkles size={15} /> 故事地图</p>
-                <h1>故事正在<br />成形</h1>
-                <p>把你的创意方向整理成一条可编辑的主线。</p>
-                <div className="curve-building-status"><span aria-hidden="true" /><strong>正在梳理故事的起、承、转、合</strong></div>
-              </div>
-              <div className="curve-building-map" aria-hidden="true">
-                <span className="curve-building-rail" />
-                <span className="curve-building-traveler" />
-                {[
-                  ['01', '起点'],
-                  ['02', '拉扯'],
-                  ['03', '转折'],
-                  ['04', '选择'],
-                  ['05', '变化'],
-                ].map(([number, label], index) => (
-                  <div className={`curve-building-node ${index === 0 ? 'is-origin' : ''}`} key={number}>
-                    <span>{number}</span>
-                    <strong>{label}</strong>
-                  </div>
-                ))}
-              </div>
-              <blockquote className="curve-building-idea">
-                <span>原始念头</span>
-                <p>{session.trimmedIdea}</p>
-              </blockquote>
-            </div>
-          ) : session.stageError ? (
-            <div className="generation-error" role="alert">
-              <CircleAlert size={17} />
-              <div>
-                <strong>曲线没有生成</strong>
-                <p>{session.stageError}</p>
-                <button className="primary-action" type="button" onClick={() => void session.retryCurrentStage()}>
-                  再试一次 <RefreshCcw size={16} />
-                </button>
-              </div>
-            </div>
-          ) : <p className="setup-lead">暂定故事曲线还没有生成。</p>}
-        </section>
-      </main>
-    )
+    return <ProvisionalCurveEmptyState session={session} isLoading={isLoading} />
   }
 
   const beginEdit = (beat: CurveBeat) => {
@@ -353,6 +301,62 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
         </section>
         <aside className="curve-aside"><div className="curve-aside-title"><Sparkles size={15} /> 共创边界</div><p>你在这里决定故事怎么发展。系统补出的名字、秘密和意外都只是可编辑提案；确认整条主线以前，不会创建连续剧情。</p><div className="curve-aside-divider" /><span>当前状态</span><strong>{session.confirmedCurve ? hasStartedStoryPath ? '主线已确认，正在推演当前情境' : '主线已确认，等待你开始第一回合' : '仍在设计主线，尚未创建剧情回合'}</strong>{!session.confirmedCurve && <small>拒绝的提案不会重新变成故事事实。原始材料必须被纳入，或由你明确暂不纳入。</small>}</aside>
       </div>
+    </main>
+  )
+}
+
+function ProvisionalCurveEmptyState({ session, isLoading }: { session: StorySession; isLoading: boolean }) {
+  return (
+    <main className="app-shell setup-shell cocreation-shell curve-shell">
+      <header className="setup-header cocreation-header">
+        <button className="opening-back" type="button" onClick={session.goBack} disabled={isLoading}>
+          <ArrowLeft size={18} /> 返回创意方向
+        </button>
+        <div className="cocreation-step"><span>02</span><strong>暂定故事曲线</strong><small>先看见要讲什么，再进入剧情</small></div>
+      </header>
+      <section className="curve-empty-state" aria-live="polite">
+        {isLoading ? (
+          <div className="curve-building" role="status" aria-busy="true">
+            <div className="curve-building-copy">
+              <p className="eyebrow"><Sparkles size={15} /> 故事地图</p>
+              <h1>故事正在<br />成形</h1>
+              <p>把你的创意方向整理成一条可编辑的主线。</p>
+              <div className="curve-building-status"><span aria-hidden="true" /><strong>正在梳理故事的起、承、转、合</strong></div>
+            </div>
+            <div className="curve-building-map" aria-hidden="true">
+              <span className="curve-building-rail" />
+              <span className="curve-building-traveler" />
+              {[
+                ['01', '起点'],
+                ['02', '拉扯'],
+                ['03', '转折'],
+                ['04', '选择'],
+                ['05', '变化'],
+              ].map(([number, label], index) => (
+                <div className={`curve-building-node ${index === 0 ? 'is-origin' : ''}`} key={number}>
+                  <span>{number}</span>
+                  <strong>{label}</strong>
+                </div>
+              ))}
+            </div>
+            <blockquote className="curve-building-idea">
+              <span>原始念头</span>
+              <p>{session.trimmedIdea}</p>
+            </blockquote>
+          </div>
+        ) : session.stageError ? (
+          <div className="generation-error" role="alert">
+            <CircleAlert size={17} />
+            <div>
+              <strong>曲线没有生成</strong>
+              <p>{session.stageError}</p>
+              <button className="primary-action" type="button" onClick={() => void session.retryCurrentStage()}>
+                再试一次 <RefreshCcw size={16} />
+              </button>
+            </div>
+          </div>
+        ) : <p className="setup-lead">暂定故事曲线还没有生成。</p>}
+      </section>
     </main>
   )
 }
