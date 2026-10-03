@@ -840,9 +840,7 @@ export function createProvisionalCurveFallback(
   const decisionMaterial = factText(4, commitmentMaterial)
   const hook = getFallbackTriggerDetail(subject, goal, brief, pressureMaterial)
   const tension = getFallbackTension(subject, goal, brief, observedMaterial)
-  const currentStateDetail = seed.lockedGoal?.trim()
-    ? `${seed.activeSituation.trim() || idea.trim()}（当前目标：${seed.lockedGoal.trim()}）`
-    : seed.activeSituation.trim() || idea.trim()
+  const currentStateDetail = getCurrentState(seed, idea)
   const now = Date.now()
   const proposalBrief = getAlternativeFallbackBrief(brief, excludedProposalDetails)
   const proposalContext: FallbackProposalContext = {
