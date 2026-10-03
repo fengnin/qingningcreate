@@ -28,6 +28,7 @@ import type {
   StoryPredicament,
   StoryPredicamentApproach,
   StorySeed,
+  StorySourceFact,
   StoryTransition,
   StoryVariationAxis,
 } from '../../shared/story-contract.js'
@@ -832,9 +833,6 @@ export function createProvisionalCurveFallback(
   const sourceFacts = design.sourceFacts.filter((fact) => fact.disposition !== 'parked')
   const sourceFact = (index: number) => sourceFacts[Math.min(index, sourceFacts.length - 1)]
   const factText = (index: number, fallback: string) => sourceFact(index)?.text || fallback
-  const factIds = (...indexes: number[]) => indexes
-    .map((index) => sourceFact(index)?.id)
-    .filter((id): id is string => Boolean(id))
   const currentMaterial = factText(0, `${subject}想${goal}`)
   const observedMaterial = factText(1, currentMaterial)
   const pressureMaterial = factText(2, observedMaterial)
@@ -847,6 +845,13 @@ export function createProvisionalCurveFallback(
     : seed.activeSituation.trim() || idea.trim()
   const now = Date.now()
   const proposalBrief = getAlternativeFallbackBrief(brief, excludedProposalDetails)
+  const proposalContext: FallbackProposalContext = {
+    sourceFacts,
+    subject,
+    goal,
+    proposalBrief,
+    excludedProposalDetails,
+  }
   const beats: CurveBeat[] = [
     createCurveBeat(
       'current-state',
@@ -857,44 +862,54 @@ export function createProvisionalCurveFallback(
       [],
       deriveCoveredSourceFactIds(design, currentStateDetail),
     ),
-    createCurveBeat('character-tension', '人物的矛盾', avoidExcludedProposal(tension, 'character-tension', subject, goal, proposalBrief, observedMaterial, excludedProposalDetails), 'system-proposal', 'proposed', ['beat-current-state'], factIds(1)),
-    createCurveBeat('trigger', '让目标停住的钩子', avoidExcludedProposal(hook, 'trigger', subject, goal, proposalBrief, pressureMaterial, excludedProposalDetails), 'system-proposal', 'proposed', ['beat-current-state', 'beat-character-tension'], factIds(2)),
-    createCurveBeat(
-      'escalation',
-      '阻碍开始升级',
-      avoidExcludedProposal(getFallbackEscalation(subject, goal, brief, commitmentMaterial), 'escalation', subject, goal, proposalBrief, commitmentMaterial, excludedProposalDetails),
-      'system-proposal',
-      'proposed',
-      ['beat-trigger'],
-      factIds(3),
-    ),
-    createCurveBeat(
-      'midpoint-turn',
-      '中段转折',
-      avoidExcludedProposal(getFallbackMidpointTurn(subject, goal, brief, decisionMaterial), 'midpoint-turn', subject, goal, proposalBrief, decisionMaterial, excludedProposalDetails),
-      'system-proposal',
-      'proposed',
-      ['beat-escalation'],
-      factIds(4),
-    ),
-    createCurveBeat(
-      'climax-choice',
-      '高潮时的选择与代价',
-      avoidExcludedProposal(getFallbackClimaxChoice(subject, goal, brief, decisionMaterial), 'climax-choice', subject, goal, proposalBrief, decisionMaterial, excludedProposalDetails),
-      'system-proposal',
-      'proposed',
-      ['beat-midpoint-turn'],
-      factIds(4),
-    ),
-    createCurveBeat(
-      'resolution',
-      '结局中的变化',
-      avoidExcludedProposal(getFallbackResolution(subject, goal, brief, currentMaterial), 'resolution', subject, goal, proposalBrief, currentMaterial, excludedProposalDetails),
-      'system-proposal',
-      'proposed',
-      ['beat-climax-choice'],
-      factIds(0, 4),
-    ),
+    createFallbackProposalBeat(proposalContext, {
+      kind: 'character-tension',
+      title: '人物的矛盾',
+      detail: tension,
+      material: observedMaterial,
+      dependsOn: ['beat-current-state'],
+      sourceFactIndexes: [1],
+    }),
+    createFallbackProposalBeat(proposalContext, {
+      kind: 'trigger',
+      title: '让目标停住的钩子',
+      detail: hook,
+      material: pressureMaterial,
+      dependsOn: ['beat-current-state', 'beat-character-tension'],
+      sourceFactIndexes: [2],
+    }),
+    createFallbackProposalBeat(proposalContext, {
+      kind: 'escalation',
+      title: '阻碍开始升级',
+      detail: getFallbackEscalation(subject, goal, brief, commitmentMaterial),
+      material: commitmentMaterial,
+      dependsOn: ['beat-trigger'],
+      sourceFactIndexes: [3],
+    }),
+    createFallbackProposalBeat(proposalContext, {
+      kind: 'midpoint-turn',
+      title: '中段转折',
+      detail: getFallbackMidpointTurn(subject, goal, brief, decisionMaterial),
+      material: decisionMaterial,
+      dependsOn: ['beat-escalation'],
+      sourceFactIndexes: [4],
+    }),
+    createFallbackProposalBeat(proposalContext, {
+      kind: 'climax-choice',
+      title: '高潮时的选择与代价',
+      detail: getFallbackClimaxChoice(subject, goal, brief, decisionMaterial),
+      material: decisionMaterial,
+      dependsOn: ['beat-midpoint-turn'],
+      sourceFactIndexes: [4],
+    }),
+    createFallbackProposalBeat(proposalContext, {
+      kind: 'resolution',
+      title: '结局中的变化',
+      detail: getFallbackResolution(subject, goal, brief, currentMaterial),
+      material: currentMaterial,
+      dependsOn: ['beat-climax-choice'],
+      sourceFactIndexes: [0, 4],
+    }),
   ]
   const coveredDesign = updateStoryDesignCoverage(design, beats)
   return {
@@ -913,6 +928,51 @@ export function createProvisionalCurveFallback(
     createdAt: now,
     updatedAt: now,
   }
+}
+
+interface FallbackProposalContext {
+  sourceFacts: StorySourceFact[]
+  subject: string
+  goal: string
+  proposalBrief: CreativeBrief
+  excludedProposalDetails: readonly string[]
+}
+
+interface FallbackProposalSpec {
+  kind: Exclude<CurveBeatKind, 'current-state'>
+  title: string
+  detail: string
+  material: string
+  dependsOn: string[]
+  sourceFactIndexes: number[]
+}
+
+function createFallbackProposalBeat(
+  context: FallbackProposalContext,
+  spec: FallbackProposalSpec,
+): CurveBeat {
+  const sourceFact = (index: number) => context.sourceFacts[Math.min(index, context.sourceFacts.length - 1)]
+  const sourceFactIds = spec.sourceFactIndexes
+    .map((index) => sourceFact(index)?.id)
+    .filter((id): id is string => Boolean(id))
+
+  return createCurveBeat(
+    spec.kind,
+    spec.title,
+    avoidExcludedProposal(
+      spec.detail,
+      spec.kind,
+      context.subject,
+      context.goal,
+      context.proposalBrief,
+      spec.material,
+      context.excludedProposalDetails,
+    ),
+    'system-proposal',
+    'proposed',
+    spec.dependsOn,
+    sourceFactIds,
+  )
 }
 
 function createCurveBeat(
