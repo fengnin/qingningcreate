@@ -14,6 +14,7 @@ import type {
   StorySeed,
   StorySessionVersion,
   StoryCurveVersion,
+  StoryCurveRegenerationPreview,
   StoryActionProposal,
   StorySessionSnapshot,
   StoryTurn,
@@ -90,6 +91,8 @@ export interface StorySessionState {
   setActiveCurveVersionId: (versionId: string | undefined) => void
   pendingActionProposal: StoryActionProposal | undefined
   setPendingActionProposal: (proposal: StoryActionProposal | undefined) => void
+  pendingCurveRegeneration: StoryCurveRegenerationPreview | undefined
+  setPendingCurveRegeneration: (preview: StoryCurveRegenerationPreview | undefined) => void
   applySessionSnapshot: (snapshot: StorySessionSnapshot) => void
   restoreAttempted: boolean
   restoreLoading: boolean
@@ -155,6 +158,7 @@ export function useStorySessionState(): StorySessionState {
   const [curveVersions, setCurveVersions] = useState<StoryCurveVersion[]>([])
   const [activeCurveVersionId, setActiveCurveVersionId] = useState<string>()
   const [pendingActionProposal, setPendingActionProposal] = useState<StoryActionProposal>()
+  const [pendingCurveRegeneration, setPendingCurveRegeneration] = useState<StoryCurveRegenerationPreview>()
   const [restoreAttempted, setRestoreAttempted] = useState(false)
   const [restoreLoading, setRestoreLoading] = useState(false)
   const [restoreError, setRestoreError] = useState<string>()
@@ -189,6 +193,7 @@ export function useStorySessionState(): StorySessionState {
     setSelectedTurnOptionId(undefined)
     setPendingTurnRequest(undefined)
     setGeneratedStory(undefined)
+    setPendingCurveRegeneration(undefined)
   }
 
   const clearPredicamentSelection = () => {
@@ -211,6 +216,7 @@ export function useStorySessionState(): StorySessionState {
     setCreativeBrief(createEmptyCreativeBrief())
     setProvisionalCurve(undefined)
     setConfirmedCurve(undefined)
+    setPendingCurveRegeneration(undefined)
   }
 
   const resetPlanAfter = (resetPoint: StoryPlanResetPoint) => {
@@ -264,6 +270,7 @@ export function useStorySessionState(): StorySessionState {
     setTurnHistory(snapshot.history)
     setCurrentTurn(snapshot.currentTurn)
     setPendingActionProposal(snapshot.pendingActionProposal)
+    setPendingCurveRegeneration(snapshot.pendingCurveRegeneration)
     setGeneratedStory(snapshot.generatedStory)
     setSelectedTurnOptionId(undefined)
     setPendingTurnRequest(undefined)
@@ -333,6 +340,8 @@ export function useStorySessionState(): StorySessionState {
     setActiveCurveVersionId,
     pendingActionProposal,
     setPendingActionProposal,
+    pendingCurveRegeneration,
+    setPendingCurveRegeneration,
     applySessionSnapshot,
     restoreAttempted,
     restoreLoading,

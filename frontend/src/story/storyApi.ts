@@ -47,6 +47,9 @@ import type {
   StoryCurveSpineResponse,
   StoryCurveStartSpineRequest,
   StoryCurveVersion,
+  StoryCurveFoundation,
+  StoryCurveRegenerationPreview,
+  StoryCurveRegenerationResolutionRequest,
   StoryCurveVersionSelectionRequest,
   StorySessionSnapshot,
   StoryAuthorInstructionRequest,
@@ -97,6 +100,12 @@ export function requestAffectedCurveRegeneration(
   request: StoryCurveDependenciesRegenerationRequest,
 ): Promise<StoryCurveMutationResponse> {
   return postJson('/api/story/curve/regenerate-affected', request, parseStoryCurveMutationResponse)
+}
+
+export function requestCurveRegenerationResolution(
+  request: StoryCurveRegenerationResolutionRequest,
+): Promise<StoryCurveMutationResponse> {
+  return postJson('/api/story/curve/regenerate-affected/resolve', request, parseStoryCurveMutationResponse)
 }
 
 export function requestSourceFactDisposition(
@@ -272,8 +281,40 @@ function parseStoryCurveMutationResponse(payload: unknown): StoryCurveMutationRe
     ...parseStorySessionVersion(record),
     curve: parseProvisionalCurve(record.curve),
     affectedBeatIds: readIdentifierList(record, 'affectedBeatIds'),
+    ...(record.pendingCurveRegeneration === undefined
+      ? {}
+      : { pendingCurveRegeneration: parseCurveRegenerationPreview(record.pendingCurveRegeneration) }),
     ...(record.curveVersions === undefined ? {} : { curveVersions: parseCurveVersions(record.curveVersions) }),
     ...(record.activeCurveVersionId === undefined ? {} : { activeCurveVersionId: readIdentifier(record, 'activeCurveVersionId') }),
+  }
+}
+
+function parseCurveRegenerationPreview(value: unknown): StoryCurveRegenerationPreview {
+  const record = expectRecord(value)
+  const items = record.items
+  if (!Array.isArray(items)) throwInvalidResponse()
+  return {
+    id: readIdentifier(record, 'id'),
+    curveId: readIdentifier(record, 'curveId'),
+    items: items.map((item) => {
+      const itemRecord = expectRecord(item)
+      const kind = itemRecord.kind
+      if (
+        kind !== 'current-state' && kind !== 'character-tension' && kind !== 'trigger'
+        && kind !== 'escalation' && kind !== 'midpoint-turn' && kind !== 'climax-choice' && kind !== 'resolution'
+      ) throwInvalidResponse()
+      return {
+        id: readIdentifier(itemRecord, 'id'),
+        beatId: readIdentifier(itemRecord, 'beatId'),
+        title: readText(itemRecord, 'title'),
+        kind,
+        oldDetail: readText(itemRecord, 'oldDetail'),
+        newDetail: readText(itemRecord, 'newDetail'),
+        newSourceFactIds: readIdentifierList(itemRecord, 'newSourceFactIds'),
+        ...(itemRecord.newCausalAnchor === undefined ? {} : { newCausalAnchor: readText(itemRecord, 'newCausalAnchor') }),
+      }
+    }),
+    createdAt: readTimestamp(record, 'createdAt'),
   }
 }
 
@@ -316,6 +357,9 @@ function parseStorySessionSnapshot(payload: unknown): StorySessionSnapshot {
     history: parseTurnHistory(record.history),
     ...(currentTurn ? { currentTurn } : {}),
     ...(record.pendingActionProposal === undefined ? {} : { pendingActionProposal: parseStoryActionProposal(record.pendingActionProposal) }),
+    ...(record.pendingCurveRegeneration === undefined
+      ? {}
+      : { pendingCurveRegeneration: parseCurveRegenerationPreview(record.pendingCurveRegeneration) }),
     ...(generatedStory ? { generatedStory } : {}),
     resumeStage,
   }
@@ -537,7 +581,7 @@ function parseConfirmedCurve(value: unknown): ConfirmedCurve {
 
 type ParsedCurveFields = Pick<
   ProvisionalCurve,
-  'id' | 'title' | 'brief' | 'beats' | 'rejectedProposals' | 'design' | 'generation'
+  'id' | 'title' | 'brief' | 'beats' | 'rejectedProposals' | 'design' | 'foundation' | 'generation'
 >
 
 function parseCurveFields(record: Record<string, unknown>): ParsedCurveFields {
@@ -551,7 +595,69 @@ function parseCurveFields(record: Record<string, unknown>): ParsedCurveFields {
     beats: parseCurveBeats(record.beats),
     ...(rejectedProposals ? { rejectedProposals } : {}),
     ...(record.design === undefined ? {} : { design: parseStoryDesignRecord(record.design) }),
+    ...(record.foundation === undefined ? {} : { foundation: parseStoryCurveFoundation(record.foundation) }),
     ...(record.generation === undefined ? {} : { generation: parseCurveGenerationMetadata(record.generation) }),
+  }
+}
+
+function parseStoryCurveFoundation(value: unknown): StoryCurveFoundation {
+  const record = expectRecord(value)
+  const conflictCore = expectRecord(record.conflictCore)
+  const predicament = expectRecord(record.predicament)
+  const middleDevelopment = expectRecord(record.middleDevelopment)
+  const storyEnds = expectRecord(record.storyEnds)
+  const approach = expectRecord(record.approach)
+  const sourceFactIdsRecord = record.sourceFactIds === undefined ? undefined : expectRecord(record.sourceFactIds)
+  const beatSignaturesRecord = record.beatSignatures === undefined ? undefined : expectRecord(record.beatSignatures)
+  const beatSignatures = beatSignaturesRecord
+    ? Object.fromEntries(Object.entries(beatSignaturesRecord).map(([id, signature]) => {
+        if (typeof signature !== 'string' || !signature.trim()) throwInvalidResponse()
+        return [id, signature]
+      }))
+    : undefined
+  return {
+    conflictCore: {
+      goal: readText(conflictCore, 'goal'),
+      obstacle: readText(conflictCore, 'obstacle'),
+      tradeoff: readText(conflictCore, 'tradeoff'),
+    },
+    preservedGoal: readText(record, 'preservedGoal'),
+    predicament: {
+      title: readText(predicament, 'title'),
+      variationAxis: readStoryVariationAxis(predicament.variationAxis),
+      immediateSituation: readText(predicament, 'immediateSituation'),
+      obstacle: readText(predicament, 'obstacle'),
+      tradeoff: readText(predicament, 'tradeoff'),
+      urgency: readText(predicament, 'urgency'),
+      choice: readText(predicament, 'choice'),
+      plausibleCost: readText(predicament, 'plausibleCost'),
+    },
+    middleDevelopment: {
+      escalation: readText(middleDevelopment, 'escalation'),
+      midpoint: readText(middleDevelopment, 'midpoint'),
+      climaxPressure: readText(middleDevelopment, 'climaxPressure'),
+    },
+    storyEnds: {
+      opening: readText(storyEnds, 'opening'),
+      openingClue: readText(storyEnds, 'openingClue'),
+      climax: readText(storyEnds, 'climax'),
+      resolution: readText(storyEnds, 'resolution'),
+      cost: readText(storyEnds, 'cost'),
+      promise: readText(storyEnds, 'promise'),
+    },
+    approach: {
+      intent: readText(approach, 'intent'),
+      cost: readText(approach, 'cost'),
+    },
+    ...(sourceFactIdsRecord ? {
+      sourceFactIds: {
+        conflictCore: readIdentifierList(sourceFactIdsRecord, 'conflictCore'),
+        predicament: readIdentifierList(sourceFactIdsRecord, 'predicament'),
+        middleDevelopment: readIdentifierList(sourceFactIdsRecord, 'middleDevelopment'),
+        storyEnds: readIdentifierList(sourceFactIdsRecord, 'storyEnds'),
+      },
+    } : {}),
+    ...(beatSignatures ? { beatSignatures } : {}),
   }
 }
 
@@ -594,6 +700,7 @@ function parseStoryDesignRecord(value: unknown): NonNullable<ProvisionalCurve['d
     predicamentBeatIds: readIdentifierList(record, 'predicamentBeatIds'),
     storyEndBeatIds: readIdentifierList(record, 'storyEndBeatIds'),
     middleDevelopmentBeatIds: readIdentifierList(record, 'middleDevelopmentBeatIds'),
+    ...(record.foundation === undefined ? {} : { foundation: parseStoryCurveFoundation(record.foundation) }),
   }
 }
 

@@ -121,6 +121,72 @@ export interface StoryDesignRecord {
   predicamentBeatIds: string[]
   storyEndBeatIds: string[]
   middleDevelopmentBeatIds: string[]
+  /**
+   * The concrete design map assembled while the curve is still a draft. It is
+   * intentionally stored beside the beat references so confirmation freezes a
+   * design that was already reviewed, rather than reconstructing one later.
+   */
+  foundation?: StoryCurveFoundation
+}
+
+/**
+ * The reviewed, pre-story foundation shared by the curve and the first turn.
+ * These are design statements, not path facts: they become narrative state
+ * only after the author confirms the curve and starts the spine.
+ */
+export interface StoryCurveFoundation {
+  /** The concrete conflict core that the author is reviewing before confirmation. */
+  conflictCore: {
+    goal: string
+    obstacle: string
+    tradeoff: string
+  }
+  preservedGoal: string
+  predicament: {
+    title: string
+    variationAxis: StoryVariationAxis
+    immediateSituation: string
+    obstacle: string
+    tradeoff: string
+    urgency: string
+    choice: string
+    plausibleCost: string
+  }
+  middleDevelopment: {
+    escalation: string
+    midpoint: string
+    climaxPressure: string
+  }
+  storyEnds: {
+    opening: string
+    openingClue: string
+    climax: string
+    resolution: string
+    cost: string
+    promise: string
+  }
+  approach: {
+    intent: string
+    cost: string
+  }
+  /**
+   * Explicit traceability for the design map. A fact may support more than one
+   * design section, but every live fact must appear in at least one section.
+   * Legacy persisted curves may omit this field and are treated as requiring
+   * regeneration before confirmation.
+   */
+  sourceFactIds?: {
+    conflictCore: string[]
+    predicament: string[]
+    middleDevelopment: string[]
+    storyEnds: string[]
+  }
+  /**
+   * Content fingerprints make the frozen foundation conditional on the exact
+   * draft the author reviewed. They prevent a stale foundation from being
+   * reused after an out-of-band beat edit.
+   */
+  beatSignatures?: Record<string, string>
 }
 
 export interface CurveGenerationMetadata {
@@ -139,6 +205,12 @@ export interface CurveBeat {
   dependsOn: string[]
   /** User-source facts this node must preserve or develop. */
   sourceFactIds?: string[]
+  /**
+   * A short causal handle carried to the next proposal. It is deliberately
+   * separate from the display sentence so downstream regeneration cannot
+   * quote an entire upstream node as if it were a new fact.
+   */
+  causalAnchor?: string
 }
 
 export type AuthorInstructionKind = 'replace' | 'remove' | 'regenerate' | 'author-revision' | 'park-fact'
@@ -172,6 +244,8 @@ export interface ProvisionalCurve {
   rejectedProposals?: CurveBeat[]
   instructions: AuthorInstruction[]
   design?: StoryDesignRecord
+  /** Concrete foundation assembled before confirmation; legacy sessions may omit it. */
+  foundation?: StoryCurveFoundation
   generation?: CurveGenerationMetadata
   createdAt: number
   updatedAt: number
@@ -185,6 +259,8 @@ export interface ConfirmedCurve {
   beats: CurveBeat[]
   rejectedProposals?: CurveBeat[]
   design?: StoryDesignRecord
+  /** Frozen design foundation reviewed with the provisional curve. */
+  foundation?: StoryCurveFoundation
   generation?: CurveGenerationMetadata
   confirmedAt: number
 }
@@ -456,6 +532,8 @@ export interface StorySessionSnapshot extends StorySessionVersion {
   currentTurn?: StoryTurn
   /** A custom role-action proposal awaiting the author's confirmation. */
   pendingActionProposal?: StoryActionProposal
+  /** Batch curve regeneration waiting for item-by-item author decisions. */
+  pendingCurveRegeneration?: StoryCurveRegenerationPreview
   generatedStory?: GeneratedStory
   resumeStage: StoryResumeStage
 }
@@ -503,6 +581,32 @@ export interface StoryCurveBeatRejectRequest extends StorySessionVersion {
 export interface StoryCurveDependenciesRegenerationRequest extends StorySessionVersion {
   curveId: string
   feedback?: string
+}
+
+export type StoryCurveRegenerationDecision = 'accept' | 'reject'
+
+export interface StoryCurveRegenerationPreviewItem {
+  id: string
+  beatId: string
+  title: string
+  kind: CurveBeatKind
+  oldDetail: string
+  newDetail: string
+  newSourceFactIds: string[]
+  newCausalAnchor?: string
+}
+
+export interface StoryCurveRegenerationPreview {
+  id: string
+  curveId: string
+  items: StoryCurveRegenerationPreviewItem[]
+  createdAt: number
+}
+
+export interface StoryCurveRegenerationResolutionRequest extends StorySessionVersion {
+  curveId: string
+  previewId: string
+  decisions: Record<string, StoryCurveRegenerationDecision>
 }
 
 export interface StorySourceFactDispositionRequest extends StorySessionVersion {
@@ -599,9 +703,12 @@ export interface StoryCoCreationResponse extends StorySessionVersion {
 export interface StoryCurveMutationResponse extends StorySessionVersion {
   curve: ProvisionalCurve
   affectedBeatIds: string[]
+  pendingCurveRegeneration?: StoryCurveRegenerationPreview
   curveVersions?: StoryCurveVersion[]
   activeCurveVersionId?: string
 }
+
+export interface StoryCurveRegenerationResolutionResponse extends StoryCurveMutationResponse {}
 
 export interface StoryCurveConfirmationResponse extends StorySessionVersion {
   curve: ProvisionalCurve

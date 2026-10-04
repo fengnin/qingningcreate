@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { StoryApiError } from './storyApi'
 import type {
   GenerationStatus,
@@ -28,6 +28,9 @@ interface StageErrorDetails {
 
 export function useStoryStageRequest(): StoryStageRequest {
   const [stageStatus, setStageStatus] = useState<GenerationStatus>('idle')
+  // React state updates are asynchronous; a ref closes the same-tick gap in
+  // which a double click could otherwise start two writes with one revision.
+  const requestInFlightRef = useRef(false)
   const [stageError, setStageError] = useState<string>()
   const [stageErrorCode, setStageErrorCode] = useState<string>()
   const [stageErrorContextPrefill, setStageErrorContextPrefill] = useState<StoryConflictCoreContextPrefill>()
@@ -49,6 +52,8 @@ export function useStoryStageRequest(): StoryStageRequest {
     request: () => Promise<Result>,
     applyResult: (result: Result) => void,
   ) => {
+    if (requestInFlightRef.current) return
+    requestInFlightRef.current = true
     setStageStatus('loading')
     clearStageErrors()
 
@@ -62,6 +67,8 @@ export function useStoryStageRequest(): StoryStageRequest {
       setStageErrorCode(details.code)
       setStageErrorContextPrefill(details.conflictCoreContextPrefill)
       setStageErrorSystemDraftPrefill(details.systemDraftPrefill)
+    } finally {
+      requestInFlightRef.current = false
     }
   }
 

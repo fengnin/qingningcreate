@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type {
   CreativeBrief,
   CurveBeat,
+  StoryCurveFoundation,
   StoryDesignRecord,
   StorySeed,
   StorySourceFact,
@@ -53,6 +54,175 @@ export function createStoryDesignRecord(idea: string, seed: StorySeed): StoryDes
     storyEndBeatIds: [...structuralBeatIds.storyEnds],
     middleDevelopmentBeatIds: [...structuralBeatIds.middleDevelopment],
   }
+}
+
+/**
+ * Assemble the concrete design map while the curve is still a draft.  The
+ * map deliberately contains the same design decisions that the later story
+ * stages consume; it is not a second set of generic labels.
+ */
+export function buildStoryCurveFoundation(
+  beats: readonly CurveBeat[],
+  brief: CreativeBrief,
+  seed: Pick<StorySeed, 'activeSituation' | 'lockedGoal'>,
+): StoryCurveFoundation | undefined {
+  const active = beats.filter((beat) => beat.status !== 'rejected')
+  const byKind = (kind: CurveBeat['kind']): CurveBeat | undefined => active.find((beat) => beat.kind === kind)
+  const current = byKind('current-state')
+  const trigger = byKind('trigger')
+  const escalation = byKind('escalation')
+  const midpoint = byKind('midpoint-turn')
+  const climax = byKind('climax-choice')
+  const resolution = byKind('resolution')
+  if (!current || !trigger || !escalation || !climax || !resolution) return undefined
+
+  const characterTension = byKind('character-tension')
+  const preservedGoal = (seed.lockedGoal?.trim() || current.detail.trim() || seed.activeSituation.trim()).trim()
+  // The visible proposal is the reviewed design input. Causal anchors are
+  // compact planner handles, not a substitute for the author's chosen
+  // wording; using the detail first keeps different directions materially
+  // different in the frozen foundation as well as on the cards.
+  const triggerAnchor = getFoundationAnchor(trigger.detail, trigger.causalAnchor ?? '当前触发点')
+  const escalationAnchor = getFoundationAnchor(escalation.detail, escalation.causalAnchor ?? '当前阻碍')
+  const forceLabel = brief.dramaticForces[0] ? getDramaticForceLabel(brief.dramaticForces[0]) : '开放方向'
+  const variationAxis: StoryCurveFoundation['predicament']['variationAxis'] = brief.dramaticForces.includes('relationship-tension')
+    ? 'relationship'
+    : brief.dramaticForces.includes('cost')
+      ? 'commitment'
+      : brief.dramaticForces.includes('surprise')
+        ? 'time'
+        : brief.tones.some((tone) => tone === 'mystery' || tone === 'fantasy')
+          ? 'resource'
+          : 'commitment'
+
+  const conflictObstacle = joinCausalDetails([
+    trigger.detail,
+    escalation.detail,
+    characterTension?.detail ?? characterTension?.causalAnchor,
+  ], '当前办法会被这道阻碍打断')
+  const tradeoff = getFoundationAnchor(climax.detail, climax.causalAnchor ?? '需要由主角作出取舍')
+  const urgency = getFoundationAnchor(midpoint?.detail ?? midpoint?.causalAnchor ?? escalation.detail, '继续回避会扩大代价')
+  const plausibleCost = getFoundationAnchor(resolution.detail, resolution.causalAnchor ?? '选择会改变目标和关系')
+  const openingClue = getFoundationAnchor(trigger.detail, trigger.causalAnchor ?? '原计划出现具体阻碍')
+  const opening = current.detail.trim()
+  const middleEscalation = getFoundationAnchor(escalation.detail, escalation.causalAnchor ?? '阻碍开始升级')
+  const midpointPressure = getFoundationAnchor(midpoint?.detail ?? midpoint?.causalAnchor ?? escalation.detail, '原来的办法不再足够')
+  const climaxPressure = getFoundationAnchor(climax.detail, climax.causalAnchor ?? '选择会带来明确代价')
+
+  const sourceFactIds = {
+    conflictCore: getSourceFactIds([current, characterTension, trigger]),
+    predicament: getSourceFactIds([trigger, escalation]),
+    middleDevelopment: getSourceFactIds([escalation, midpoint, climax]),
+    storyEnds: getSourceFactIds([current, climax, resolution]),
+  }
+  const beatSignatures = Object.fromEntries(active.map((beat) => [
+    beat.id,
+    createBeatSignature(beat),
+  ]))
+
+  return {
+    conflictCore: {
+      goal: preservedGoal,
+      obstacle: conflictObstacle,
+      tradeoff,
+    },
+    preservedGoal,
+    predicament: {
+      title: `${forceLabel} · ${triggerAnchor}造成的困境`,
+      variationAxis,
+      immediateSituation: current.detail.trim(),
+        obstacle: joinCausalDetails([triggerAnchor, escalationAnchor], '原来的办法逐步失效'),
+        tradeoff,
+        urgency,
+        choice: tradeoff,
+        plausibleCost,
+    },
+    middleDevelopment: {
+        escalation: middleEscalation,
+        midpoint: midpointPressure,
+        climaxPressure,
+    },
+    storyEnds: {
+      opening,
+        openingClue,
+        // Keep the reviewed display sentences for the two ends. The compact
+        // causal handles above are used by the planner, while these fields are
+        // the author's visible wording carried into the confirmed map.
+        climax: climax.detail.trim(),
+        resolution: resolution.detail.trim(),
+        cost: climax.detail.trim(),
+        promise: `围绕“${preservedGoal}”处理${escalationAnchor}，让${forceLabel}的取舍决定结局变化。`,
+    },
+    approach: {
+      intent: `先回应${triggerAnchor}，再决定如何处理${preservedGoal}与${tradeoff}之间的冲突。`,
+      cost: tradeoff,
+    },
+    sourceFactIds,
+    beatSignatures,
+  }
+}
+
+/**
+ * Confirm that the foundation was produced from the exact live draft currently
+ * being reviewed. Legacy foundations without signatures intentionally fail so
+ * they cannot silently become the source of a new narrative path.
+ */
+export function isStoryCurveFoundationCurrent(
+  foundation: StoryCurveFoundation | undefined,
+  beats: readonly CurveBeat[],
+): boolean {
+  if (!foundation?.beatSignatures) return false
+  const active = beats.filter((beat) => beat.status !== 'rejected')
+  const expected = Object.fromEntries(active.map((beat) => [beat.id, createBeatSignature(beat)]))
+  const actualEntries = Object.entries(foundation.beatSignatures)
+  const expectedEntries = Object.entries(expected)
+  if (actualEntries.length !== expectedEntries.length) return false
+  return expectedEntries.every(([beatId, signature]) => foundation.beatSignatures?.[beatId] === signature)
+}
+
+function getSourceFactIds(beats: Array<CurveBeat | undefined>): string[] {
+  return [...new Set(beats.flatMap((beat) => beat?.sourceFactIds ?? []))]
+}
+
+function createBeatSignature(beat: CurveBeat): string {
+  return [
+    beat.kind,
+    beat.detail.trim(),
+    beat.causalAnchor?.trim() ?? '',
+    [...(beat.sourceFactIds ?? [])].sort().join(','),
+  ].join('|')
+}
+
+function getDramaticForceLabel(force: CreativeBrief['dramaticForces'][number]): string {
+  const labels: Record<CreativeBrief['dramaticForces'][number], string> = {
+    misunderstanding: '误会机制',
+    cost: '代价机制',
+    surprise: '意外机制',
+    contrast: '反差机制',
+    'relationship-tension': '关系机制',
+  }
+  return labels[force]
+}
+
+function getFoundationAnchor(value: string, fallback: string): string {
+  const normalized = value
+    .replace(/^暂定[：:]/u, '')
+    .replace(/^(?:作者(?:第一次)?(?:明确)?编辑|作者指令|作者调整)[：:]?/u, '')
+    .replace(/[“”"']/gu, '')
+    .split(/[，。！？；\n]/u)
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 4)
+    .find((part) => !/^(?:面对|围绕|关于|因此|继续|如果|若|让|需要|主角)$/u.test(part))
+    ?.trim() ?? fallback
+  return normalized.length > 72 ? `${normalized.slice(0, 72)}…` : normalized
+}
+
+function joinCausalDetails(values: Array<string | undefined>, fallback: string): string {
+  const unique = [...new Set(values
+    .filter((value): value is string => Boolean(value?.trim()))
+    .map((value) => getFoundationAnchor(value, ''))
+    .filter(Boolean))]
+  return unique.slice(0, 3).join('；') || fallback
 }
 
 export function ensureStoryDesignRecord(
@@ -178,8 +348,10 @@ export function deriveCoveredSourceFactIds(
 
 function collectAuthorSourceFacts(idea: string, seed: StorySeed): string[] {
   const text = normalizeText(idea)
-  const collected: string[] = []
+  const collected: Array<{ text: string; priority: number }> = []
 
+  // Prefer atomic clauses from the author's text.  A whole sentence that is
+  // made up of those clauses is not another fact and must not be re-added.
   for (const sentence of text.split(/[。！？；]+/u)) {
     const normalizedSentence = normalizeText(sentence)
     if (!normalizedSentence) continue
@@ -187,21 +359,107 @@ function collectAuthorSourceFacts(idea: string, seed: StorySeed): string[] {
       .split(/[，、]/u)
       .map(normalizeText)
       .filter((clause) => clause.length >= 3)
-    if (clauses.length > 1) {
-      collected.push(...clauses)
-    } else {
-      collected.push(normalizedSentence)
+    for (const clause of (clauses.length > 1 ? clauses : [normalizedSentence])) {
+      collected.push({ text: clause, priority: 3 })
     }
   }
 
   for (const fact of seed.lockedFacts) {
-    const normalizedFact = normalizeText(fact)
-    if (normalizedFact) collected.push(normalizedFact)
+    collected.push({ text: normalizeText(fact), priority: 2 })
   }
-  if (seed.lockedGoal) collected.push(normalizeText(seed.lockedGoal))
+  if (seed.lockedGoal) collected.push({ text: normalizeText(seed.lockedGoal), priority: 1 })
 
-  const unique = [...new Set(collected.filter(Boolean))]
+  const unique = dedupeAuthorFacts(collected.filter(({ text: value }) => Boolean(value)), text)
   return unique.length ? unique : [text || '作者尚未提供可拆分的原始材料']
+}
+
+function dedupeAuthorFacts(values: readonly { text: string; priority: number }[], originalIdea: string): string[] {
+  // Preserve the author's original order. Sorting by length makes a rich
+  // paragraph look like unrelated facts and causes later beats to inherit the
+  // wrong clause. Duplicate entries are replaced in place by the richer form.
+  const kept: Array<{ text: string; compact: string; priority: number }> = []
+
+  for (const raw of values) {
+    const candidate = { text: normalizeText(raw.text), priority: raw.priority }
+    if (!candidate.text) continue
+    const compact = compactFact(candidate.text)
+    if (compact.length < 3) continue
+    const duplicate = kept.find((existing) => (
+      existing.compact === compact
+      || (Math.min(existing.compact.length, compact.length) >= 6
+        && (existing.compact.includes(compact) || compact.includes(existing.compact))
+        && isNearDuplicateFact(existing.text, candidate.text))
+    ))
+    if (duplicate) {
+      // Keep the author's richer clause, while allowing a short explicit goal
+      // to survive when it is not actually represented in the prose.
+       if (candidate.priority > duplicate.priority
+         || (candidate.priority === duplicate.priority && candidate.text.length > duplicate.text.length)) {
+        duplicate.text = candidate.text
+        duplicate.compact = compact
+        duplicate.priority = candidate.priority
+      }
+      continue
+    }
+    kept.push({ text: candidate.text, compact, priority: candidate.priority })
+  }
+
+  // For a one-clause idea, the explicit goal is the useful atomic fact; the
+  // subject-plus-goal sentence is only a larger restatement of it.
+  const compactOriginal = compactFact(originalIdea)
+  const explicitGoal = values.find(({ priority, text }) => priority === 1 && text)?.text
+  if (explicitGoal && compactOriginal.includes(compactFact(explicitGoal))
+    && values.filter(({ priority }) => priority >= 3).length <= 1) {
+    const goalCompact = compactFact(explicitGoal)
+    return [explicitGoal, ...kept.filter((candidate) => candidate.compact !== compactOriginal && candidate.compact !== goalCompact).map(({ text }) => text)]
+  }
+
+  // Keep a short explicit goal for a bare idea. Several existing workflows use
+  // it as the stable anchor while the longer subject phrase remains context.
+  if (explicitGoal && !kept.some((candidate) => candidate.text === explicitGoal)) {
+    const ideaLength = compactFact(originalIdea)
+    const goalLength = compactFact(explicitGoal).length
+    if (ideaLength.length <= goalLength + 6) {
+      kept.push({ text: explicitGoal, compact: compactFact(explicitGoal), priority: 4 })
+    }
+  }
+
+  // A whole sentence is an audit copy, not a second fact, when two or more
+  // atomic clauses already cover it. Remove it after the pairwise pass.
+  return kept
+    .filter((candidate) => {
+      const contained = kept.filter((other) => (
+        other !== candidate
+        && other.compact.length >= 6
+        && candidate.compact.includes(other.compact)
+      ))
+      return contained.length < 2
+    })
+    .map(({ text }) => text)
+}
+
+function isNearDuplicateFact(left: string, right: string): boolean {
+  const normalizedLeft = stripFactLead(left)
+  const normalizedRight = stripFactLead(right)
+  return normalizedLeft.includes(normalizedRight)
+    || normalizedRight.includes(normalizedLeft)
+    || sharedFactTokenCount(normalizedLeft, normalizedRight) >= 2
+}
+
+function stripFactLead(value: string): string {
+  return value
+    .replace(/^(?:却|但|并且|同时|然后|随后|她|他|其|并)\s*/u, '')
+    .trim()
+}
+
+function sharedFactTokenCount(left: string, right: string): number {
+  const leftTokens = new Set(left.match(/[\p{L}\p{N}]{2,}/gu) ?? [])
+  return (right.match(/[\p{L}\p{N}]{2,}/gu) ?? [])
+    .filter((token) => leftTokens.has(token)).length
+}
+
+function compactFact(value: string): string {
+  return value.replace(/[，。！？；、\s]/gu, '')
 }
 
 function isBeatGroundedToFact(beat: CurveBeat, fact: StorySourceFact): boolean {

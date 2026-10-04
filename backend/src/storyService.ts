@@ -7,6 +7,8 @@ import {
   materializeConfirmedCurve,
   parseCreativeBrief,
   regenerateAffectedCurveBeats,
+  previewAffectedCurveBeats,
+  resolveAffectedCurveBeats,
   regenerateCurveBeat,
   rejectCurveBeat,
   updateCurveSourceFactDisposition,
@@ -74,6 +76,10 @@ import type {
   StoryCurveStartSpineRequest,
   StoryCurveBeatRejectRequest,
   StoryCurveDependenciesRegenerationRequest,
+  StoryCurveRegenerationDecision,
+  StoryCurveRegenerationPreview,
+  StoryCurveRegenerationResolutionRequest,
+  StoryCurveRegenerationPreviewItem,
   StorySourceFactDispositionRequest,
   StoryCurveVersion,
   StoryCurveVersionSelectionRequest,
@@ -563,6 +569,7 @@ interface StorySessionRecord {
   workflow?: 'legacy' | 'co-creation'
   conflictCores?: StoredStoryConflictCores
   provisionalCurve?: ProvisionalCurve
+  pendingCurveRegeneration?: StoryCurveRegenerationPreview
   confirmedCurve?: ConfirmedCurve
   curveVersions?: StoryCurveVersion[]
   activeCurveVersionId?: string
@@ -624,6 +631,12 @@ const storySessionStorePath = configuredStorySessionStorePath
   ? resolve(configuredStorySessionStorePath)
   : fileURLToPath(new URL('../data/story-sessions.json', import.meta.url))
 const storySessions = loadPersistedStorySessions()
+/**
+ * A browser can deliver two identical clicks before the first model request
+ * resolves. Keep one promise per exact start operation so a new session or a
+ * new curve version is created at most once for that concurrent operation.
+ */
+const inFlightCoCreationStarts = new Map<string, Promise<StoryCoCreationResponse>>()
 
 const retryableModelOutputErrorCodes = new Set([
   'INVALID_MODEL_OUTPUT',
@@ -766,6 +779,27 @@ export function parseStoryCurveDependenciesRegenerationRequest(body: unknown): S
     ...parseStorySessionReference(record),
     curveId: readIdentifier(record, 'curveId', '暂定故事曲线不完整，请刷新后重试。', invalidRequestContext),
     feedback: readOptionalText(record, 'feedback', 180),
+  }
+}
+
+export function parseStoryCurveRegenerationResolutionRequest(body: unknown): StoryCurveRegenerationResolutionRequest {
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'previewId', 'decisions'])
+  const decisionsRecord = record.decisions
+  if (!isPlainRecord(decisionsRecord)) {
+    throw new AppError('批量重推的逐项决定格式不正确，请刷新后重试。', 400, 'INVALID_REQUEST')
+  }
+  const decisions: Record<string, StoryCurveRegenerationDecision> = {}
+  for (const [itemId, decision] of Object.entries(decisionsRecord)) {
+    if (decision !== 'accept' && decision !== 'reject') {
+      throw new AppError('批量重推的逐项决定格式不正确，请刷新后重试。', 400, 'INVALID_REQUEST')
+    }
+    decisions[itemId] = decision
+  }
+  return {
+    ...parseStorySessionReference(record),
+    curveId: readIdentifier(record, 'curveId', '暂定故事曲线不完整，请刷新后重试。', invalidRequestContext),
+    previewId: readIdentifier(record, 'previewId', '批量重推预览已经失效，请刷新后重试。', invalidRequestContext),
+    decisions,
   }
 }
 
@@ -2333,6 +2367,22 @@ function createConflictCoreResponse(
 export async function startStoryCoCreation(
   request: StoryCoCreationStartRequest,
 ): Promise<StoryCoCreationResponse> {
+  const operationKey = getCoCreationStartOperationKey(request)
+  const existingOperation = inFlightCoCreationStarts.get(operationKey)
+  if (existingOperation) return structuredClone(await existingOperation)
+
+  const operation = startStoryCoCreationInternal(request)
+  inFlightCoCreationStarts.set(operationKey, operation)
+  try {
+    return structuredClone(await operation)
+  } finally {
+    if (inFlightCoCreationStarts.get(operationKey) === operation) inFlightCoCreationStarts.delete(operationKey)
+  }
+}
+
+async function startStoryCoCreationInternal(
+  request: StoryCoCreationStartRequest,
+): Promise<StoryCoCreationResponse> {
   const existingSession = request.storyId
     ? getStorySession(request.storyId, request.revision)
     : undefined
@@ -2399,6 +2449,16 @@ export async function startStoryCoCreation(
   return createCoCreationResponse(session, curve)
 }
 
+function getCoCreationStartOperationKey(request: StoryCoCreationStartRequest): string {
+  return JSON.stringify({
+    storyId: request.storyId ?? null,
+    revision: request.revision ?? null,
+    versionMode: request.versionMode ?? null,
+    idea: request.idea,
+    brief: request.brief,
+  })
+}
+
 function getRejectedCurveProposalDetails(session: StorySessionRecord): string[] {
   const details = new Set<string>()
   for (const version of session.curveVersions ?? []) {
@@ -2427,6 +2487,7 @@ export async function updateSessionCurveBeat(
   const curve = requireDraftCurve(session, request.curveId)
   const result = updateCurveBeat(curve, request.beatId, request.detail)
   session.provisionalCurve = result.curve
+  session.pendingCurveRegeneration = undefined
   commitStorySessionChanges(session)
   return createCurveMutationResponse(session, result)
 }
@@ -2446,6 +2507,7 @@ export async function regenerateSessionCurveBeat(
   )
   assertStorySessionRevision(session, request.revision)
   session.provisionalCurve = result.curve
+  session.pendingCurveRegeneration = undefined
   commitStorySessionChanges(session)
   return createCurveMutationResponse(session, result)
 }
@@ -2457,6 +2519,7 @@ export async function rejectSessionCurveBeat(
   const curve = requireDraftCurve(session, request.curveId)
   const result = rejectCurveBeat(curve, request.beatId, request.reason)
   session.provisionalCurve = result.curve
+  session.pendingCurveRegeneration = undefined
   commitStorySessionChanges(session)
   return createCurveMutationResponse(session, result)
 }
@@ -2466,9 +2529,28 @@ export async function regenerateSessionCurveDependencies(
 ): Promise<StoryCurveMutationResponse> {
   const session = getStorySession(request.storyId, request.revision)
   const curve = requireDraftCurve(session, request.curveId)
-  const result = await regenerateAffectedCurveBeats(session.idea, session.seed, curve, request.feedback)
+  const result = await previewAffectedCurveBeats(session.idea, session.seed, curve, request.feedback)
   assertStorySessionRevision(session, request.revision)
+  session.pendingCurveRegeneration = result.preview
+  commitStorySessionChanges(session)
+  return {
+    ...createCurveMutationResponse(session, { curve, affectedBeatIds: result.affectedBeatIds }),
+    pendingCurveRegeneration: result.preview,
+  }
+}
+
+export async function resolveSessionCurveDependencies(
+  request: StoryCurveRegenerationResolutionRequest,
+): Promise<StoryCurveMutationResponse> {
+  const session = getStorySession(request.storyId, request.revision)
+  const curve = requireDraftCurve(session, request.curveId)
+  const preview = session.pendingCurveRegeneration
+  if (!preview || preview.id !== request.previewId) {
+    throw new AppError('批量重推预览已经失效，请重新生成预览。', 409, 'STORY_CURVE_REGENERATION_PREVIEW_NOT_FOUND')
+  }
+  const result = resolveAffectedCurveBeats(curve, preview, request.decisions)
   session.provisionalCurve = result.curve
+  session.pendingCurveRegeneration = undefined
   commitStorySessionChanges(session)
   return createCurveMutationResponse(session, result)
 }
@@ -2480,6 +2562,7 @@ export async function updateSessionSourceFactDisposition(
   const curve = requireDraftCurve(session, request.curveId)
   const result = updateCurveSourceFactDisposition(curve, request.factId, request.disposition)
   session.provisionalCurve = result.curve
+  session.pendingCurveRegeneration = undefined
   commitStorySessionChanges(session)
   return createCurveMutationResponse(session, result)
 }
@@ -2492,6 +2575,7 @@ export async function confirmSessionCurve(
   const result = confirmProvisionalCurve(curve)
   session.provisionalCurve = result.curve
   session.confirmedCurve = result.confirmedCurve
+  session.pendingCurveRegeneration = undefined
   session.seed = { ...session.seed, creativeBrief: result.confirmedCurve.brief }
   commitStorySessionChanges(session)
   return {
@@ -2831,10 +2915,18 @@ export function createOriginalIdeaFallbackSeed(
 ): StorySeedDraft {
   const inferredAction = context?.goal ? undefined : extractOriginalIdeaAction(idea)
   const lockedGoal = context?.goal ?? inferredAction?.goal ?? null
-  const lockedFacts = [...new Set([
+  // Keep the complete idea in activeSituation for traceability, but do not
+  // copy the whole paragraph into every later curve node.  The fallback seed
+  // needs a small set of independent anchors so the fact ledger can assign
+  // each one to a different causal beat.
+  const lockedFacts = dedupeFallbackFacts([
+    // Preserve the exact original thought as a traceable seed anchor. The
+    // story-design ledger performs the finer atomic dedupe before it reaches
+    // curve prose, so this does not reintroduce paragraph duplication there.
     idea,
+    ...splitFallbackIdeaFacts(idea),
     ...[context?.stake, context?.constraint].filter((value): value is string => Boolean(value)),
-  ])]
+  ]).slice(0, 5)
   const unknowns = [
     ...(!lockedGoal ? ['主角此刻的具体目标'] : []),
     ...(!context?.stake ? ['主角最在意的事'] : []),
@@ -2853,6 +2945,36 @@ export function createOriginalIdeaFallbackSeed(
     worldMode: 'realistic-default',
     unknowns,
   }
+}
+
+function splitFallbackIdeaFacts(idea: string): string[] {
+  const normalized = idea.trim().replace(/\s+/gu, ' ')
+  if (!normalized) return []
+  return normalized
+    .split(/[。！？；]+/u)
+    .flatMap((sentence) => {
+      const clauses = sentence.split(/[，、]/u).map((value) => value.trim()).filter((value) => value.length >= 3)
+      return clauses.length > 1 ? clauses : [sentence.trim()]
+    })
+    .filter(Boolean)
+}
+
+function dedupeFallbackFacts(values: readonly string[]): string[] {
+  const kept: string[] = []
+  for (const value of values) {
+    const normalized = value.trim().replace(/\s+/gu, ' ')
+    if (!normalized) continue
+    const compact = normalized.replace(/[，。！？；、\s]/gu, '')
+    if (compact.length < 3) continue
+    const duplicate = kept.some((existing) => {
+      const existingCompact = existing.replace(/[，。！？；、\s]/gu, '')
+      return existingCompact === compact
+        || (Math.min(existingCompact.length, compact.length) >= 6
+          && (existingCompact.includes(compact) || compact.includes(existingCompact)))
+    })
+    if (!duplicate) kept.push(normalized)
+  }
+  return kept
 }
 
 function extractOriginalIdeaAction(idea: string): { subject: string; goal: string } | undefined {
@@ -5556,6 +5678,7 @@ function createStorySessionSnapshot(session: StorySessionRecord): StorySessionSn
     history: structuredClone(session.history),
     ...(session.currentTurn ? { currentTurn: structuredClone(session.currentTurn) } : {}),
     ...(session.pendingActionProposal ? { pendingActionProposal: structuredClone(session.pendingActionProposal) } : {}),
+    ...(session.pendingCurveRegeneration ? { pendingCurveRegeneration: structuredClone(session.pendingCurveRegeneration) } : {}),
     ...(session.generatedStory ? { generatedStory: structuredClone(session.generatedStory) } : {}),
     resumeStage,
   }

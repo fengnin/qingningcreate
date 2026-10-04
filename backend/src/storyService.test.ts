@@ -485,11 +485,17 @@ test('parked source material is explicit and does not become a confirmed-curve f
     () => confirmProvisionalCurve(reviewed),
     /暂不纳入的原始材料仍出现在/u,
   )
+  // Use the same mutation path as the UI so the frozen design foundation is
+  // rebuilt for the author's new current-state wording. Directly replacing a
+  // beat would intentionally invalidate the old foundation.
+  const fullyEdited = updateCurveBeat(
+    parked,
+    'beat-current-state',
+    '作者编辑：当前状态不再依赖已暂存的目标。',
+  ).curve
   const fullyReviewed = {
-    ...reviewed,
-    beats: reviewed.beats.map((beat) => beat.kind === 'current-state'
-      ? { ...beat, detail: '作者编辑：当前状态不再依赖已暂存的目标。', source: 'user-edit' as const, sourceFactIds: [] }
-      : beat),
+    ...fullyEdited,
+    beats: fullyEdited.beats.map((beat) => beat.status === 'stale' ? { ...beat, status: 'proposed' as const } : beat),
   }
   const confirmed = confirmProvisionalCurve(fullyReviewed).confirmedCurve
   const foundation = materializeConfirmedCurve(sparseSeed, confirmed)

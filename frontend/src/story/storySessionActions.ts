@@ -10,6 +10,7 @@ import {
   requestCurveBeatRegeneration,
   requestCurveBeatRejection,
   requestAffectedCurveRegeneration,
+  requestCurveRegenerationResolution,
   requestSourceFactDisposition,
   requestCurveConfirmation,
   requestCurveStorySpine,
@@ -37,6 +38,7 @@ import type {
   StoryView,
   StoryCurveVersion,
   StoryCurveMutationResponse,
+  StoryCurveRegenerationDecision,
 } from './types'
 import type { StoryStageRequest } from './useStoryStageRequest'
 
@@ -61,6 +63,7 @@ export interface StorySessionActions {
   regenerateCurveBeat: (beatId: string, feedback?: string, replaceRejected?: boolean) => Promise<void>
   rejectCurveBeat: (beatId: string, reason?: string) => Promise<void>
   regenerateAffectedCurveBeats: (feedback?: string) => Promise<void>
+  resolveAffectedCurveBeats: (decisions: Record<string, StoryCurveRegenerationDecision>) => Promise<void>
   setSourceFactDisposition: (factId: string, disposition: 'parked' | 'integrated') => Promise<void>
   confirmProvisionalCurve: () => Promise<void>
   startStorySpineFromCurve: () => Promise<void>
@@ -141,6 +144,7 @@ function createCoCreationActions(
   | 'regenerateCurveBeat'
   | 'rejectCurveBeat'
   | 'regenerateAffectedCurveBeats'
+  | 'resolveAffectedCurveBeats'
   | 'setSourceFactDisposition'
   | 'confirmProvisionalCurve'
   | 'startStorySpineFromCurve'
@@ -210,9 +214,38 @@ function createCoCreationActions(
   }
 
   const regenerateAffectedCurveBeats = async (feedback?: string) => {
-    await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => (
-      requestAffectedCurveRegeneration({ storyId, revision, curveId, feedback })
-    ))
+    const curve = state.provisionalCurve
+    if (!curve || !state.storyId) return
+    await runStorySessionStageRequest(
+      state,
+      stage,
+      () => requestAffectedCurveRegeneration({ storyId: state.storyId!, revision: state.revision, curveId: curve.id, feedback }),
+      (result) => {
+        applyCurveMutationState(state, result)
+        state.setPendingCurveRegeneration(result.pendingCurveRegeneration)
+      },
+    )
+  }
+
+  const resolveAffectedCurveBeats = async (decisions: Record<string, StoryCurveRegenerationDecision>) => {
+    const curve = state.provisionalCurve
+    const preview = state.pendingCurveRegeneration
+    if (!curve || !preview || !state.storyId) return
+    await runStorySessionStageRequest(
+      state,
+      stage,
+      () => requestCurveRegenerationResolution({
+        storyId: state.storyId!,
+        revision: state.revision,
+        curveId: curve.id,
+        previewId: preview.id,
+        decisions,
+      }),
+      (result) => {
+        applyCurveMutationState(state, result)
+        state.setPendingCurveRegeneration(undefined)
+      },
+    )
   }
 
   const setSourceFactDisposition = async (factId: string, disposition: 'parked' | 'integrated') => {
@@ -274,6 +307,7 @@ function createCoCreationActions(
     regenerateCurveBeat,
     rejectCurveBeat,
     regenerateAffectedCurveBeats,
+    resolveAffectedCurveBeats,
     setSourceFactDisposition,
     confirmProvisionalCurve,
     startStorySpineFromCurve,
@@ -604,9 +638,16 @@ function applyStoryTurnState(state: StorySessionState, result: StoryTurnResponse
 
 function applyCurveMutationState(
   state: StorySessionState,
-  result: { curve: import('./types').ProvisionalCurve; curveVersions?: StoryCurveVersion[]; activeCurveVersionId?: string },
+  result: {
+    curve: import('./types').ProvisionalCurve
+    pendingCurveRegeneration?: import('./types').StoryCurveRegenerationPreview
+    curveVersions?: StoryCurveVersion[]
+    activeCurveVersionId?: string
+  },
 ) {
   state.setProvisionalCurve(result.curve)
+  if ('pendingCurveRegeneration' in result) state.setPendingCurveRegeneration(result.pendingCurveRegeneration)
+  else state.setPendingCurveRegeneration(undefined)
   if (result.curveVersions) state.setCurveVersions(result.curveVersions)
   state.setActiveCurveVersionId(result.activeCurveVersionId)
 }

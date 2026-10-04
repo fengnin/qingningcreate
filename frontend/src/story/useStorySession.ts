@@ -22,6 +22,7 @@ import type {
   StoryTurnHistoryItem,
   StoryTurnOption,
   StoryView,
+  StoryCurveRegenerationPreview,
 } from './types'
 
 export interface StorySession extends StorySessionActions {
@@ -60,6 +61,7 @@ export interface StorySession extends StorySessionActions {
   curveVersions: import('./types').StoryCurveVersion[]
   activeCurveVersionId: string | undefined
   pendingActionProposal: import('./types').StoryActionProposal | undefined
+  pendingCurveRegeneration: StoryCurveRegenerationPreview | undefined
   restoreAttempted: boolean
   restoreLoading: boolean
   restoreError: string | undefined
@@ -114,6 +116,7 @@ export function useStorySession(): StorySession {
     curveVersions: state.curveVersions,
     activeCurveVersionId: state.activeCurveVersionId,
     pendingActionProposal: state.pendingActionProposal,
+    pendingCurveRegeneration: state.pendingCurveRegeneration,
     restoreAttempted: state.restoreAttempted,
     restoreLoading: state.restoreLoading,
     restoreError: state.restoreError,

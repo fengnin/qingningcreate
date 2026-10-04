@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Archive, ArrowLeft, ArrowRight, Check, CircleAlert, History, PencilLine, RefreshCcw, Sparkles, Trash2 } from 'lucide-react'
-import type { CreativeBrief, CreativeTone, CurveBeat, DramaticForce, StoryCurveVersion, StorySourceFact } from '../story/types'
+import type { CreativeBrief, CreativeTone, CurveBeat, DramaticForce, StoryCurveVersion, StorySourceFact, StoryCurveRegenerationDecision } from '../story/types'
 import type { StorySession } from '../story/useStorySession'
 import {
   getMissingStoryDesignSectionLabels,
@@ -178,6 +178,7 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
   const [showVersions, setShowVersions] = useState(false)
   const [authorEditBeatId, setAuthorEditBeatId] = useState<string>()
   const [authorInstructionText, setAuthorInstructionText] = useState('')
+  const [regenerationDecisions, setRegenerationDecisions] = useState<Record<string, StoryCurveRegenerationDecision>>({})
   const staleBeats = useMemo(() => curve?.beats.filter((beat) => beat.status === 'stale') ?? [], [curve])
   const staleProposalBeats = useMemo(() => staleBeats.filter((beat) => beat.source === 'system-proposal'), [staleBeats])
   const sourceFacts = curve?.design?.sourceFacts ?? []
@@ -187,6 +188,18 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
     curve?.design,
     new Set(curve?.beats.filter((beat) => beat.status !== 'rejected').map((beat) => beat.id)),
   )
+
+  useEffect(() => {
+    const preview = session.pendingCurveRegeneration
+    if (!preview) {
+      setRegenerationDecisions({})
+      return
+    }
+    // Every replacement is an editable proposal. Do not silently accept a
+    // whole batch just because the preview arrived; the author must decide on
+    // each item before anything is written back to the curve.
+    setRegenerationDecisions({})
+  }, [session.pendingCurveRegeneration?.id])
 
   if (!curve) {
     return <ProvisionalCurveEmptyState session={session} isLoading={isLoading} />
@@ -222,6 +235,13 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
     await session.regenerateAffectedCurveBeats(regenerationFeedback.trim() || undefined)
     setIsRegeneratingAffected(false)
     setRegenerationFeedback('')
+  }
+
+  const resolveRegeneration = async () => {
+    const preview = session.pendingCurveRegeneration
+    if (!preview || preview.items.some((item) => !regenerationDecisions[item.id])) return
+    await session.resolveAffectedCurveBeats(regenerationDecisions)
+    setRegenerationDecisions({})
   }
 
   const updateFactDisposition = async (fact: StorySourceFact, disposition: 'parked' | 'integrated') => {
@@ -291,7 +311,14 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
           </div>
           {!session.confirmedCurve && <RejectedProposalHistory proposals={curve.rejectedProposals ?? []} />}
           {!session.confirmedCurve && <label className="curve-feedback-field"><span>给系统一句修改方向 <small>可选，作用于下一次重推</small></span><input value={regenerationFeedback} onChange={(event) => setRegenerationFeedback(event.target.value)} placeholder="例如：让阻碍来自关系承诺，而不是新增一个外部人物" maxLength={180} disabled={isLoading} /></label>}
-          {staleBeats.length > 0 && !session.confirmedCurve && <div className="curve-stale-panel"><p className="curve-stale-notice"><CircleAlert size={15} /> 你修改了上游节点，下面的节点需要重新看一遍。作者编辑不会被系统批量覆盖。</p><div className="curve-stale-actions">{staleProposalBeats.length > 0 && <button className="text-action" type="button" onClick={() => void regenerateAffected()} disabled={isLoading || isRegeneratingAffected}>{isRegeneratingAffected ? '正在重推受影响节点…' : <><RefreshCcw size={14} /> 重推受影响系统提案</>}</button>}{staleBeats.length - staleProposalBeats.length > 0 && <span>仍有作者编辑需要逐条重看。</span>}</div></div>}
+           {staleBeats.length > 0 && !session.confirmedCurve && !session.pendingCurveRegeneration && <div className="curve-stale-panel"><p className="curve-stale-notice"><CircleAlert size={15} /> 你修改了上游节点，下面的节点需要重新看一遍。作者编辑不会被系统批量覆盖。</p><div className="curve-stale-actions">{staleProposalBeats.length > 0 && <button className="text-action" type="button" onClick={() => void regenerateAffected()} disabled={isLoading || isRegeneratingAffected}>{isRegeneratingAffected ? '正在生成重推预览…' : <><RefreshCcw size={14} /> 生成重推差异预览</>}</button>}{staleBeats.length - staleProposalBeats.length > 0 && <span>仍有作者编辑需要逐条重看。</span>}</div></div>}
+           {session.pendingCurveRegeneration && <CurveRegenerationReview
+             preview={session.pendingCurveRegeneration}
+             decisions={regenerationDecisions}
+             disabled={isLoading}
+             onDecision={(id, decision) => setRegenerationDecisions((current) => ({ ...current, [id]: decision }))}
+             onResolve={() => void resolveRegeneration()}
+           />}
           {missingDesignSections.length > 0 && !session.confirmedCurve && <p className="curve-stale-notice curve-design-warning"><CircleAlert size={15} /> 故事设计记录还缺少：{missingDesignSections.join('、')}。请恢复或编辑相关节点后再确认。</p>}
           {!session.confirmedCurve && <SourceFactLedger facts={sourceFacts} beats={curve.beats} busyFactId={busyFactId} disabled={isLoading} onSetDisposition={updateFactDisposition} />}
           <div className="curve-version-bar"><button className="text-action" type="button" onClick={() => setShowVersions((visible) => !visible)} disabled={isLoading}><History size={15} /> {showVersions ? '收起版本记录' : `查看已保存版本（${session.curveVersions.length}）`}</button>{showVersions && <CurveVersionList versions={session.curveVersions} activeVersionId={session.activeCurveVersionId} disabled={isLoading} onSelect={(versionId) => void session.selectCurveVersion(versionId)} />}</div>
@@ -489,6 +516,36 @@ function CurveDesignSummary({ curve }: { curve: NonNullable<StorySession['provis
   const sections = STORY_DESIGN_SECTION_RULES.map(({ key, label }) => [label, design[key]] as const)
   const beatLabel = (id: string) => curve.beats.find((beat) => beat.id === id)?.title ?? id
   return <section className="curve-design-summary" aria-label="故事设计记录覆盖情况"><header><strong>故事设计记录</strong><small>这条曲线同时承接冲突、困境、两端和中间发展</small></header><div>{sections.map(([label, ids]) => <span key={label}><b>{label}</b>{ids.map(beatLabel).join('、') || '待补充'}</span>)}</div></section>
+}
+
+function CurveRegenerationReview({
+  preview,
+  decisions,
+  disabled,
+  onDecision,
+  onResolve,
+}: {
+  preview: NonNullable<StorySession['pendingCurveRegeneration']>
+  decisions: Record<string, StoryCurveRegenerationDecision>
+  disabled: boolean
+  onDecision: (id: string, decision: StoryCurveRegenerationDecision) => void
+  onResolve: () => void
+}) {
+  const decidedCount = preview.items.filter((item) => decisions[item.id]).length
+  const complete = preview.items.length > 0 && decidedCount === preview.items.length
+  return <section className="curve-regeneration-review" aria-label="重推差异预览">
+    <header><div><strong>重推差异预览</strong><small>逐项查看旧内容和新提案，只有你明确接受的内容才会回到主线。</small></div><span>{decidedCount}/{preview.items.length} 已决定</span></header>
+    <div className="curve-regeneration-list">{preview.items.map((item) => <article key={item.id}>
+      <div className="curve-regeneration-title"><strong>{item.title}</strong><span>{item.kind}</span></div>
+      <div className="curve-regeneration-diff"><div><small>旧内容</small><p>{item.oldDetail}</p></div><ArrowRight size={16} /><div><small>新提案</small><p>{item.newDetail}</p></div></div>
+      <div className="curve-regeneration-actions" role="group" aria-label={`${item.title}的决定`}>
+        <button className={decisions[item.id] === 'accept' ? 'is-selected' : ''} type="button" onClick={() => onDecision(item.id, 'accept')} disabled={disabled}><Check size={14} /> 接受</button>
+        <button className={decisions[item.id] === 'reject' ? 'is-selected is-danger' : ''} type="button" onClick={() => onDecision(item.id, 'reject')} disabled={disabled}><Trash2 size={14} /> 拒绝</button>
+      </div>
+    </article>)}</div>
+    {!complete && <p className="curve-stale-notice"><CircleAlert size={15} /> 请先为每一项选择接受或拒绝。</p>}
+    <button className="primary-action" type="button" onClick={onResolve} disabled={disabled || !complete}><Check size={16} /> 应用逐项决定</button>
+  </section>
 }
 
 function SourceFactLedger({ facts, beats, busyFactId, disabled, onSetDisposition }: {
