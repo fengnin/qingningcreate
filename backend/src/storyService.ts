@@ -631,12 +631,21 @@ const storySessionStorePath = configuredStorySessionStorePath
   ? resolve(configuredStorySessionStorePath)
   : fileURLToPath(new URL('../data/story-sessions.json', import.meta.url))
 const storySessions = loadPersistedStorySessions()
+const storyOperationCacheTtlMs = 60_000
+
+interface CachedStoryOperation<T> {
+  result: T
+  expiresAt: number
+}
+
 /**
  * A browser can deliver two identical clicks before the first model request
  * resolves. Keep one promise per exact start operation so a new session or a
  * new curve version is created at most once for that concurrent operation.
  */
 const inFlightCoCreationStarts = new Map<string, Promise<StoryCoCreationResponse>>()
+const inFlightCurveBeatUpdates = new Map<string, Promise<StoryCurveMutationResponse>>()
+const completedCurveBeatUpdates = new Map<string, CachedStoryOperation<StoryCurveMutationResponse>>()
 
 const retryableModelOutputErrorCodes = new Set([
   'INVALID_MODEL_OUTPUT',
@@ -2459,6 +2468,40 @@ function getCoCreationStartOperationKey(request: StoryCoCreationStartRequest): s
   })
 }
 
+function getCurveBeatUpdateOperationKey(request: StoryCurveBeatUpdateRequest): string {
+  return JSON.stringify({
+    storyId: request.storyId,
+    revision: request.revision,
+    curveId: request.curveId,
+    beatId: request.beatId,
+    detail: request.detail,
+  })
+}
+
+function readCachedStoryOperation<T>(
+  cache: Map<string, CachedStoryOperation<T>>,
+  key: string,
+): T | undefined {
+  const entry = cache.get(key)
+  if (!entry) return undefined
+  if (entry.expiresAt <= Date.now()) {
+    cache.delete(key)
+    return undefined
+  }
+  return structuredClone(entry.result)
+}
+
+function writeCachedStoryOperation<T>(
+  cache: Map<string, CachedStoryOperation<T>>,
+  key: string,
+  result: T,
+): void {
+  cache.set(key, {
+    result: structuredClone(result),
+    expiresAt: Date.now() + storyOperationCacheTtlMs,
+  })
+}
+
 function getRejectedCurveProposalDetails(session: StorySessionRecord): string[] {
   const details = new Set<string>()
   for (const version of session.curveVersions ?? []) {
@@ -2483,13 +2526,36 @@ function getRejectedCurveProposalDetails(session: StorySessionRecord): string[] 
 export async function updateSessionCurveBeat(
   request: StoryCurveBeatUpdateRequest,
 ): Promise<StoryCurveMutationResponse> {
+  const operationKey = getCurveBeatUpdateOperationKey(request)
+  const cached = readCachedStoryOperation(completedCurveBeatUpdates, operationKey)
+  if (cached) return cached
+
+  const existingOperation = inFlightCurveBeatUpdates.get(operationKey)
+  if (existingOperation) return structuredClone(await existingOperation)
+
+  const operation = updateSessionCurveBeatInternal(request, operationKey)
+  inFlightCurveBeatUpdates.set(operationKey, operation)
+  try {
+    return structuredClone(await operation)
+  } finally {
+    if (inFlightCurveBeatUpdates.get(operationKey) === operation) inFlightCurveBeatUpdates.delete(operationKey)
+  }
+}
+
+async function updateSessionCurveBeatInternal(
+  request: StoryCurveBeatUpdateRequest,
+  operationKey: string,
+): Promise<StoryCurveMutationResponse> {
+
   const session = getStorySession(request.storyId, request.revision)
   const curve = requireDraftCurve(session, request.curveId)
   const result = updateCurveBeat(curve, request.beatId, request.detail)
   session.provisionalCurve = result.curve
   session.pendingCurveRegeneration = undefined
   commitStorySessionChanges(session)
-  return createCurveMutationResponse(session, result)
+  const response = createCurveMutationResponse(session, result)
+  writeCachedStoryOperation(completedCurveBeatUpdates, operationKey, response)
+  return response
 }
 
 export async function regenerateSessionCurveBeat(
@@ -2981,7 +3047,12 @@ function extractOriginalIdeaAction(idea: string): { subject: string; goal: strin
   const normalized = idea.trim()
   if (!normalized) return undefined
 
-  const actionMatch = normalized.match(/^([\u4e00-\u9fff]{1,12}?)(想要|想|要|准备|打算|决定|去|看|向|提交|参加|寻找|归还|离开)(.+)$/u)
+  // Only treat a leading subject + verb as the direct-idea shortcut when the
+  // goal ends at the first clause boundary.  A long premise such as
+  // “青柠要在展出前送到学校；朋友要求不要署名；……” must keep the
+  // later facts available to the ledger instead of promoting the whole
+  // paragraph to one repeated goal.
+  const actionMatch = normalized.match(/^([\u4e00-\u9fff]{1,12}?)(想要|想|要|准备|打算|决定|去|看|向|提交|参加|寻找|归还|离开)([^，。！？；\r\n]+?)(?=[，。！？；\r\n]|$)/u)
   if (actionMatch) {
     const [, subject, verb, remainder] = actionMatch
     return createOriginalIdeaAction(subject, verb, remainder)

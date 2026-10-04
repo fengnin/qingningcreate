@@ -3,6 +3,7 @@ import test from 'node:test'
 import type {
   StoryAction,
   CreativeBrief,
+  StoryCurveRegenerationDecision,
   StoryConflictCoreSystemDraft,
   StoryNarrativeState,
   StoryPredicament,
@@ -25,12 +26,17 @@ import {
   parseStoryAuthorInstructionRequest,
   parseStoryActionProposalRequest,
   looksLikeAuthorInstruction,
+  getStorySessionSnapshot,
+  startStoryCoCreation,
+  updateSessionCurveBeat,
 } from './storyService.js'
 import {
   confirmProvisionalCurve,
   createProvisionalCurveFallback,
   isSystemCurveProposalSafe,
   materializeConfirmedCurve,
+  previewAffectedCurveBeats,
+  resolveAffectedCurveBeats,
   rejectCurveBeat,
   regenerateCurveBeat,
   regenerateAffectedCurveBeats,
@@ -107,6 +113,51 @@ const reportSeed = {
   lockedGoal: '提交报告',
   lockedFacts: ['周岚要提交报告'],
 }
+
+test('co-creation start and node save are idempotent under duplicate requests', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  process.env.STORY_DISABLE_MODEL = 'true'
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const request = {
+    idea: `重复点击验收-${Date.now()}：青柠去游乐园`,
+    brief,
+  }
+
+  try {
+    const [first, second] = await Promise.all([
+      startStoryCoCreation(request),
+      startStoryCoCreation(request),
+    ])
+    assert.equal(first.storyId, second.storyId)
+    assert.equal(first.revision, second.revision)
+    const sequential = await startStoryCoCreation(request)
+    assert.notEqual(sequential.storyId, first.storyId, 'a later deliberate start remains a new operation')
+
+    const beat = first.curve.beats.find((candidate) => candidate.kind === 'trigger')!
+    const saveRequest = {
+      storyId: first.storyId,
+      revision: first.revision,
+      curveId: first.curve.id,
+      beatId: beat.id,
+      detail: '暂定：青柠必须先说明自己为何要去游乐园。',
+    }
+    const [savedFirst, savedSecond] = await Promise.all([
+      updateSessionCurveBeat(saveRequest),
+      updateSessionCurveBeat(saveRequest),
+    ])
+    assert.equal(savedFirst.revision, savedSecond.revision)
+    assert.equal(savedFirst.curve.id, savedSecond.curve.id)
+    const snapshot = getStorySessionSnapshot(first.storyId)
+    assert.equal(snapshot.revision, savedFirst.revision)
+  } finally {
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+  }
+})
 
 function createSparseSystemDraft(): StoryConflictCoreSystemDraft {
   return createBoundedSystemConflictCoreDraftFallback(sparseSeed)
@@ -442,9 +493,46 @@ test('keeps every rich source fact visible in the fact-preserving curve fallback
   assert.equal(curve.generation?.origin, 'fact-preserving-fallback')
   assert.ok(curve.design)
   assert.equal(curve.design?.sourceFacts.every((fact) => fact.coveredByBeatIds.length > 0), true)
-  assert.match(JSON.stringify(curve.beats), /毕业展布置前/u)
+  const ledgerText = curve.design?.sourceFacts.map((fact) => fact.text).join('|') ?? ''
+  assert.match(ledgerText, /毕业展布置前/u)
+  assert.match(ledgerText, /投影仪今晚要归还/u)
+  assert.match(ledgerText, /她答应不再改动作品/u)
   assert.match(JSON.stringify(curve.beats), /投影仪今晚要归还/u)
-  assert.match(JSON.stringify(curve.beats), /答应不再改动作品/u)
+  assert.match(JSON.stringify(curve.beats), /不再改动作品/u)
+  assert.equal(curve.beats.filter((beat) => beat.detail.includes(richIdea)).length, 0)
+  const beatDetails = curve.beats.map((beat) => beat.detail).join('\n')
+  assert.match(beatDetails, /投影仪今晚要归还/u)
+  assert.match(beatDetails, /不再改动作品/u)
+  assert.match(beatDetails, /删掉自己的名字/u)
+  assert.equal(new Set(curve.design?.sourceFacts.map((fact) => fact.text)).size, curve.design?.sourceFacts.length)
+  assert.equal(curve.beats.filter((beat) => beat.detail.includes('毕业展布置前，沈乔在借来的投影仪')).length, 0)
+})
+
+test('freezes one concrete design foundation before confirmation', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['relationship-tension'],
+    allowSystemNamedCharacters: false,
+  }
+  const richIdea = '毕业展布置前，沈乔在借来的投影仪里看到和前队友剪的短片。投影仪今晚要归还，她答应不再改动作品，却想在展出前决定要不要删掉自己的名字。'
+  const richSeed = {
+    ...sparseSeed,
+    subject: '沈乔',
+    activeSituation: richIdea,
+    lockedGoal: '在展出前决定要不要删掉自己的名字',
+    lockedFacts: ['毕业展布置前', '投影仪今晚要归还', '她答应不再改动作品'],
+  }
+  const curve = createProvisionalCurveFallback(richIdea, richSeed, brief)
+  assert.ok(curve.foundation)
+  assert.notEqual(curve.foundation?.predicament.urgency, '沈乔发现')
+  assert.notEqual(curve.foundation?.middleDevelopment.midpoint, '沈乔发现')
+  assert.ok(curve.foundation?.sourceFactIds?.middleDevelopment.length)
+  const confirmed = confirmProvisionalCurve(curve).confirmedCurve
+  const tampered = {
+    ...confirmed,
+    beats: confirmed.beats.map((beat) => beat.id === 'beat-trigger' ? { ...beat, detail: `${beat.detail} 作者另改` } : beat),
+  }
+  assert.throws(() => materializeConfirmedCurve(richSeed, tampered), /基础与节点不一致/u)
 })
 
 test('rejecting a system proposal excludes it and makes only its dependents stale', () => {
@@ -621,6 +709,25 @@ test('creative directions change the causal mechanism of a fallback curve', () =
   assert.notEqual(costFoundation.predicament.obstacle, relationshipFoundation.predicament.obstacle)
 })
 
+test('same dramatic force still changes at least three causal beats across tones', () => {
+  const growthCurve = createProvisionalCurveFallback(sparseIdea, sparseSeed, {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  })
+  const mysteryCurve = createProvisionalCurveFallback(sparseIdea, sparseSeed, {
+    tones: ['mystery'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  })
+  const comparableKinds = ['character-tension', 'trigger', 'escalation', 'midpoint-turn', 'climax-choice', 'resolution']
+  const differences = comparableKinds.filter((kind) => (
+    growthCurve.beats.find((beat) => beat.kind === kind)?.detail
+      !== mysteryCurve.beats.find((beat) => beat.kind === kind)?.detail
+  ))
+  assert.ok(differences.length >= 3, `expected at least three causal differences, got ${differences.join(', ')}`)
+})
+
 test('a new curve version does not silently reuse a rejected proposal', () => {
   const brief: CreativeBrief = {
     tones: ['growth'],
@@ -673,9 +780,52 @@ test('dependent fallback regeneration propagates consequences without recursive 
     .map((beat) => beat.detail)
 
   assert.match(downstream[0], /独自作决定/u)
+  assert.match(downstream[0], /青柠坚持去游乐园/u)
+  assert.doesNotMatch(downstream[0], /青柠坚持去游乐园；是想/u)
   assert.equal(downstream.slice(1).some((detail) => detail.includes(authorEdit.replace(/^暂定：/u, ''))), false)
   assert.equal(downstream.some((detail) => /“[^”]*“[^”]*”[^”]*”/u.test(detail)), false)
+  assert.doesNotMatch(downstream.join('\n'), /共同作品/u)
   assert.equal(new Set(downstream).size, downstream.length)
+})
+
+test('batch regeneration requires every decision and keeps rejected replacements out of the curve', async () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const edited = updateCurveBeat(
+    curve,
+    'beat-trigger',
+    '暂定：青柠坚持去游乐园，是想证明自己已经能独自作决定。',
+  ).curve
+  const preview = await previewAffectedCurveBeats(sparseIdea, sparseSeed, edited)
+  assert.ok(preview.preview.items.length >= 2)
+
+  assert.throws(
+    () => resolveAffectedCurveBeats(edited, preview.preview, {}),
+    /逐项接受或拒绝/u,
+  )
+
+  const decisions = Object.fromEntries(preview.preview.items.map((item, index) => [
+    item.id,
+    (index === 0 ? 'reject' : 'accept') as StoryCurveRegenerationDecision,
+  ])) as Record<string, StoryCurveRegenerationDecision>
+  const resolved = resolveAffectedCurveBeats(edited, preview.preview, decisions)
+  const rejectedItem = preview.preview.items[0]!
+  assert.equal(
+    resolved.curve.rejectedProposals?.some((proposal) => proposal.detail === rejectedItem.newDetail),
+    true,
+  )
+  assert.equal(
+    resolved.curve.beats.find((beat) => beat.id === rejectedItem.beatId)?.detail,
+    edited.beats.find((beat) => beat.id === rejectedItem.beatId)?.detail,
+  )
+  assert.equal(
+    resolved.curve.beats.find((beat) => beat.id === rejectedItem.beatId)?.status,
+    'stale',
+  )
 })
 
 test('an author may explicitly park source material before confirmation', () => {
@@ -765,6 +915,15 @@ test('extracts a conservative subject and goal from rich fallback prose', () => 
   assert.equal(seed.lockedGoal, '在展出前决定要不要删掉自己的名字')
   assert.equal(seed.activeSituation, idea)
   assert.ok(seed.lockedFacts.includes(idea))
+})
+
+test('keeps a leading goal clause separate from later rich source facts', () => {
+  const idea = '青柠要在周五毕业展前把祖母留下的投影仪送到学校；好友阿岚答应帮忙但要求不要署名；归还期限是周六；途中发现设备缺少电源线；青柠必须决定是否拆掉自己的展板供电；可能失去署名机会。'
+  const seed = createOriginalIdeaFallbackSeed(idea, undefined)
+
+  assert.equal(seed.subject, '青柠')
+  assert.equal(seed.lockedGoal, '在周五毕业展前把祖母留下的投影仪送到学校')
+  assert.equal(seed.activeSituation, idea)
 })
 
 test('adapts deterministic creative drafts to the target and avoids prior motifs', () => {

@@ -86,6 +86,13 @@ const curveProposalPrefixPattern = /^暂定[：:]/u
 const curveSceneSignalPattern = /(?:[“”"']|——|(?:一阵|这时|随后|紧接着|与此同时)|(?:站在|走向|走进|钻进|翻过|爬上|蹲下|握紧|掀飞|飘向|落在|赶来|喊|广播|门票|手环|围栏|检修|铁链|闸机|工作人员|手机|电话|账号|预约|VIP|快速通行|代排|通道卡))/iu
 const curveActionChainPattern = /(?:先[^。！？；\n]{0,28}再|然后|接着|随后|(?:一边|并且)[^。！？；\n]{0,28}(?:走|拿|捡|钻|翻|爬|交|放))/u
 const curveSettledOutcomePattern = /(?:最终|终于|真相大白|已经(?:成功|完成|解决|得到|失去|到达|离开))/u
+const curveFallbackModelErrorCodes = new Set([
+  'INVALID_MODEL_OUTPUT',
+  'QWEN_NOT_CONFIGURED',
+  'QWEN_EMPTY_RESPONSE',
+  'QWEN_INVALID_JSON',
+  'QWEN_INVALID_RESPONSE',
+])
 
 const creativeToneLabels: Record<CreativeTone, string> = {
   comedy: '搞笑',
@@ -120,6 +127,9 @@ interface FallbackStoryMaterial {
   deadline: string
   commitment: string
   decision: string
+  /** Facts that were not selected as a primary role. They still need a
+   * deliberate home in the curve instead of becoming unresolved noise. */
+  remainingFacts: StorySourceFact[]
   factIds: {
     current: string[]
     observed: string[]
@@ -267,7 +277,14 @@ export async function generateProvisionalCurve(
     const curve = parseModelCurve(modelOutput, idea, seed, brief, design, excludedProposalDetails)
     if (curve) return curve
   } catch (error) {
-    if (!(error instanceof AppError)) throw error
+    // A deterministic draft is only a valid recovery for the explicit local
+    // acceptance switch or an unusable model payload. Configuration, auth and
+    // network failures must remain visible instead of being returned as a
+    // seemingly successful curve.
+    if (!(error instanceof AppError)
+      || (!isModelDisabled() && !curveFallbackModelErrorCodes.has(error.code))) {
+      throw error
+    }
   }
 
   return createProvisionalCurveFallback(idea, seed, brief, design, excludedProposalDetails)
@@ -323,21 +340,32 @@ async function generateCurveBeatDetail(
   feedback?: string,
 ): Promise<GeneratedCurveBeatDetail> {
   const seedWithAuthorEdits = applyCurrentCurveEditToSeed(seed, curve)
-  const fallbackDetail = createReplacementDetail(
-    idea,
-    target.kind,
-    seedWithAuthorEdits,
-    curve.brief,
-    curve,
-    target,
-  )
-  const fallbackAnchor = getFallbackCausalAnchor(
-    target.kind,
-    getStorySubject(seedWithAuthorEdits),
-    getStoryGoal(seedWithAuthorEdits, seedWithAuthorEdits.activeSituation),
-    curve.brief,
-    getCausalAnchor(curve, target, getStoryGoal(seedWithAuthorEdits, seedWithAuthorEdits.activeSituation)),
-  )
+  const authorAnchor = getNearestAuthorEditAnchor(curve, target)
+  const fallbackDetail = authorAnchor
+    ? createAuthorDrivenReplacementDetail(
+        target.kind,
+        getStorySubject(seedWithAuthorEdits),
+        getStoryGoal(seedWithAuthorEdits, seedWithAuthorEdits.activeSituation),
+        curve.brief,
+        authorAnchor,
+      )
+    : createReplacementDetail(
+        idea,
+        target.kind,
+        seedWithAuthorEdits,
+        curve.brief,
+        curve,
+        target,
+      )
+  const fallbackAnchor = authorAnchor
+    ? getAuthorDrivenCausalAnchor(target.kind, authorAnchor)
+    : getFallbackCausalAnchor(
+        target.kind,
+        getStorySubject(seedWithAuthorEdits),
+        getStoryGoal(seedWithAuthorEdits, seedWithAuthorEdits.activeSituation),
+        curve.brief,
+        getCausalAnchor(curve, target, getStoryGoal(seedWithAuthorEdits, seedWithAuthorEdits.activeSituation)),
+      )
 
   try {
     const modelOutput = await requestQwenJson({
@@ -357,21 +385,92 @@ async function generateCurveBeatDetail(
     if (modelDetail) {
       return {
         detail: modelDetail,
-        causalAnchor: getFallbackCausalAnchor(
-          target.kind,
-          getStorySubject(seedWithAuthorEdits),
-          getStoryGoal(seedWithAuthorEdits, seedWithAuthorEdits.activeSituation),
-          curve.brief,
-          getCausalAnchor(curve, target, modelDetail),
-        ),
+        causalAnchor: authorAnchor
+          ? getAuthorDrivenCausalAnchor(target.kind, authorAnchor)
+          : getFallbackCausalAnchor(
+              target.kind,
+              getStorySubject(seedWithAuthorEdits),
+              getStoryGoal(seedWithAuthorEdits, seedWithAuthorEdits.activeSituation),
+              curve.brief,
+              getCausalAnchor(curve, target, modelDetail),
+            ),
         usedFallback: false,
       }
     }
   } catch (error) {
-    if (!(error instanceof AppError)) throw error
+    // Invalid/empty model payloads may use the visible deterministic draft,
+    // but configuration, auth, network and timeout failures must reach the
+    // author instead of being disguised as a successful regeneration.
+    if (!(error instanceof AppError)
+      || (!isModelDisabled() && !curveFallbackModelErrorCodes.has(error.code))) {
+      throw error
+    }
   }
 
   return { detail: fallbackDetail, causalAnchor: fallbackAnchor, usedFallback: true }
+}
+
+function getNearestAuthorEditAnchor(curve: ProvisionalCurve, target: CurveBeat): string | undefined {
+  const visited = new Set<string>()
+  // Only the first downstream node should carry the author's compact handle.
+  // Once that node has been regenerated, later nodes inherit its causal
+  // consequence through `getCausalAnchor`; walking all the way back to the
+  // author edit would reprint the same sentence at every level.
+  for (const beatId of target.dependsOn) {
+    if (visited.has(beatId)) continue
+    visited.add(beatId)
+    const beat = curve.beats.find((candidate) => candidate.id === beatId)
+    if (beat?.source === 'user-edit' && beat.status !== 'rejected') {
+      return compactAuthorMaterial(beat.detail)
+    }
+  }
+  return undefined
+}
+
+function getAuthorDrivenCausalAnchor(kind: CurveBeatKind, authorAnchor: string): string {
+  const compact = compactAuthorMaterial(authorAnchor)
+  const purpose = compact.split(/[，；]/u).at(-1)?.trim() || compact
+  switch (kind) {
+    case 'character-tension': return `${purpose}暴露的矛盾`
+    case 'trigger': return `${purpose}带来的限制`
+    case 'escalation': return `${purpose}带来的前置条件`
+    case 'midpoint-turn': return `${purpose}改变了原办法`
+    case 'climax-choice': return `${purpose}要求作出取舍`
+    case 'resolution': return `${purpose}留下的责任`
+    case 'current-state': return purpose
+  }
+}
+
+function createAuthorDrivenReplacementDetail(
+  kind: CurveBeatKind,
+  subject: string,
+  goal: string,
+  brief: CreativeBrief,
+  authorAnchor: string,
+): string {
+  // The author handle may intentionally contain two short clauses (the
+  // decision and its consequence). `shortenCurveContext` would split at the
+  // semicolon and discard the consequence, so preserve the compact author
+  // handle as-is here.
+  const anchor = shortenAuthorAnchor(authorAnchor)
+  const goalPhrase = getGoalPhrase(goal)
+  const goalObject = getGoalObject(goal)
+  switch (kind) {
+    case 'character-tension':
+      return `暂定：${subject}原来依赖的办法与“${anchor}”发生冲突；继续${goalPhrase}前，必须重新界定自己愿意承担的部分。`
+    case 'trigger':
+      return `暂定：“${anchor}”让${subject}不能再把${goalObject}当成照旧执行的安排，原来的办法因此停住；${getToneCausalClause(brief, 'trigger')}。`
+    case 'escalation':
+      return `暂定：围绕“${anchor}”，${subject}继续${goalPhrase}时必须先处理这项决定带来的前置条件；回避会让代价变得具体。`
+    case 'midpoint-turn':
+      return `暂定：${subject}发现“${anchor}”改变了自己对${goalObject}的判断，旧办法无法同时保留这项决定和目标；${getToneCausalClause(brief, 'midpoint')}。`
+    case 'climax-choice':
+      return `暂定：${subject}必须在“${anchor}”的要求与继续${goalPhrase}之间作出取舍；选择会明确放弃另一项条件，不能由别人代替。`
+    case 'resolution':
+      return `暂定：${subject}如何兑现“${anchor}”中的决定，会决定${goalPhrase}最终保留什么，并留下可辨认的人物变化。`
+    case 'current-state':
+      return `暂定：${subject}需要先明确“${anchor}”如何改变${goalPhrase}。`
+  }
 }
 
 function replaceRejectedProposalIfNeeded(
@@ -620,6 +719,22 @@ export function resolveAffectedCurveBeats(
       .filter((item) => decisions[item.id] === 'reject')
       .map((item) => item.beatId),
   )
+  const rejectedPreviewProposals = preview.items
+    .filter((item) => decisions[item.id] === 'reject')
+    .map((item): CurveBeat => {
+      const original = curve.beats.find((beat) => beat.id === item.beatId)
+      return {
+        id: `rejected-preview-${randomUUID()}`,
+        kind: item.kind,
+        title: item.title,
+        detail: item.newDetail,
+        source: 'system-proposal',
+        status: 'rejected',
+        dependsOn: [...(original?.dependsOn ?? [])],
+        sourceFactIds: [...item.newSourceFactIds],
+        ...(item.newCausalAnchor ? { causalAnchor: item.newCausalAnchor } : {}),
+      }
+    })
   const beats = curve.beats.map((beat) => {
     const item = itemByBeatId.get(beat.id)
     if (!item || decisions[item.id] !== 'accept') return beat
@@ -643,7 +758,12 @@ export function resolveAffectedCurveBeats(
     '作者逐项审阅了受影响节点的重推提案。',
   )
   return {
-    curve: finalizeCurveMutation(curve, beats, instruction),
+    curve: finalizeCurveMutation(curve, beats, instruction, {
+      rejectedProposals: [
+        ...(curve.rejectedProposals ?? []),
+        ...rejectedPreviewProposals,
+      ],
+    }),
     affectedBeatIds: preview.items.map((item) => item.beatId),
   }
 }
@@ -841,6 +961,9 @@ export function materializeConfirmedCurve(
     ?? confirmedCurve.design?.foundation
   if (!foundation) {
     throw new AppError('已确认主线缺少冻结的故事设计基础，请恢复旧版本后重新确认。', 409, 'STORY_CURVE_FOUNDATION_INCOMPLETE')
+  }
+  if (!isStoryCurveFoundationCurrent(foundation, confirmedCurve.beats)) {
+    throw new AppError('已确认主线的故事设计基础与节点不一致，不能重新反向生成困境。请恢复匹配的主线版本。', 409, 'STORY_CURVE_FOUNDATION_OUT_OF_DATE')
   }
   const narrativeSeed = createNarrativeSeed(seed, confirmedCurve, foundation)
   const confirmedGoal = foundation.preservedGoal || getConfirmedCurveGoal(narrativeSeed, beats.currentState)
@@ -1143,6 +1266,7 @@ export function createProvisionalCurveFallback(
       sourceFactIds: [...new Set([...material.factIds.commitment, ...material.factIds.decision])],
     }),
   ]
+  attachRemainingFallbackFacts(beats, material.remainingFacts, material.goal)
   const coveredDesign = updateStoryDesignCoverage(design, beats)
   const foundation = buildStoryCurveFoundation(beats, proposalBrief, {
     activeSituation: material.current,
@@ -1207,40 +1331,109 @@ function deriveFallbackStoryMaterial(
   const fallbackFact = (candidate: StorySourceFact | undefined, fallback: string): StorySourceFact => (
     candidate ?? { id: `synthetic-${fallback}`, text: fallback, source: 'user-input', disposition: 'integrated', coveredByBeatIds: [] }
   )
-  const currentBase = fallbackFact(currentFact, '当前处境').text
-  const observed = fallbackFact(observedFact, `${goal}的原计划`).text
-  const deadline = fallbackFact(deadlineFact, '当前可用的条件').text
-  const commitment = fallbackFact(commitmentFact, '自己必须作决定的习惯').text
-  const decision = fallbackFact(decisionFact, goal).text
+  const currentBase = getAtomicFactHandle(fallbackFact(currentFact, '当前处境').text, '当前处境')
+  const observed = getAtomicFactHandle(fallbackFact(observedFact, '原定安排').text, '原定安排')
+  const deadline = getAtomicFactHandle(fallbackFact(deadlineFact, '眼前的时机').text, '眼前的时机')
+  const commitment = getAtomicFactHandle(fallbackFact(commitmentFact, '尚未明确的取舍').text, '尚未明确的取舍')
+  const decision = getAtomicFactHandle(fallbackFact(decisionFact, goal).text, goal)
   const ids = (fact: StorySourceFact | undefined, fallback: StorySourceFact | undefined): string[] => {
     const selected = fact ?? fallback
     return selected?.id.startsWith('synthetic-') ? [] : selected ? [selected.id] : []
   }
-  const current = [
-    currentBase,
-    observedFact && observedFact.id !== currentFact?.id ? observed : undefined,
-  ].filter(Boolean).join('；')
+  // The current-state card is a compact starting point, not a second copy of
+  // the whole premise. Other facts are assigned to the beat that develops
+  // them, so repeating `observed` here would make a rich input look inflated.
+  const current = currentBase
   return {
     subject,
     goal,
     current: current.includes(getGoalPhrase(goal))
       ? current
-      : `${current}；当前要决定：${getGoalPhrase(goal)}`,
+      : `${current}；当前要决定是否${getGoalPhrase(goal)}`,
     observed,
     deadline,
     commitment,
     decision,
+    remainingFacts: [...remaining],
     factIds: {
-      current: [...new Set([
-        ...ids(currentFact, sourceFacts[0]),
-        ...(observedFact && observedFact.id !== currentFact?.id ? ids(observedFact, undefined) : []),
-      ])],
+      current: ids(currentFact, sourceFacts[0]),
       observed: ids(observedFact, undefined),
       deadline: ids(deadlineFact, undefined),
       commitment: ids(commitmentFact, undefined),
       decision: ids(decisionFact, undefined),
     },
   }
+}
+
+/**
+ * Role assignment deliberately starts with one primary fact per causal beat.
+ * Rich ideas often contain one more consequence than the five obvious roles
+ * (for example, a possible loss after a decision). Keep that consequence
+ * visible and traceable by attaching it to the beat that can actually develop
+ * it, while adding only a short object phrase to the proposal text.
+ */
+function attachRemainingFallbackFacts(
+  beats: CurveBeat[],
+  remainingFacts: readonly StorySourceFact[],
+  goal: string,
+): void {
+  for (const fact of remainingFacts) {
+    const normalized = fact.text.trim()
+    if (!normalized) continue
+    const kind: CurveBeatKind = /(?:期限|今晚|明早|明天|截止|归还|交接|之前|展出前|仪式前)/u.test(normalized)
+      ? 'trigger'
+      : /(?:答应|承诺|不再|约定|保证|要求|禁止|必须)/u.test(normalized)
+        ? 'escalation'
+        : /(?:决定|是否|要不要|可能|失去|代价|名字|署名|选择)/u.test(normalized)
+          ? 'climax-choice'
+          : 'character-tension'
+    const target = beats.find((beat) => beat.kind === kind)
+      ?? beats.find((beat) => beat.kind === 'resolution')
+    if (!target) continue
+    target.sourceFactIds = [...new Set([...(target.sourceFactIds ?? []), fact.id])]
+    const handle = getAtomicFactHandle(normalized, getGoalPhrase(goal))
+    if (!handle || target.detail.includes(handle)) continue
+    const suffix = kind === 'trigger'
+      ? `；处理时还要顾及${handle}`
+      : kind === 'escalation'
+        ? `；这项条件会让取舍更具体`
+        : kind === 'climax-choice'
+          ? `；代价还包括${handle}`
+          : `；它会改变${getGoalPhrase(goal)}的判断`
+    const nextDetail = `${target.detail.replace(/[。！？]$/u, '')}${suffix}。`
+    target.detail = nextDetail.length > maximumCurveBeatLength
+      ? `${nextDetail.slice(0, maximumCurveBeatLength - 1)}…`
+      : nextDetail
+    target.causalAnchor = shortenAuthorAnchor(handle)
+  }
+}
+
+/** Keep one source fact as a short causal handle. The full wording remains in
+ * the ledger; curve cards should carry only the object that the next beat
+ * actually develops. */
+function getAtomicFactHandle(value: string, fallback: string): string {
+  const cleaned = value
+    .replace(/^暂定[：:]/u, '')
+    .replace(/^(?:却|但|并且|同时|然后|随后)\s*/u, '')
+    .replace(/[“”"']/gu, '')
+    .trim()
+  const sceneMatch = cleaned.match(/(?:在|于)(?:借来的)?(.+?)(?:里|中)看到(?:和)?(.+)$/u)
+  if (sceneMatch?.[1] && sceneMatch[2]) return shortenAtomicFact(`${sceneMatch[1]}里的${sceneMatch[2]}`)
+  const decisionMatch = cleaned.match(/(?:决定|选择|判断|确认)(?:要不要|是否)(.+)$/u)
+  if (decisionMatch?.[1]) return shortenAtomicFact(`是否${decisionMatch[1].trim()}`)
+  const intentionMatch = cleaned.match(/(?:想要|想|希望|打算|准备)(?:在[^，。！？；]{0,16})?(?:决定|选择|判断|确认)(?:要不要|是否)(.+)$/u)
+  if (intentionMatch?.[1]) return shortenAtomicFact(`是否${intentionMatch[1].trim()}`)
+  const commitmentMatch = cleaned.match(/(?:答应|承诺|约定|保证)(.+)$/u)
+  if (commitmentMatch?.[1]) return shortenAtomicFact(commitmentMatch[1].trim())
+  const clauses = cleaned.split(/[，。！？；\n]/u).map((part) => part.trim()).filter(Boolean)
+  const candidate = clauses.find((part) => part.length >= 4) ?? cleaned
+  const withoutSubject = candidate.replace(/^[\u4e00-\u9fff]{1,4}(?=(?:在|于|想|要|答应|承诺|却))/u, '').trim()
+  return shortenAtomicFact(withoutSubject || candidate || fallback)
+}
+
+function shortenAtomicFact(value: string): string {
+  const normalized = value.trim()
+  return normalized.length > 36 ? `${normalized.slice(0, 36)}…` : normalized
 }
 
 function createFallbackProposalBeat(
@@ -1357,7 +1550,7 @@ function getFallbackCausalAnchor(
   const anchor = getConcreteMaterialHandle(material, goal, brief)
   switch (kind) {
     case 'character-tension':
-      return storyMaterial?.observed
+      return storyMaterial?.observed && !isPlaceholderMaterial(storyMaterial.observed, goal)
         ? `${subject}对${getConcreteMaterialHandle(storyMaterial.observed, goal, brief)}的旧判断开始动摇`
         : `${subject}原来依赖的办法暴露出局限`
     case 'trigger':
@@ -1424,14 +1617,11 @@ function parseModelCurve(
   const coveredDesign = updateStoryDesignCoverage(design, orderedBeats)
   if (getUnresolvedStorySourceFacts(coveredDesign).length) return undefined
   const plannedFoundation = buildStoryCurveFoundation(orderedBeats, brief, seed)
-  const suppliedFoundation = parseModelCurveFoundation(value.foundation)
-  const foundation = plannedFoundation && suppliedFoundation
-    ? {
-        ...suppliedFoundation,
-        sourceFactIds: suppliedFoundation.sourceFactIds ?? plannedFoundation.sourceFactIds,
-        beatSignatures: plannedFoundation.beatSignatures,
-      }
-    : plannedFoundation
+  // The model may suggest richer wording, but it cannot introduce a second
+  // design map. Derive the frozen foundation from the exact beats that passed
+  // the same source-fact and proposal checks so confirmation and first-spine
+  // materialization share one causal source of truth.
+  const foundation = plannedFoundation
   if (!foundation) return undefined
 
   const now = Date.now()
@@ -1788,19 +1978,35 @@ function createReplacementDetail(
 }
 
 function getFallbackTension(subject: string, goal: string, brief: CreativeBrief, material: string, storyMaterial?: FallbackStoryMaterial): string {
-  const anchor = getConcreteMaterialHandle(material, goal, brief)
+  const hasMaterial = !isPlaceholderMaterial(material, goal)
+  const commitmentSource = storyMaterial?.commitment ?? material
+  const hasCommitment = !isPlaceholderMaterial(commitmentSource, goal)
+  const anchor = hasMaterial ? getConcreteMaterialHandle(material, goal, brief) : getDirectionAnchor(brief, goal)
   const goalPhrase = getGoalPhrase(goal)
+  const goalObject = getGoalObject(goal)
   const goalAction = getWantGoal(goal)
-  const commitment = getConcreteMaterialHandle(storyMaterial?.commitment ?? material, goal, brief)
+  const commitment = hasCommitment
+    ? getConcreteMaterialHandle(commitmentSource, goal, brief)
+    : getDirectionAnchor(brief, goal)
   const tone = getToneCausalClause(brief, 'tension')
+  if (storyMaterial && hasConcreteFallbackMaterial(storyMaterial.observed, goal)) {
+    const observed = getConcreteMaterialHandle(storyMaterial.observed, goal, brief)
+    if (brief.dramaticForces.includes('relationship-tension') && hasConcreteFallbackMaterial(storyMaterial.commitment, goal)) {
+      return `暂定：${observed}让${subject}原本的安排出现缺口，而${commitment}把这项帮忙变成必须回应的承诺；${tone}。`
+    }
+    return `暂定：${observed}暴露出${subject}原本办法的缺口；${subject}仍要${goalPhrase}，却不能再假装条件齐全。`
+  }
   if (brief.dramaticForces.includes('relationship-tension')) {
-    return `暂定：${subject}${goalAction}，但${commitment}使已经说出的承诺与现在的选择无法同时成立；${tone}`
+    return `暂定：${subject}${goalAction}，但“${commitment}”使已经说出的承诺与现在的选择无法同时成立；${tone}`
   }
   if (brief.dramaticForces.includes('contrast')) {
     if (brief.tones.includes('mystery')) {
       return `暂定：${anchor}让${subject}无法只凭表面判断是否${getGoalObject(goal)}；信息缺口开始拖住${goalPhrase}。`
     }
     if (brief.tones.includes('growth')) {
+      if (!hasMaterial && !hasCommitment) {
+        return `暂定：${subject}想${goalPhrase}，却还没有决定是否由自己承担这次选择；${tone}`
+      }
       return `暂定：${anchor}让${subject}原来依赖的做法露出局限；要${goalPhrase}就得重新承担${commitment}。`
     }
     if (brief.tones.includes('comedy')) {
@@ -1812,12 +2018,21 @@ function getFallbackTension(subject: string, goal: string, brief: CreativeBrief,
 }
 
 function getFallbackTriggerDetail(subject: string, goal: string, brief: CreativeBrief, material: string, storyMaterial?: FallbackStoryMaterial): string {
-  const anchor = getConcreteMaterialHandle(material, goal, brief)
+  const hasMaterial = !isPlaceholderMaterial(material, goal)
+  const commitmentSource = storyMaterial?.commitment ?? material
+  const hasCommitment = !isPlaceholderMaterial(commitmentSource, goal)
+  const anchor = hasMaterial ? getConcreteMaterialHandle(material, goal, brief) : getDirectionAnchor(brief, goal)
   const goalPhrase = getGoalPhrase(goal)
   const goalAction = getWantGoal(goal)
-  const commitment = getConcreteMaterialHandle(storyMaterial?.commitment ?? material, goal, brief)
+  const commitment = hasCommitment
+    ? getConcreteMaterialHandle(commitmentSource, goal, brief)
+    : getDirectionAnchor(brief, goal)
   const tone = getToneCausalClause(brief, 'trigger')
   const force = brief.dramaticForces[0]
+  if (storyMaterial && hasConcreteFallbackMaterial(storyMaterial.deadline, goal)) {
+    const deadline = getConcreteMaterialHandle(storyMaterial.deadline, goal, brief)
+    return `暂定：在“${deadline}”的限制下，${subject}的时间窗口被压到眼前；若要${goalPhrase}，必须先处理这项限制。`
+  }
   switch (force) {
     case 'misunderstanding':
       return `暂定：${anchor}中的关键信息尚未被同样理解，让${subject}${goalAction}的原计划停住；${tone}`
@@ -1826,14 +2041,17 @@ function getFallbackTriggerDetail(subject: string, goal: string, brief: Creative
     case 'surprise':
       return `暂定：${anchor}改变了${subject}原本依赖的条件，迫使其重新判断是否继续${goalPhrase}；${tone}`
     case 'relationship-tension':
-      return `暂定：${anchor}让${subject}不能把${goalPhrase}与已经说出的承诺分开处理，拖延会留下关系上的代价；${tone}`
+      return `暂定：${anchor}让${subject}不能把${getGoalObject(goal)}与已经说出的承诺分开处理，拖延会留下关系上的代价；${tone}`
     case 'contrast':
     default:
       if (brief.tones.includes('mystery')) {
         return `暂定：${anchor}留下一个不能立即解释的信息缺口，${subject}若继续${goalPhrase}就得先决定相信哪部分；信息仍交给作者确认。`
       }
       if (brief.tones.includes('growth')) {
-        return `暂定：${anchor}让${subject}不能把${goalPhrase}和${commitment}分开处理，拖延会缩小她重新选择的空间。`
+        if (!hasMaterial && !hasCommitment) {
+          return `暂定：${subject}要${goalPhrase}，必须先说明这次选择由谁负责；${tone}`
+        }
+        return `暂定：${anchor}让${subject}不能把${getGoalObject(goal)}和${commitment}分开处理，拖延会缩小${subject}重新选择的空间。`
       }
       if (brief.tones.includes('comedy')) {
         return `暂定：${anchor}把${subject}想维持的体面变成公开风险，继续${goalPhrase}不再只是照原计划行动。`
@@ -1843,16 +2061,24 @@ function getFallbackTriggerDetail(subject: string, goal: string, brief: Creative
 }
 
 function getFallbackEscalation(subject: string, goal: string, brief: CreativeBrief, material: string, storyMaterial?: FallbackStoryMaterial): string {
-  const anchor = getConcreteMaterialHandle(material, goal, brief)
-  const goalPhrase = getGoalPhrase(goal)
+  const hasMaterial = !isPlaceholderMaterial(material, goal)
   const commitmentSource = storyMaterial?.commitment ?? material
-  const commitment = getConcreteMaterialHandle(commitmentSource, goal, brief)
-  const commitmentEvidence = storyMaterial?.commitment
-    ? getCommitmentEvidence(storyMaterial.commitment)
-    : commitment
+  const hasCommitment = !isPlaceholderMaterial(commitmentSource, goal)
+  const anchor = hasMaterial ? getConcreteMaterialHandle(material, goal, brief) : getDirectionAnchor(brief, goal)
+  const goalPhrase = getGoalPhrase(goal)
+  const goalObject = getGoalObject(goal)
+  const commitment = hasCommitment
+    ? getConcreteMaterialHandle(commitmentSource, goal, brief)
+    : getDirectionAnchor(brief, goal)
+  const commitmentEvidence = hasCommitment
+    ? getCommitmentEvidence(commitment, goal, brief)
+    : `由${subject}承担这次选择`
   const progression = getProgressionAnchor(material, storyMaterial, goal, brief, commitment)
-  const decision = getConcreteMaterialHandle(storyMaterial?.decision ?? material, goal, brief)
   const tone = getToneCausalClause(brief, 'escalation')
+  if (storyMaterial && hasConcreteFallbackMaterial(storyMaterial.commitment, goal)) {
+    const commitmentLabel = getConcreteMaterialHandle(storyMaterial.commitment, goal, brief)
+    return `暂定：“${commitmentLabel}”这项约定让${subject}不能同时保住${goalObject}和眼前安排；继续拖延会迫使${subject}作出选择。`
+  }
   switch (brief.dramaticForces[0]) {
     case 'misunderstanding':
       return `暂定：${anchor}的含义迟迟无法确认，${subject}若继续${goalPhrase}，就必须先决定是否公开自己的理解；${tone}`
@@ -1868,6 +2094,9 @@ function getFallbackEscalation(subject: string, goal: string, brief: CreativeBri
         return `暂定：${progression}的不同解释会把${subject}带向不同决定；她不能一边保留信息缺口，一边照旧${goalPhrase}。`
       }
       if (brief.tones.includes('growth')) {
+        if (!hasMaterial && !hasCommitment) {
+          return `暂定：${subject}继续${goalPhrase}时，必须在照原安排进行与自己承担这次选择之间取舍；回避会让两边都失去空间。`
+        }
         return `暂定：${commitmentEvidence}使${subject}必须在兑现承诺与${getGoalObject(goal)}之间取舍；继续回避会让${progression}两边都失去空间。`
       }
       if (brief.tones.includes('comedy')) {
@@ -1878,12 +2107,21 @@ function getFallbackEscalation(subject: string, goal: string, brief: CreativeBri
 }
 
 function getFallbackMidpointTurn(subject: string, goal: string, brief: CreativeBrief, material: string, storyMaterial?: FallbackStoryMaterial): string {
-  const anchor = getConcreteMaterialHandle(material, goal, brief)
+  const hasMaterial = !isPlaceholderMaterial(material, goal)
+  const anchor = hasMaterial ? getConcreteMaterialHandle(material, goal, brief) : getDirectionAnchor(brief, goal)
   const goalPhrase = getGoalPhrase(goal)
   const goalObject = getGoalObject(goal)
-  const commitment = getConcreteMaterialHandle(storyMaterial?.commitment ?? material, goal, brief)
+  const commitmentSource = storyMaterial?.commitment ?? material
+  const hasCommitment = !isPlaceholderMaterial(commitmentSource, goal)
+  const commitment = hasCommitment
+    ? getConcreteMaterialHandle(commitmentSource, goal, brief)
+    : getDirectionAnchor(brief, goal)
   const progression = getProgressionAnchor(material, storyMaterial, goal, brief, commitment)
   const tone = getToneCausalClause(brief, 'midpoint')
+  if (storyMaterial && hasConcreteFallbackMaterial(storyMaterial.decision, goal)) {
+    const decision = getConcreteMaterialHandle(storyMaterial.decision, goal, brief)
+    return `暂定：${subject}必须面对${decision}；一旦作出这项决定，${goalObject}的送达安排也会改变。`
+  }
   switch (brief.dramaticForces[0]) {
     case 'misunderstanding':
       return `暂定：${subject}发现，围绕${anchor}继续猜测只会放大误解，必须决定要不要先承担澄清带来的风险；${tone}`
@@ -1896,25 +2134,37 @@ function getFallbackMidpointTurn(subject: string, goal: string, brief: CreativeB
     case 'contrast':
     default:
       if (brief.tones.includes('mystery')) {
-        return `暂定：${subject}发现，${progression}的不同解释会让${goalObject}导向不同结果；她必须决定先保留哪条可能，而不是继续照旧${goalPhrase}。`
+        return `暂定：${subject}发现，${progression}的不同解释会让${goalObject}导向不同结果；${subject}必须决定先保留哪条可能，而不是继续照旧${goalPhrase}。`
       }
       if (brief.tones.includes('growth')) {
-        return `暂定：${subject}发现，真正要改变的不是${goalObject}，而是自己如何面对${progression}；旧办法已无法替她作答。`
+        return `暂定：${subject}发现，真正要改变的不是${goalObject}，而是自己如何面对${progression}；旧办法已无法替${subject}作答。`
       }
       if (brief.tones.includes('comedy')) {
-        return `暂定：${subject}发现，越想用熟悉办法维持体面，${progression}造成的尴尬越大；她必须承认笑点背后有真实代价。`
+        return `暂定：${subject}发现，越想用熟悉办法维持体面，${progression}造成的尴尬越大；${subject}必须承认笑点背后有真实代价。`
       }
       return `暂定：${subject}发现，继续用最熟悉的办法处理${anchor}只能遮住问题，必须承认旧办法会失去什么；${tone}`
   }
 }
 
 function getFallbackClimaxChoice(subject: string, goal: string, brief: CreativeBrief, material: string, storyMaterial?: FallbackStoryMaterial): string {
-  const anchor = getConcreteMaterialHandle(material, goal, brief)
+  const hasMaterial = !isPlaceholderMaterial(material, goal)
+  const anchor = hasMaterial ? getConcreteMaterialHandle(material, goal, brief) : getDirectionAnchor(brief, goal)
   const goalPhrase = getGoalPhrase(goal)
   const goalObject = getGoalObject(goal)
-  const commitment = getConcreteMaterialHandle(storyMaterial?.commitment ?? material, goal, brief)
+  const commitmentSource = storyMaterial?.commitment ?? material
+  const hasCommitment = !isPlaceholderMaterial(commitmentSource, goal)
+  const commitment = hasCommitment
+    ? getConcreteMaterialHandle(commitmentSource, goal, brief)
+    : getDirectionAnchor(brief, goal)
   const progression = getProgressionAnchor(material, storyMaterial, goal, brief, commitment)
   const tone = getToneCausalClause(brief, 'climax')
+  if (storyMaterial && hasConcreteFallbackMaterial(storyMaterial.decision, goal)) {
+    const decision = getConcreteMaterialHandle(storyMaterial.decision, goal, brief)
+    const otherSide = hasConcreteFallbackMaterial(storyMaterial.commitment, goal)
+      ? getConcreteMaterialHandle(storyMaterial.commitment, goal, brief)
+      : `继续${goalPhrase}`
+    return `暂定：${subject}必须在${decision}与${otherSide}之间作出选择；无论先保住哪一边，${goalObject}的安排都会承担可见代价。`
+  }
   switch (brief.dramaticForces[0]) {
     case 'misunderstanding':
       return `暂定：面对${anchor}，${subject}必须选择公开自己的判断并承担被误解的风险，还是保留${goalPhrase}却让信息缺口继续存在；${tone}`
@@ -1930,6 +2180,9 @@ function getFallbackClimaxChoice(subject: string, goal: string, brief: CreativeB
         return `暂定：面对${progression}，${subject}必须选择先按已知信息作出${goalObject}的决定，还是保留疑问并承担延误；两边都不能由别人代替。`
       }
       if (brief.tones.includes('growth')) {
+        if (!hasMaterial && !hasCommitment) {
+          return `暂定：面对这次${goalPhrase}，${subject}必须选择照原安排继续，还是先说清自己真正要承担的决定；两种选择都会留下可辨认的代价。`
+        }
         return `暂定：面对${progression}，${subject}必须选择兑现承诺而暂缓${goalObject}，还是明确改变承诺后继续${goalPhrase}；两边都要承担责任。`
       }
       if (brief.tones.includes('comedy')) {
@@ -1940,12 +2193,26 @@ function getFallbackClimaxChoice(subject: string, goal: string, brief: CreativeB
 }
 
 function getFallbackResolution(subject: string, goal: string, brief: CreativeBrief, material: string, storyMaterial?: FallbackStoryMaterial): string {
-  const anchor = getConcreteMaterialHandle(material, goal, brief)
+  const hasMaterial = !isPlaceholderMaterial(material, goal)
+  const anchor = hasMaterial ? getConcreteMaterialHandle(material, goal, brief) : getDirectionAnchor(brief, goal)
   const goalPhrase = getGoalPhrase(goal)
   const goalObject = getGoalObject(goal)
-  const commitment = getConcreteMaterialHandle(storyMaterial?.commitment ?? material, goal, brief)
+  const commitmentSource = storyMaterial?.commitment ?? material
+  const hasCommitment = !isPlaceholderMaterial(commitmentSource, goal)
+  const commitment = hasCommitment
+    ? getConcreteMaterialHandle(commitmentSource, goal, brief)
+    : getDirectionAnchor(brief, goal)
   const progression = getProgressionAnchor(material, storyMaterial, goal, brief, commitment)
   const toneChange = getResolutionToneChange(brief)
+  if (storyMaterial && (hasConcreteFallbackMaterial(storyMaterial.decision, goal) || hasConcreteFallbackMaterial(storyMaterial.commitment, goal))) {
+    const decision = hasConcreteFallbackMaterial(storyMaterial.decision, goal)
+      ? getConcreteMaterialHandle(storyMaterial.decision, goal, brief)
+      : getConcreteMaterialHandle(storyMaterial.commitment, goal, brief)
+    const commitmentLabel = hasConcreteFallbackMaterial(storyMaterial.commitment, goal)
+      ? getConcreteMaterialHandle(storyMaterial.commitment, goal, brief)
+      : '这项承诺'
+    return `暂定：${subject}如何处理${decision}并回应${commitmentLabel}，会决定这项安排最后留下什么；${toneChange}。`
+  }
   switch (brief.dramaticForces[0]) {
     case 'misunderstanding':
       return `暂定：${subject}如何处理${anchor}，会决定${goalPhrase}最终保留的意义，并${toneChange}。`
@@ -1961,7 +2228,10 @@ function getFallbackResolution(subject: string, goal: string, brief: CreativeBri
         return `暂定：${subject}如何安置${progression}留下的信息缺口，会决定${goalObject}是否按原意完成，并${toneChange}。`
       }
       if (brief.tones.includes('growth')) {
-        return `暂定：${subject}如何处理${progression}，会决定${goalObject}能否继续，以及她愿意为共同作品承担什么；${toneChange}。`
+        if (!hasMaterial && !hasCommitment) {
+          return `暂定：${subject}如何为${goalPhrase}承担自己的决定，会决定这次选择之后保留什么；${toneChange}。`
+        }
+        return `暂定：${subject}如何处理${progression}，会决定${goalObject}能否继续，以及${subject}愿意为这项选择承担什么；${toneChange}。`
       }
       if (brief.tones.includes('comedy')) {
         return `暂定：${subject}是否承认${progression}带来的尴尬，会决定${goalPhrase}留下怎样的结果，并${toneChange}。`
@@ -1982,10 +2252,10 @@ function getToneCausalClause(brief: CreativeBrief, stage: 'tension' | 'trigger' 
     case 'growth':
       switch (stage) {
         case 'tension': return '旧习惯与当前选择开始冲突'
-        case 'trigger': return '这会检验她是否愿意改变旧习惯'
+        case 'trigger': return '这会检验主角是否愿意改变旧习惯'
         case 'escalation': return '继续回避会让旧习惯的代价变得可见'
-        case 'midpoint': return '她必须重新判断要改变的是办法还是目标'
-        case 'climax': return '成长由她愿意承担的取舍体现'
+        case 'midpoint': return '主角必须重新判断要改变的是办法还是目标'
+        case 'climax': return '成长由主角愿意承担的取舍体现'
       }
     default: return '具体走向仍交给作者确认'
   }
@@ -1997,7 +2267,7 @@ function getResolutionToneChange(brief: CreativeBrief): string {
   if (brief.tones.includes('mystery')) return '让仍未解开的信息获得新的位置'
   if (brief.tones.includes('comedy')) return '让尴尬的代价成为人物关系的新理解'
   if (brief.tones.includes('fantasy')) return '让人物重新理解这件事背后的规则'
-  if (brief.tones.includes('growth')) return '让她重新定义自己愿意承担的承诺'
+  if (brief.tones.includes('growth')) return '让主角重新定义自己愿意承担的承诺'
   return `让${getPrimaryToneLabel(brief)}落在一个可辨认的选择结果上`
 }
 
@@ -2006,26 +2276,53 @@ function getGoalPhrase(goal: string): string {
     .trim()
     .replace(/^当前(?:目标|想法)[：:]\s*/u, '')
     .replace(/^(?:想要|想|希望|打算|准备|计划)\s*/u, '')
-    .replace(/决定要不要/u, '决定是否')
-  return normalized || '作出选择'
+  const decisionMatch = normalized.match(/(?:决定|选择|判断|确认)(?:要不要|是否)(.+)$/u)
+  if (decisionMatch?.[1]) return compactGoalPhrase(decisionMatch[1].trim() || '作出选择')
+  if (normalized.startsWith('是否')) return compactGoalPhrase(normalized.slice(2).trim() || '作出选择')
+  return compactGoalPhrase(normalized || '作出选择')
 }
 
 function getWantGoal(goal: string): string {
   const phrase = getGoalPhrase(goal)
-  return /^(?:决定|选择|判断|确认|是否)/u.test(phrase) ? `想${phrase}` : `想${phrase}`
+  return `想${phrase}`
 }
 
 function getGoalObject(goal: string): string {
   const phrase = getGoalPhrase(goal)
-  const decision = phrase.match(/(?:决定|选择|判断|确认)(?:是否|要不要)(.+)$/u)?.[1]?.trim()
-  if (decision) return decision
-  return phrase
+  const deliveryMatch = phrase.match(/^把(.+?)(?:送到|带到|交给|归还|提交|放回)(?:[^，。！？；\n]+)?$/u)
+  if (deliveryMatch?.[1]) return deliveryMatch[1].trim()
+  const decisionMatch = phrase.match(/^(?:是否|要不要)(?:删掉|删除|保留|拆掉|改掉|放弃)(.+)$/u)
+  if (decisionMatch?.[1]) return decisionMatch[1].trim()
+  return phrase.replace(/^把/u, '').trim() || '这项目标'
+}
+
+function compactGoalPhrase(value: string): string {
+  let normalized = value
+    .replace(/^在[^，。！？；\n]{1,24}前(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择))/u, '')
+    .replace(/^于[^，。！？；\n]{1,24}(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择))/u, '')
+    .trim()
+
+  // Long goals often carry a deadline and a complete sentence. Keep the
+  // action/object that later beats need, while the ledger retains the exact
+  // source wording and deadline as separate facts.
+  if (normalized.length > 32) {
+    const action = normalized.match(/(?:把|将)?[^，。！？；\n]{0,24}(?:送到|带到|交给|归还|提交|放回|拆掉|删掉|删除|保留)[^，。！？；\n]{0,16}/u)
+      ?? normalized.match(/(?:去|看|参加|寻找|离开|决定|选择)[^，。！？；\n]{0,24}/u)
+    if (action?.[0]?.trim()) normalized = action[0].trim()
+  }
+  return normalized.length > 34 ? `${normalized.slice(0, 34)}…` : normalized
 }
 
 function getConcreteMaterialHandle(value: string, fallback: string, brief?: CreativeBrief): string {
   if (brief && isPlaceholderMaterial(value, fallback)) return getDirectionAnchor(brief, fallback)
-  const cleaned = compactCausalMaterial(value, fallback)
+  let cleaned = compactCausalMaterial(value, fallback)
     .replace(/^(?:却|但|并且|同时|然后|随后|让|迫使|需要|使|发现|如果|若)\s*/u, '')
+    .trim()
+  // Keep the author's concrete object while removing reporting verbs that make
+  // every later card sound like it is repeating the source sentence.
+  cleaned = cleaned
+    .replace(/^(?:途中|随后|然后|当时)?(?:发现|看到|遇到|收到|拿到)\s*/u, '')
+    .replace(/^(?:主角|她|他|其)\s*(?:发现|看到|遇到|收到|拿到)\s*/u, '')
     .trim()
   const sceneMatch = cleaned.match(/(?:在|于)(?:借来的)?(.+?)(?:里|中)看到(?:和)?(.+)$/u)
   if (sceneMatch?.[1] && sceneMatch[2]) {
@@ -2036,6 +2333,11 @@ function getConcreteMaterialHandle(value: string, fallback: string, brief?: Crea
   if (commitmentMatch?.[1]) {
     const commitment = `${commitmentMatch[1].replace(/[了过]/gu, '').trim()}的承诺`
     return commitment.length > 34 ? `${commitment.slice(0, 34)}…` : commitment
+  }
+  const boundaryMatch = cleaned.match(/(?:要求|禁止|不许)(.+)$/u)
+  if (boundaryMatch?.[1]) {
+    const boundary = `不${boundaryMatch[1].replace(/^不/u, '').trim()}`
+    return boundary.length > 34 ? `${boundary.slice(0, 34)}…` : boundary
   }
   const decisionMatch = cleaned.match(/(?:决定|选择|判断|确认)(?:要不要|是否)(.+)$/u)
   if (decisionMatch?.[1]) return `是否${decisionMatch[1].trim()}`
@@ -2049,9 +2351,19 @@ function getConcreteMaterialHandle(value: string, fallback: string, brief?: Crea
   return normalized.length > 34 ? `${normalized.slice(0, 34)}…` : normalized
 }
 
-function getCommitmentEvidence(value: string): string {
+function hasConcreteFallbackMaterial(value: string | undefined, goal: string): value is string {
+  const normalized = value?.trim() ?? ''
+  return Boolean(normalized) && !isPlaceholderMaterial(normalized, goal)
+}
+
+function getCommitmentEvidence(value: string, goal?: string, brief?: CreativeBrief): string {
   const normalized = value.trim().replace(/^暂定[：:]/u, '')
+  if (goal && brief && isPlaceholderMaterial(normalized, goal)) {
+    return getDirectionAnchor(brief, goal)
+  }
+  if (/^(?:自己决定是否|是否)/u.test(normalized)) return `${normalized}这项决定`
   if (/(?:答应|承诺|约定|保证)/u.test(normalized)) return normalized
+  if (/(?:要求|禁止|不许|不再|不要)/u.test(normalized)) return normalized
   return `${normalized}的承诺`
 }
 
@@ -2068,7 +2380,9 @@ function getProgressionAnchor(
   brief: CreativeBrief,
   fallback: string,
 ): string {
-  const candidate = getConcreteMaterialHandle(material, goal, brief)
+  const candidate = isPlaceholderMaterial(material, goal)
+    ? ''
+    : getConcreteMaterialHandle(material, goal, brief)
   if (!storyMaterial) return candidate || fallback
   const known = [
     storyMaterial.current,
@@ -2078,21 +2392,35 @@ function getProgressionAnchor(
     storyMaterial.decision,
   ].map((value) => getConcreteMaterialHandle(value, goal, brief))
   if (candidate && !known.includes(candidate) && !isPlaceholderMaterial(material, goal)) return candidate
-  return fallback
+  if (!isPlaceholderMaterial(fallback, goal)) return getConcreteMaterialHandle(fallback, goal, brief)
+  return getDirectionAnchor(brief, goal)
 }
 
 function isPlaceholderMaterial(value: string, goal: string): boolean {
   const normalized = value.trim()
+  const normalizedGoal = goal.trim()
+  const goalPhrase = getGoalPhrase(goal)
   return !normalized
     || normalized === '当前处境'
     || normalized === '当前可用的条件'
+    || normalized === '眼前的时机'
     || normalized === '自己必须作决定的习惯'
+    || normalized === '尚未明确的取舍'
     || normalized === `${goal}的原计划`
-    || normalized === goal
+    // A bare goal is useful as the preserved objective, but it is not a
+    // separate obstacle, promise or deadline. Treating it as material made a
+    // sparse idea fabricate a promise around the same words.
+    || normalized === normalizedGoal
+    || normalized === goalPhrase
 }
 
 function getDirectionAnchor(brief: CreativeBrief, goal: string): string {
   const goalPhrase = getGoalPhrase(goal)
+  if (goalPhrase && /^(?:继续|去|看|参加|寻找|归还|离开)/u.test(goalPhrase)) {
+    if (brief.tones.includes('growth')) return `是否由主角自己决定${goalPhrase}`
+    if (brief.tones.includes('comedy')) return `想维持体面却会暴露${goalPhrase}局限的办法`
+    if (brief.tones.includes('mystery')) return `关于${goalPhrase}的关键信息`
+  }
   if (brief.dramaticForces.includes('misunderstanding')) return `与${goalPhrase}有关的理解落差`
   if (brief.dramaticForces.includes('cost')) return `继续${goalPhrase}会占用的一项现实条件`
   if (brief.dramaticForces.includes('surprise')) return `改变${goalPhrase}时机的意外条件`
@@ -2100,7 +2428,7 @@ function getDirectionAnchor(brief: CreativeBrief, goal: string): string {
   if (brief.tones.includes('mystery')) return `尚未确认、却影响${goalPhrase}的信息缺口`
   if (brief.tones.includes('comedy')) return `会暴露${goalPhrase}局限的一次临场尴尬`
   if (brief.tones.includes('friendship')) return `主角与同行者对${goalPhrase}的不同期待`
-  if (brief.tones.includes('growth')) return '原本的安排方式'
+  if (brief.tones.includes('growth')) return `围绕${goalPhrase}的原本安排`
   return `主角原本最依赖的${goalPhrase}安排方式`
 }
 
@@ -2120,9 +2448,18 @@ function extractCausalConsequence(value: string): string {
 }
 
 function getCausalAnchor(curve: ProvisionalCurve, target: CurveBeat, fallback: string): string {
-  const nearest = target.dependsOn
-    .map((dependencyId) => curve.beats.find((beat) => beat.id === dependencyId))
-    .find((beat): beat is CurveBeat => Boolean(beat && beat.status !== 'rejected'))
+  const visited = new Set<string>()
+  const queue = [...target.dependsOn]
+  let nearest: CurveBeat | undefined
+  while (queue.length && !nearest) {
+    const dependencyId = queue.shift()!
+    if (visited.has(dependencyId)) continue
+    visited.add(dependencyId)
+    const candidate = curve.beats.find((beat) => beat.id === dependencyId)
+    if (!candidate || candidate.status === 'rejected') continue
+    nearest = candidate
+    if (candidate.source !== 'user-edit') queue.push(...candidate.dependsOn)
+  }
   if (!nearest) return compactCausalMaterial(fallback, fallback)
   if (nearest.causalAnchor?.trim()) return nearest.source === 'user-edit'
     ? compactAuthorMaterial(nearest.causalAnchor)
@@ -2140,7 +2477,8 @@ function compactCausalMaterial(value: string, fallback: string): string {
     .replace(/"[^"]*"/gu, '')
     .replace(/[“”"']/gu, '')
     .replace(/\s+/gu, ' ')
-    .replace(/^(?:是|却想|却|但|并且|然后|随后|让|因为|由于)\s*/u, '')
+    // Do not strip the leading "是" from the decision marker "是否".
+    .replace(/^(?:是(?!否)|却想|却|但|并且|然后|随后|让|因为|由于)\s*/u, '')
     .trim()
   const clauses = cleaned
     .split(/[，。！？；\n]/u)
@@ -2158,21 +2496,55 @@ function compactCausalMaterial(value: string, fallback: string): string {
 function compactAuthorMaterial(value: string): string {
   const cleaned = value
     .replace(/^暂定[：:]/u, '')
+    .replace(/^(?:作者(?:第一次)?(?:明确)?编辑|作者指令|作者调整)[：:]?/u, '')
     .replace(/[“”"']/gu, '')
     .replace(/\s+/gu, ' ')
     .trim()
-  const objectMatch = cleaned.match(/(?:回应|处理|兑现|改变|保留|放弃|承担|证明)(?:了|着|这|该)?([^，。；]+)$/u)
-  if (objectMatch?.[1]) {
-    const object = objectMatch[1]
-      .replace(/^(?:先|再|继续|是否|要不要|自己的|当前的)\s*/u, '')
-      .trim()
-    if (object.length >= 4) return object.length > 30 ? `${object.slice(0, 30)}…` : object
-  }
   const clauses = cleaned.split(/[，。！？；\n]/u).map((part) => part.trim()).filter((part) => part.length >= 4)
-  const candidate = clauses.find((part) => /(?:想|希望|打算|决定|承诺|证明|必须|愿意|不愿)/u.test(part))
+  // Keep an author's action and its stated purpose together. Splitting on
+  // punctuation and joining with a semicolon made the downstream proposal
+  // sound like two unrelated facts (and often dropped the purpose entirely).
+  const purposeIndex = clauses.findIndex((part, index) => index > 0 && /^(?:是)?(?:想|希望|为了|打算|准备|决定|选择|证明|要)/u.test(part))
+  if (purposeIndex > 0) {
+    const action = clauses.slice(0, purposeIndex).join('，')
+    const purpose = compactAuthorPurpose(clauses.slice(purposeIndex).join('，'))
+    return shortenAuthorAnchor(`${action}，${purpose}`)
+  }
+  const decisionClauses = clauses.filter((part) => /(?:回应|处理|兑现|改变|保留|放弃|承担|证明|坚持|决定|想|希望|打算|承诺|必须|愿意|不愿|独自|自己)/u.test(part))
+  if (decisionClauses.length >= 2) {
+    return shortenAuthorAnchor(`${decisionClauses[0]}，${decisionClauses.at(-1)}`)
+  }
+  const objectMatch = cleaned.match(/(?:回应|处理|兑现|改变|保留|放弃|承担|证明|坚持)(?:了|着|这|该)?([^，。；]+)$/u)
+  const object = objectMatch?.[1]
+    ?.replace(/^(?:先|再|继续|是否|要不要|自己的|当前的|也是在|就是)/u, '')
+    .trim()
+  if (object && object.length >= 4) return shortenAuthorAnchor(object)
+
+  // Prefer the clause that names the author's new decision or consequence.
+  // Taking the last matching clause preserves the useful object in inputs such
+  // as “不只是想玩，也是为了证明自己能独自做决定”。
+  const candidate = [...clauses].reverse().find((part) => /(?:想|希望|打算|决定|承诺|证明|必须|愿意|不愿|独自|自己)/u.test(part))
     ?? clauses.at(-1)
     ?? cleaned
-  return candidate.length > 32 ? `${candidate.slice(0, 32)}…` : candidate
+  return shortenAuthorAnchor(candidate)
+}
+
+function compactAuthorPurpose(value: string): string {
+  let normalized = value
+    .replace(/^(?:是)?(?:想|希望|为了|打算|准备|决定|选择)s*/u, '')
+    .replace(/^证明(?:自己)?(?:已经|能够|能)?s*/u, '')
+    .replace(/^让(?:自己)?(?:能够|能)?s*/u, '')
+    .trim()
+  const decision = normalized.match(/(?:独自|自己|亲自)?(?:作|做|承担|决定|选择|回应|处理|保留|放弃).+$/u)
+  if (decision?.[0]) normalized = decision[0].trim()
+  return normalized || value.trim()
+}
+
+function shortenAuthorAnchor(value: string): string {
+  const normalized = value
+    .replace(/^(?:也是在|就是|而是|让|需要|先|再)\s*/u, '')
+    .trim()
+  return normalized.length > 54 ? `${normalized.slice(0, 54)}…` : normalized
 }
 
 function compactGeneratedConsequence(value: string, fallback: string): string {
@@ -2315,6 +2687,10 @@ function hasNewNamedCharacter(text: string, seed?: StorySeed): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isModelDisabled(): boolean {
+  return /^(?:1|true|yes)$/iu.test(process.env.STORY_DISABLE_MODEL?.trim() ?? '')
 }
 
 const curveGenerationSystemPrompt = `你是故事共创编辑。你的职责是把用户的模糊想法整理成一条可讨论、可编辑的暂定故事曲线，而不是写小说或代替用户决定主线。

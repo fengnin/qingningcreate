@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Archive, ArrowLeft, ArrowRight, Check, CircleAlert, History, PencilLine, RefreshCcw, Sparkles, Trash2 } from 'lucide-react'
 import type { CreativeBrief, CreativeTone, CurveBeat, DramaticForce, StoryCurveVersion, StorySourceFact, StoryCurveRegenerationDecision } from '../story/types'
 import type { StorySession } from '../story/useStorySession'
@@ -56,6 +56,8 @@ const statusLabel: Record<CurveBeat['status'], string> = {
 export function CreativeBriefScreen({ session }: { session: StorySession }) {
   const [brief, setBrief] = useState<CreativeBrief>(session.creativeBrief)
   const [versionMode, setVersionMode] = useState<'replace-draft' | 'new-version'>('new-version')
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const submitLockRef = useRef(false)
   const isLoading = session.stageStatus === 'loading'
   const hasExistingSession = Boolean(session.storyId && session.provisionalCurve)
 
@@ -78,8 +80,15 @@ export function CreativeBriefScreen({ session }: { session: StorySession }) {
   }
 
   const submit = () => {
+    if (submitLockRef.current || isLoading) return
+    submitLockRef.current = true
+    setIsSubmitting(true)
     session.updateCreativeBrief(brief)
     void session.generateProvisionalCurve(brief, hasExistingSession ? versionMode : undefined)
+      .finally(() => {
+        submitLockRef.current = false
+        setIsSubmitting(false)
+      })
   }
 
   return (
@@ -150,7 +159,7 @@ export function CreativeBriefScreen({ session }: { session: StorySession }) {
 
           {session.stageError && <p className="cocreation-error" role="alert"><CircleAlert size={16} /> {session.stageError}</p>}
           <div className="cocreation-actions">
-            <button className="primary-action" type="button" onClick={submit} disabled={isLoading}>{isLoading ? '正在整理主线…' : hasExistingSession ? (versionMode === 'new-version' ? '生成并保留为新版本' : '更新当前草案') : '生成暂定故事曲线'} <ArrowRight size={18} /></button>
+            <button className="primary-action" type="button" onClick={submit} disabled={isLoading || isSubmitting}>{isLoading || isSubmitting ? '正在整理主线…' : hasExistingSession ? (versionMode === 'new-version' ? '生成并保留为新版本' : '更新当前草案') : '生成暂定故事曲线'} <ArrowRight size={18} /></button>
           </div>
         </section>
         <aside className="cocreation-aside">
@@ -179,6 +188,8 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
   const [authorEditBeatId, setAuthorEditBeatId] = useState<string>()
   const [authorInstructionText, setAuthorInstructionText] = useState('')
   const [regenerationDecisions, setRegenerationDecisions] = useState<Record<string, StoryCurveRegenerationDecision>>({})
+  const [isSavingBeat, setIsSavingBeat] = useState(false)
+  const saveBeatLockRef = useRef(false)
   const staleBeats = useMemo(() => curve?.beats.filter((beat) => beat.status === 'stale') ?? [], [curve])
   const staleProposalBeats = useMemo(() => staleBeats.filter((beat) => beat.source === 'system-proposal'), [staleBeats])
   const sourceFacts = curve?.design?.sourceFacts ?? []
@@ -211,9 +222,16 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
   }
 
   const saveBeatEdit = async () => {
-    if (!editingBeatId || !editingValue.trim()) return
-    await session.updateCurveBeat(editingBeatId, editingValue)
-    setEditingBeatId(undefined)
+    if (!editingBeatId || !editingValue.trim() || saveBeatLockRef.current) return
+    saveBeatLockRef.current = true
+    setIsSavingBeat(true)
+    try {
+      await session.updateCurveBeat(editingBeatId, editingValue)
+      setEditingBeatId(undefined)
+    } finally {
+      saveBeatLockRef.current = false
+      setIsSavingBeat(false)
+    }
   }
 
   const regenerateBeat = async (beatId: string, replaceRejected = false) => {
@@ -285,7 +303,7 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
               beat={beat}
               index={index}
               sourceFacts={sourceFacts}
-              isLoading={isLoading}
+              isLoading={isLoading || isSavingBeat}
               isConfirmed={Boolean(session.confirmedCurve)}
               editingBeatId={editingBeatId}
               editingValue={editingValue}
@@ -515,7 +533,17 @@ function CurveDesignSummary({ curve }: { curve: NonNullable<StorySession['provis
   if (!design) return null
   const sections = STORY_DESIGN_SECTION_RULES.map(({ key, label }) => [label, design[key]] as const)
   const beatLabel = (id: string) => curve.beats.find((beat) => beat.id === id)?.title ?? id
-  return <section className="curve-design-summary" aria-label="故事设计记录覆盖情况"><header><strong>故事设计记录</strong><small>这条曲线同时承接冲突、困境、两端和中间发展</small></header><div>{sections.map(([label, ids]) => <span key={label}><b>{label}</b>{ids.map(beatLabel).join('、') || '待补充'}</span>)}</div></section>
+  const foundation = curve.foundation ?? design.foundation
+  return <section className="curve-design-summary" aria-label="故事设计记录覆盖情况">
+    <header><strong>故事设计记录</strong><small>曲线与冲突、困境、中段和两端共用下面这份冻结基础</small></header>
+    <div className="curve-design-coverage">{sections.map(([label, ids]) => <span key={label}><b>{label}</b>{ids.map(beatLabel).join('、') || '待补充'}</span>)}</div>
+    {foundation && <div className="curve-foundation" aria-label="统一故事设计基础">
+      <section><b>冲突核心</b><dl><dt>目标</dt><dd>{foundation.conflictCore.goal}</dd><dt>阻碍</dt><dd>{foundation.conflictCore.obstacle}</dd><dt>取舍</dt><dd>{foundation.conflictCore.tradeoff}</dd></dl></section>
+      <section><b>具体困境</b><dl><dt>当前处境</dt><dd>{foundation.predicament.immediateSituation}</dd><dt>紧迫性</dt><dd>{foundation.predicament.urgency}</dd><dt>代价</dt><dd>{foundation.predicament.plausibleCost}</dd></dl></section>
+      <section><b>中间发展</b><dl><dt>升级</dt><dd>{foundation.middleDevelopment.escalation}</dd><dt>转折</dt><dd>{foundation.middleDevelopment.midpoint}</dd><dt>高潮压力</dt><dd>{foundation.middleDevelopment.climaxPressure}</dd></dl></section>
+      <section><b>故事两端</b><dl><dt>开端</dt><dd>{foundation.storyEnds.openingClue}</dd><dt>高潮</dt><dd>{foundation.storyEnds.climax}</dd><dt>变化</dt><dd>{foundation.storyEnds.resolution}</dd></dl></section>
+    </div>}
+  </section>
 }
 
 function CurveRegenerationReview({

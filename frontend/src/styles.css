@@ -962,6 +962,54 @@ textarea:focus-visible {
   font-size: 10px;
 }
 
+.curve-design-summary .curve-design-coverage {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.curve-design-summary > div.curve-foundation {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #30483d;
+}
+
+.curve-design-summary > div.curve-foundation > section {
+  min-width: 0;
+  padding: 10px 0 0;
+}
+
+.curve-design-summary > div.curve-foundation > section > b {
+  display: block;
+  margin-bottom: 7px;
+  color: #e5b09e;
+  font-size: 11px;
+}
+
+.curve-design-summary > div.curve-foundation dl {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 5px 8px;
+  margin: 0;
+}
+
+.curve-design-summary > div.curve-foundation dt {
+  color: #87988d;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.curve-design-summary > div.curve-foundation dd {
+  min-width: 0;
+  margin: 0;
+  color: #c0cbc2;
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
 .curve-brief-summary {
   display: grid;
   flex: 0 0 min(180px, 28%);
@@ -4635,6 +4683,10 @@ textarea:focus-visible {
     padding-top: 0;
   }
 
+  .curve-design-summary > div.curve-foundation {
+    grid-template-columns: 1fr;
+  }
+
   .stage-shell .setup-header {
     display: flex;
   }
@@ -4689,6 +4741,15 @@ textarea:focus-visible {
   .curve-layout {
     gap: 30px;
     padding-top: 38px;
+  }
+
+  .curve-design-summary header {
+    display: grid;
+    gap: 5px;
+  }
+
+  .curve-design-summary .curve-design-coverage {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .curve-empty-state {

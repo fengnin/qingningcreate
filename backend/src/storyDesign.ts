@@ -96,24 +96,42 @@ export function buildStoryCurveFoundation(
           : 'commitment'
 
   const conflictObstacle = joinCausalDetails([
-    trigger.detail,
-    escalation.detail,
-    characterTension?.detail ?? characterTension?.causalAnchor,
+    trigger.causalAnchor ?? trigger.detail,
+    escalation.causalAnchor ?? escalation.detail,
+    characterTension?.causalAnchor ?? characterTension?.detail,
   ], '当前办法会被这道阻碍打断')
   const tradeoff = getFoundationAnchor(climax.detail, climax.causalAnchor ?? '需要由主角作出取舍')
-  const urgency = getFoundationAnchor(midpoint?.detail ?? midpoint?.causalAnchor ?? escalation.detail, '继续回避会扩大代价')
-  const plausibleCost = getFoundationAnchor(resolution.detail, resolution.causalAnchor ?? '选择会改变目标和关系')
+  // Urgency belongs to the first concrete interruption, while the plausible
+  // cost belongs to the choice that follows. Reading both from the same
+  // midpoint sentence made the frozen map look like a set of duplicated
+  // labels instead of a progression.
+  const urgency = getFoundationAnchor(
+    trigger.detail,
+    trigger.causalAnchor ?? '继续回避会扩大代价',
+  )
+  const plausibleCost = getFoundationCost(
+    climax.detail,
+    getFoundationCost(resolution.detail, resolution.causalAnchor ?? '选择会改变目标和关系'),
+  )
   const openingClue = getFoundationAnchor(trigger.detail, trigger.causalAnchor ?? '原计划出现具体阻碍')
   const opening = current.detail.trim()
   const middleEscalation = getFoundationAnchor(escalation.detail, escalation.causalAnchor ?? '阻碍开始升级')
   const midpointPressure = getFoundationAnchor(midpoint?.detail ?? midpoint?.causalAnchor ?? escalation.detail, '原来的办法不再足够')
   const climaxPressure = getFoundationAnchor(climax.detail, climax.causalAnchor ?? '选择会带来明确代价')
 
+  const allSourceFactIds = getSourceFactIds(active)
   const sourceFactIds = {
     conflictCore: getSourceFactIds([current, characterTension, trigger]),
     predicament: getSourceFactIds([trigger, escalation]),
     middleDevelopment: getSourceFactIds([escalation, midpoint, climax]),
     storyEnds: getSourceFactIds([current, climax, resolution]),
+  }
+  // A sparse idea may have one source fact that is intentionally developed
+  // through a system proposal rather than copied into every card. Keep that
+  // trace visible in each design area so the author can see that the single
+  // fact is the common causal material, not an unresolved omission.
+  for (const section of Object.keys(sourceFactIds) as Array<keyof typeof sourceFactIds>) {
+    if (!sourceFactIds[section].length) sourceFactIds[section] = [...allSourceFactIds]
   }
   const beatSignatures = Object.fromEntries(active.map((beat) => [
     beat.id,
@@ -128,10 +146,10 @@ export function buildStoryCurveFoundation(
     },
     preservedGoal,
     predicament: {
-      title: `${forceLabel} · ${triggerAnchor}造成的困境`,
+      title: `${forceLabel} · ${shortenFoundationLabel(triggerAnchor)}造成的困境`,
       variationAxis,
       immediateSituation: current.detail.trim(),
-        obstacle: joinCausalDetails([triggerAnchor, escalationAnchor], '原来的办法逐步失效'),
+        obstacle: shortenFoundationLabel(joinCausalDetails([triggerAnchor, escalationAnchor], '原来的办法逐步失效')),
         tradeoff,
         urgency,
         choice: tradeoff,
@@ -150,16 +168,31 @@ export function buildStoryCurveFoundation(
         // the author's visible wording carried into the confirmed map.
         climax: climax.detail.trim(),
         resolution: resolution.detail.trim(),
-        cost: climax.detail.trim(),
-        promise: `围绕“${preservedGoal}”处理${escalationAnchor}，让${forceLabel}的取舍决定结局变化。`,
+      cost: plausibleCost,
+      promise: `围绕“${shortenFoundationLabel(preservedGoal)}”处理${shortenFoundationLabel(escalationAnchor)}，让${forceLabel}的取舍决定结局变化。`,
     },
     approach: {
-      intent: `先回应${triggerAnchor}，再决定如何处理${preservedGoal}与${tradeoff}之间的冲突。`,
+      intent: `先回应${shortenFoundationLabel(triggerAnchor)}，再决定如何处理${shortenFoundationLabel(preservedGoal)}与${shortenFoundationLabel(tradeoff)}之间的冲突。`,
       cost: tradeoff,
     },
     sourceFactIds,
     beatSignatures,
   }
+}
+
+function shortenFoundationLabel(value: string): string {
+  const normalized = value.trim()
+  return normalized.length > 76 ? `${normalized.slice(0, 76)}…` : normalized
+}
+
+function getFoundationCost(value: string, fallback: string): string {
+  const cleaned = value
+    .replace(/^暂定[：:]/u, '')
+    .replace(/[“”"']/gu, '')
+    .trim()
+  const clauses = cleaned.split(/[，。！？；\n]/u).map((part) => part.trim()).filter((part) => part.length >= 4)
+  const costClause = [...clauses].reverse().find((part) => /(?:还是|放弃|失去|承担|代价|无法同时|暂缓)/u.test(part))
+  return shortenFoundationLabel(costClause ?? getFoundationAnchor(cleaned, fallback))
 }
 
 /**
@@ -205,16 +238,39 @@ function getDramaticForceLabel(force: CreativeBrief['dramaticForces'][number]): 
 }
 
 function getFoundationAnchor(value: string, fallback: string): string {
-  const normalized = value
+  const cleaned = value
     .replace(/^暂定[：:]/u, '')
     .replace(/^(?:作者(?:第一次)?(?:明确)?编辑|作者指令|作者调整)[：:]?/u, '')
     .replace(/[“”"']/gu, '')
+    .trim()
+  const clauses = cleaned
     .split(/[，。！？；\n]/u)
-    .map((part) => part.trim())
+    .map((part) => part.trim().replace(/^(?:而是|也是|并且|却|但)\s*/u, ''))
     .filter((part) => part.length >= 4)
-    .find((part) => !/^(?:面对|围绕|关于|因此|继续|如果|若|让|需要|主角)$/u.test(part))
-    ?.trim() ?? fallback
+  const normalized = clauses
+    .map((part, index) => ({
+      part,
+      index,
+      score: scoreFoundationClause(part),
+    }))
+    .sort((left, right) => right.score - left.score || right.part.length - left.part.length || left.index - right.index)
+    .find(({ part }) => !isFoundationMetaClause(part))
+    ?.part ?? fallback
   return normalized.length > 72 ? `${normalized.slice(0, 72)}…` : normalized
+}
+
+function scoreFoundationClause(value: string): number {
+  let score = Math.min(value.length, 28) / 8
+  if (/(?:选择|决定|判断|承诺|归还|删掉|保留|放弃|改变|回应|取舍|代价|阻碍|关系|目标|名字|作品|投影仪)/u.test(value)) score += 8
+  if (/(?:必须|不能|无法|不再|继续|仍然|会让|因此)/u.test(value)) score += 3
+  if (/(?:发现|意识到|知道|认为)$/u.test(value)) score -= 8
+  if (/^(?:面对|围绕|关于|因此|继续|如果|若|让|需要|主角|她|他)\s*$/u.test(value)) score -= 12
+  return score
+}
+
+function isFoundationMetaClause(value: string): boolean {
+  return /^(?:面对|围绕|关于|因此|继续|如果|若|让|需要|主角|她|他)\s*$/u.test(value)
+    || /^(?:[^，。！？；]{0,10})(?:发现|意识到|知道|认为)$/u.test(value)
 }
 
 function joinCausalDetails(values: Array<string | undefined>, fallback: string): string {
