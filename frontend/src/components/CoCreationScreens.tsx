@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { MouseEvent } from 'react'
 import { Archive, ArrowLeft, ArrowRight, Check, CircleAlert, History, PencilLine, RefreshCcw, Sparkles, Trash2 } from 'lucide-react'
 import type { CreativeBrief, CreativeTone, CurveBeat, DramaticForce, StoryCurveVersion, StorySourceFact, StoryCurveRegenerationDecision } from '../story/types'
 import type { StorySession } from '../story/useStorySession'
@@ -79,9 +80,12 @@ export function CreativeBriefScreen({ session }: { session: StorySession }) {
     }))
   }
 
-  const submit = () => {
+  const submit = (event: MouseEvent<HTMLButtonElement>) => {
     if (submitLockRef.current || isLoading) return
     submitLockRef.current = true
+    // React state updates are asynchronous; close the same-tick native click
+    // window before the loading render has committed.
+    event.currentTarget.disabled = true
     setIsSubmitting(true)
     session.updateCreativeBrief(brief)
     void session.generateProvisionalCurve(brief, hasExistingSession ? versionMode : undefined)
@@ -221,9 +225,10 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
     setEditingValue(beat.detail)
   }
 
-  const saveBeatEdit = async () => {
+  const saveBeatEdit = async (event?: MouseEvent<HTMLButtonElement>) => {
     if (!editingBeatId || !editingValue.trim() || saveBeatLockRef.current) return
     saveBeatLockRef.current = true
+    if (event) event.currentTarget.disabled = true
     setIsSavingBeat(true)
     try {
       await session.updateCurveBeat(editingBeatId, editingValue)
@@ -236,23 +241,32 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
 
   const regenerateBeat = async (beatId: string, replaceRejected = false) => {
     setRegeneratingBeatId(beatId)
-    await session.regenerateCurveBeat(beatId, regenerationFeedback, replaceRejected)
-    setRegeneratingBeatId(undefined)
-    setRegenerationFeedback('')
+    try {
+      await session.regenerateCurveBeat(beatId, regenerationFeedback, replaceRejected)
+      setRegenerationFeedback('')
+    } finally {
+      setRegeneratingBeatId(undefined)
+    }
   }
 
   const rejectBeat = async (beatId: string) => {
     setRejectingBeatId(beatId)
-    await session.rejectCurveBeat(beatId, rejectReason.trim() || undefined)
-    setRejectingBeatId(undefined)
-    setRejectReason('')
+    try {
+      await session.rejectCurveBeat(beatId, rejectReason.trim() || undefined)
+      setRejectReason('')
+    } finally {
+      setRejectingBeatId(undefined)
+    }
   }
 
   const regenerateAffected = async () => {
     setIsRegeneratingAffected(true)
-    await session.regenerateAffectedCurveBeats(regenerationFeedback.trim() || undefined)
-    setIsRegeneratingAffected(false)
-    setRegenerationFeedback('')
+    try {
+      await session.regenerateAffectedCurveBeats(regenerationFeedback.trim() || undefined)
+      setRegenerationFeedback('')
+    } finally {
+      setIsRegeneratingAffected(false)
+    }
   }
 
   const resolveRegeneration = async () => {
@@ -264,8 +278,11 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
 
   const updateFactDisposition = async (fact: StorySourceFact, disposition: 'parked' | 'integrated') => {
     setBusyFactId(fact.id)
-    await session.setSourceFactDisposition(fact.id, disposition)
-    setBusyFactId(undefined)
+    try {
+      await session.setSourceFactDisposition(fact.id, disposition)
+    } finally {
+      setBusyFactId(undefined)
+    }
   }
 
   const applyAuthorRevision = async () => {
@@ -314,7 +331,7 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
               authorInstructionText={authorInstructionText}
               onBeginEdit={beginEdit}
               onEditingValueChange={setEditingValue}
-              onSaveEdit={() => void saveBeatEdit()}
+              onSaveEdit={(event) => void saveBeatEdit(event)}
               onCancelEdit={() => setEditingBeatId(undefined)}
               onRegenerate={(beatId, replaceRejected) => void regenerateBeat(beatId, replaceRejected)}
               onToggleReject={(beatId) => setRejectingBeatId(rejectingBeatId === beatId ? undefined : beatId)}
@@ -421,7 +438,7 @@ interface CurveBeatCardProps {
   authorInstructionText: string
   onBeginEdit: (beat: CurveBeat) => void
   onEditingValueChange: (value: string) => void
-  onSaveEdit: () => void
+  onSaveEdit: (event: MouseEvent<HTMLButtonElement>) => void
   onCancelEdit: () => void
   onRegenerate: (beatId: string, replaceRejected?: boolean) => void
   onToggleReject: (beatId: string) => void

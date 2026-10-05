@@ -46,7 +46,10 @@ const defaultStoryExpansionScope = 'keep-scale' as const
 
 function createClientOperationId(): string {
   const randomUuid = globalThis.crypto?.randomUUID
-  if (randomUuid) return randomUuid.call(globalThis.crypto)
+  // Story identifiers intentionally start with a letter. Keep the opaque
+  // client operation id within that same wire-format contract even when the
+  // UUID happens to begin with a digit.
+  if (randomUuid) return `op-${randomUuid.call(globalThis.crypto)}`
   return `op-${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 

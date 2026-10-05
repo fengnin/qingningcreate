@@ -382,7 +382,9 @@ async function generateCurveBeatDetail(
       curve,
       target,
     )
-    if (modelDetail) {
+    if (modelDetail
+      && isMeaningfullyDifferentRegeneration(modelDetail, target)
+      && (!authorAnchor || hasAuthorCausalReference(modelDetail, target.kind, authorAnchor))) {
       return {
         detail: modelDetail,
         causalAnchor: authorAnchor
@@ -412,32 +414,48 @@ async function generateCurveBeatDetail(
 
 function getNearestAuthorEditAnchor(curve: ProvisionalCurve, target: CurveBeat): string | undefined {
   const visited = new Set<string>()
-  // Only the first downstream node should carry the author's compact handle.
-  // Once that node has been regenerated, later nodes inherit its causal
-  // consequence through `getCausalAnchor`; walking all the way back to the
-  // author edit would reprint the same sentence at every level.
-  for (const beatId of target.dependsOn) {
+  // Carry the nearest live author edit through the whole affected chain. The
+  // downstream renderer turns this root handle into a stage-specific
+  // consequence, so it never needs to quote an intermediate system sentence.
+  const queue = [...target.dependsOn]
+  while (queue.length) {
+    const beatId = queue.shift()!
     if (visited.has(beatId)) continue
     visited.add(beatId)
     const beat = curve.beats.find((candidate) => candidate.id === beatId)
-    if (beat?.source === 'user-edit' && beat.status !== 'rejected') {
-      return compactAuthorMaterial(beat.detail)
-    }
+    if (!beat || beat.status === 'rejected') continue
+    if (beat.source === 'user-edit') return compactAuthorMaterial(beat.detail)
+    queue.push(...beat.dependsOn)
   }
   return undefined
 }
 
+function isMeaningfullyDifferentRegeneration(detail: string, target: CurveBeat): boolean {
+  return normalizeCausalText(detail) !== normalizeCausalText(target.detail)
+}
+
+function hasAuthorCausalReference(detail: string, kind: CurveBeatKind, authorAnchor: string): boolean {
+  const stageAnchor = getAuthorDrivenStageAnchor(kind, authorAnchor)
+  const fragments = [
+    stageAnchor,
+    ...stageAnchor.split(/[，；]/u),
+    ...authorAnchor.split(/[，；]/u),
+  ]
+    .map((fragment) => fragment.trim())
+    .filter((fragment) => fragment.length >= 4)
+  return fragments.some((fragment) => detail.includes(fragment))
+}
+
 function getAuthorDrivenCausalAnchor(kind: CurveBeatKind, authorAnchor: string): string {
-  const compact = compactAuthorMaterial(authorAnchor)
-  const purpose = compact.split(/[，；]/u).at(-1)?.trim() || compact
+  const stageAnchor = getAuthorDrivenStageAnchor(kind, authorAnchor)
   switch (kind) {
-    case 'character-tension': return `${purpose}暴露的矛盾`
-    case 'trigger': return `${purpose}带来的限制`
-    case 'escalation': return `${purpose}带来的前置条件`
-    case 'midpoint-turn': return `${purpose}改变了原办法`
-    case 'climax-choice': return `${purpose}要求作出取舍`
-    case 'resolution': return `${purpose}留下的责任`
-    case 'current-state': return purpose
+    case 'character-tension': return `${stageAnchor}暴露的矛盾`
+    case 'trigger': return `${stageAnchor}带来的限制`
+    case 'escalation': return `${stageAnchor}带来的前置条件`
+    case 'midpoint-turn': return `${stageAnchor}改变了原办法`
+    case 'climax-choice': return `${stageAnchor}`
+    case 'resolution': return `${stageAnchor}`
+    case 'current-state': return stageAnchor
   }
 }
 
@@ -452,25 +470,146 @@ function createAuthorDrivenReplacementDetail(
   // decision and its consequence). `shortenCurveContext` would split at the
   // semicolon and discard the consequence, so preserve the compact author
   // handle as-is here.
-  const anchor = shortenAuthorAnchor(authorAnchor)
+  const anchor = getAuthorDrivenStageAnchor(kind, authorAnchor)
+  const authorParts = parseAuthorCausalParts(authorAnchor)
+  const actionChoice = getAuthorActionChoicePhrase(authorParts.action)
+  const consequenceChoice = authorParts.consequence || '后续取舍'
   const goalPhrase = getGoalPhrase(goal)
   const goalObject = getGoalObject(goal)
+  const toneClause = getToneCausalClause(brief, kind === 'midpoint-turn' ? 'midpoint' : 'trigger')
+    .replace(/主角/gu, subject)
   switch (kind) {
     case 'character-tension':
       return `暂定：${subject}原来依赖的办法与“${anchor}”发生冲突；继续${goalPhrase}前，必须重新界定自己愿意承担的部分。`
     case 'trigger':
-      return `暂定：“${anchor}”让${subject}不能再把${goalObject}当成照旧执行的安排，原来的办法因此停住；${getToneCausalClause(brief, 'trigger')}。`
+      return `暂定：“${anchor}”让${subject}不能再把${goalObject}当成照旧执行的安排，原来的办法因此停住；${toneClause}。`
     case 'escalation':
-      return `暂定：围绕“${anchor}”，${subject}继续${goalPhrase}时必须先处理这项决定带来的前置条件；回避会让代价变得具体。`
+      return `暂定：围绕${authorParts.action}，${subject}继续${goalPhrase}时必须先处理${consequenceChoice}这个取舍；回避会让代价变得具体。`
     case 'midpoint-turn':
-      return `暂定：${subject}发现“${anchor}”改变了自己对${goalObject}的判断，旧办法无法同时保留这项决定和目标；${getToneCausalClause(brief, 'midpoint')}。`
+      return `暂定：${subject}发现“${anchor}”改变了自己对${goalObject}的判断，旧办法无法同时保留这项决定和目标；${toneClause}。`
     case 'climax-choice':
-      return `暂定：${subject}必须在“${anchor}”的要求与继续${goalPhrase}之间作出取舍；选择会明确放弃另一项条件，不能由别人代替。`
+      return `暂定：${subject}必须面对${actionChoice}与${consequenceChoice}之间的取舍；选择会明确放弃另一项条件，不能由别人代替。`
     case 'resolution':
-      return `暂定：${subject}如何兑现“${anchor}”中的决定，会决定${goalPhrase}最终保留什么，并留下可辨认的人物变化。`
+      return `暂定：${subject}如何承担“${anchor}”带来的责任，会决定${goalPhrase}最终保留什么，并留下可辨认的人物变化。`
     case 'current-state':
       return `暂定：${subject}需要先明确“${anchor}”如何改变${goalPhrase}。`
   }
+}
+
+function getAuthorDrivenStageAnchor(kind: CurveBeatKind, authorAnchor: string): string {
+  const parts = parseAuthorCausalParts(authorAnchor)
+  const action = parts.action
+  const consequence = parts.consequence
+  switch (kind) {
+    case 'escalation':
+      // The first downstream beat carries the concrete action object. Later
+      // beats derive their own consequence/choice anchors, so no beat has to
+      // quote the author's complete instruction.
+      return shortenAuthorAnchor(consequence && consequence !== action
+        ? `${action}；${consequence}成为下一步取舍`
+        : action)
+    case 'midpoint-turn':
+      return consequence || action
+    case 'climax-choice':
+      return shortenAuthorAnchor(consequence && consequence !== action
+        ? `${getAuthorActionChoicePhrase(action)}与${consequence}之间的取舍`
+        : `${getAuthorActionChoicePhrase(action)}带来的取舍`)
+    case 'resolution':
+      return shortenAuthorAnchor(consequence || action)
+    case 'character-tension':
+      return action
+    case 'trigger':
+      return action
+    case 'current-state':
+      return shortenAuthorAnchor(consequence && consequence !== action
+        ? `${action}，${consequence}`
+        : action)
+  }
+}
+
+function getAuthorActionChoicePhrase(action: string): string {
+  const normalized = action
+    .replace(/已确认的|已经确认的/gu, '')
+    .replace(/^(?:要|想|希望|打算|准备)s*/u, '')
+    .trim()
+  const match = normalized.match(/^(回应|处理|兑现|改变|保留|放弃|坚持|继续|完成|归还|提交|参加|寻找|离开|删掉|删除|修改|承担)(.+)$/u)
+  if (!match?.[1] || !match[2]) return normalized
+  if (match[1] === '回应') return match[2].trim()
+  return `${match[1]}${match[2].trim()}`
+}
+
+interface AuthorCausalParts {
+  action: string
+  consequence: string
+}
+
+/**
+ * Turn an author-level instruction into two small planner handles. The input
+ * often contains a directive wrapper ("让高潮…") and a source-fact clause
+ * before it ("投影仪今晚要归还，所以…"). Keeping those wrappers in the
+ * handle is what caused downstream proposals to recursively repeat the whole
+ * instruction. The exact author text remains in `instructions`; these parts
+ * are only for causal propagation.
+ */
+function parseAuthorCausalParts(value: string): AuthorCausalParts {
+  const cleaned = value
+    .replace(/^暂定[：:]/u, '')
+    .replace(/^(?:作者(?:第一次)?(?:明确)?编辑|作者指令|作者调整)[：:]?/u, '')
+    .replace(/[“”"']/gu, '')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  const rawClauses = cleaned
+    .split(/[，；。！？\n]/u)
+    .map((clause) => clause
+      .replace(/^(?:所以|因此|于是|并且|而且|但是|但|却|同时)\s*/u, '')
+      .replace(/^(?:先|再|然后|随后)\s*/u, '')
+      .trim())
+    .filter((clause) => clause.length >= 3)
+  const clauses = rawClauses.length ? rawClauses : [cleaned]
+  // Prefer the clause that explicitly changes the story (respond, change,
+  // keep, drop, etc.). A source-fact clause such as “投影仪今晚要归还”
+  // also contains an action verb, but it is context rather than the author's
+  // instruction and must not swallow the actual directive that follows it.
+  const directedActionIndex = clauses.findIndex((clause) => (
+    /(?:让(?:高潮|主角|人物|自己|她|他|其)|回应|处理|兑现|改变|保留|放弃|坚持|删掉|删除|修改)/u.test(clause)
+    && !/^(?:决定|选择|是否|要不要|想|希望|为了|证明|准备|打算)/u.test(clause)
+  ))
+  const actionIndex = directedActionIndex >= 0
+    ? directedActionIndex
+    : clauses.findIndex((clause) => (
+      /(?:继续|完成|归还|提交|参加|寻找|离开|承担)/u.test(clause)
+      && !/^(?:决定|选择|是否|要不要|想|希望|为了|证明|准备|打算)/u.test(clause)
+    ))
+  const selectedActionIndex = actionIndex >= 0 ? actionIndex : 0
+  const action = normalizeAuthorActionClause(clauses[selectedActionIndex] ?? cleaned)
+  const consequenceClause = clauses
+    .slice(selectedActionIndex + 1)
+    .find((clause) => /(?:决定|选择|是否|要不要|想|希望|为了|证明|准备|打算|承担|继续)/u.test(clause))
+    ?? (clauses.length > 1 ? clauses.at(-1) : undefined)
+  const consequence = normalizeAuthorConsequenceClause(consequenceClause ?? '')
+  return {
+    action: shortenAuthorAnchor(action || cleaned),
+    consequence: consequence && consequence !== action ? shortenAuthorAnchor(consequence) : '',
+  }
+}
+
+function normalizeAuthorActionClause(value: string): string {
+  return value
+    .replace(/^让(?:高潮|主角|人物|自己|她|他|其|[\u4e00-\u9fff]{1,4})(?=(?:先|再|然后|随后|回应|处理|兑现|改变|保留|放弃|坚持|继续|完成|归还|提交|参加|寻找|离开|删掉|删除|修改|承担))/u, '')
+    .replace(/^(?:先|再|然后|随后)\s*/u, '')
+    .replace(/^(?:是)?(?:要|想|希望|打算|准备)\s*/u, '')
+    .trim()
+}
+
+function normalizeAuthorConsequenceClause(value: string): string {
+  return value
+    .replace(/^(?:先|再|然后|随后)\s*/u, '')
+    .replace(/^是(?=(?:想|希望|为了|打算|准备|决定|选择))/u, '')
+    .replace(/^(?:想|希望|为了|打算|准备|选择)\s*/u, '')
+    .replace(/^证明(?:自己)?(?:已经|能够|能)?\s*/u, '')
+    .replace(/^决定(?=是否|要不要)/u, '')
+    .replace(/^选择(?=是否|要不要)/u, '')
+    .trim()
 }
 
 function replaceRejectedProposalIfNeeded(
@@ -553,7 +692,7 @@ export async function regenerateCurveBeat(
         source: 'system-proposal' as const,
         status: 'proposed' as const,
         sourceFactIds: curve.design
-          ? deriveCoveredSourceFactIds(curve.design, replacement.detail)
+          ? deriveReplacementSourceFactIds(curve.design, beat, replacement.detail)
           : beat.sourceFactIds,
       }
     }
@@ -584,6 +723,23 @@ export async function regenerateCurveBeat(
     }),
     affectedBeatIds,
   }
+}
+
+/**
+ * Regeneration changes the wording of a proposal, not the author's source
+ * material. Keep the previous trace links and add any new links the revised
+ * wording makes explicit; otherwise an author edit can make an unchanged
+ * commitment or decision look like an unresolved fact and block confirmation.
+ */
+function deriveReplacementSourceFactIds(
+  design: StoryDesignRecord,
+  previous: CurveBeat,
+  detail: string,
+): string[] {
+  return [...new Set([
+    ...(previous.sourceFactIds ?? []),
+    ...deriveCoveredSourceFactIds(design, detail),
+  ])]
 }
 
 export function rejectCurveBeat(
@@ -968,7 +1124,10 @@ export function materializeConfirmedCurve(
   const narrativeSeed = createNarrativeSeed(seed, confirmedCurve, foundation)
   const confirmedGoal = foundation.preservedGoal || getConfirmedCurveGoal(narrativeSeed, beats.currentState)
   const curveFacts = materializeConfirmedCurveFacts(seed, confirmedCurve)
-  const climaxAction = createConfirmedClimaxAction(beats.climax)
+  // The action that opens the spine is part of the reviewed foundation.  Do
+  // not rebuild it from a display beat: doing so would let a later renderer or
+  // a legacy copy of the beat become a second source of truth.
+  const climaxAction = createConfirmedClimaxAction(foundation, beats.climax)
   const approach = createConfirmedApproach(foundation)
   const predicament = createConfirmedPredicament(
     confirmedCurve,
@@ -1063,22 +1222,48 @@ function materializeConfirmedCurveFacts(seed: StorySeed, curve: ConfirmedCurve):
         ? { originCurveBeatIds: getInitialCurveBeatIds(curve, fact.coveredByBeatIds) }
         : {}),
     }))
-  const sourceFactStatements = new Set(sourceFacts.map((fact) => fact.statement))
-  const proposalFactLimit = Math.max(0, 4 - sourceFacts.length)
-  const proposalFacts = curve.beats
-    .filter((beat) => beat.status !== 'rejected')
-    .filter((beat) => beat.source === 'system-proposal' || (beat.kind === 'current-state' && beat.source === 'user-edit'))
-    .filter((beat) => isInitialCurveBeat(beat.kind))
-    .filter((beat) => !sourceFactStatements.has(beat.detail))
-    .slice(0, proposalFactLimit)
-    .map((beat): StoryFact => ({
-      id: `fact-curve-${beat.id}`,
-      statement: beat.detail,
+  const sourceFactStatements = new Set(sourceFacts.map((fact) => fact.statement.trim()))
+  const foundation = curve.foundation ?? curve.design?.foundation
+  if (!foundation) return sourceFacts
+
+  // These are design constraints already reviewed before confirmation.  They
+  // are intentionally copied from the frozen foundation, never from the
+  // prose of a generated beat.  Keep the initial narrative bounded and leave
+  // climax/resolution as future commitments.
+  const foundationFacts: Array<{ id: string; statement: string; originCurveBeatIds: string[] }> = [
+    {
+      id: 'predicament-immediate-situation',
+      statement: foundation.predicament.immediateSituation,
+      originCurveBeatIds: ['beat-current-state'],
+    },
+    {
+      id: 'predicament-obstacle',
+      statement: foundation.predicament.obstacle,
+      originCurveBeatIds: ['beat-trigger', 'beat-escalation'],
+    },
+    {
+      id: 'predicament-urgency',
+      statement: foundation.predicament.urgency,
+      originCurveBeatIds: ['beat-trigger'],
+    },
+    {
+      id: 'middle-escalation',
+      statement: foundation.middleDevelopment.escalation,
+      originCurveBeatIds: ['beat-escalation'],
+    },
+  ]
+  const proposalLimit = Math.max(0, 4 - sourceFacts.length)
+  const foundationProposals = foundationFacts
+    .filter(({ statement }) => statement.trim() && !sourceFactStatements.has(statement.trim()))
+    .slice(0, proposalLimit)
+    .map(({ id, statement, originCurveBeatIds }): StoryFact => ({
+      id: `fact-foundation-${id}`,
+      statement: statement.trim(),
       source: 'confirmed-curve',
       mutability: 'fixed',
-      originCurveBeatIds: [beat.id],
+      originCurveBeatIds,
     }))
-  return [...sourceFacts, ...proposalFacts]
+  return [...sourceFacts, ...foundationProposals]
 }
 
 function getInitialCurveBeatIds(curve: ConfirmedCurve, beatIds: readonly string[]): string[] {
@@ -1092,10 +1277,13 @@ function isInitialCurveBeat(kind: CurveBeatKind): boolean {
   return initialNarrativeBeatKinds.includes(kind)
 }
 
-function createConfirmedClimaxAction(climax: CurveBeat): StoryAction {
+function createConfirmedClimaxAction(
+  foundation: NonNullable<ConfirmedCurve['foundation']>,
+  climax: CurveBeat,
+): StoryAction {
   return {
     id: 'curve-climax-action',
-    intent: climax.detail,
+    intent: foundation.storyEnds.climax,
     preconditions: [],
     effects: [],
     source: 'generated',
@@ -1490,12 +1678,13 @@ function getAlternativeFallbackBrief(
   brief: CreativeBrief,
   excludedProposalDetails: readonly string[],
 ): CreativeBrief {
-  if (!excludedProposalDetails.length) return brief
-  const availableForces = dramaticForces.filter((force) => !brief.dramaticForces.includes(force))
-  const alternateForce = availableForces[0] ?? dramaticForces.find((force) => force !== brief.dramaticForces[0])
-  return alternateForce
-    ? { ...brief, dramaticForces: [alternateForce, ...brief.dramaticForces.filter((force) => force !== alternateForce).slice(0, 1)] }
-    : brief
+  // A rejected proposal is a rejected wording, not a request to change the
+  // author's selected dramatic mechanism.  Switching forces here made a
+  // replacement silently turn (for example) a contrast curve into a cost
+  // curve.  `avoidExcludedProposal` supplies a bounded alternate sentence
+  // while this brief remains the contract for the whole version.
+  void excludedProposalDetails
+  return brief
 }
 
 function avoidExcludedProposal(
@@ -2217,19 +2406,25 @@ function getFallbackMidpointTurn(subject: string, goal: string, brief: CreativeB
   const tone = getToneCausalClause(brief, 'midpoint')
   if (storyMaterial && hasConcreteFallbackMaterial(storyMaterial.decision, goal)) {
     const decision = getConcreteMaterialHandle(storyMaterial.decision, goal, brief)
-    const decisionObject = getGoalObject(decision)
+    // A regenerated downstream node must advance the nearest causal
+    // consequence. If `material` is the newly regenerated upstream anchor,
+    // carry that compact handle instead of rebuilding the original decision
+    // sentence unchanged.
+    const propagatedDecision = getProgressionAnchor(material, storyMaterial, goal, brief, decision)
+    const decisionObject = getGoalObject(propagatedDecision)
+    const decisionLabel = propagatedDecision === decision ? decision : propagatedDecision
     switch (brief.dramaticForces[0]) {
       case 'misunderstanding':
-        return `暂定：${subject}发现，对“${decision}”的不同理解会改变这项决定的后果；必须先选定自己相信的解释。`
+        return `暂定：${subject}发现，对“${decisionLabel}”的不同理解会改变这项决定的后果；必须先选定自己相信的解释。`
       case 'cost':
-        return `暂定：${subject}发现，“${decision}”要求拿一项眼前条件换取${goalPhrase}；旧办法无法两全。`
+        return `暂定：${subject}发现，“${decisionLabel}”要求拿一项眼前条件换取${goalPhrase}；旧办法无法两全。`
       case 'surprise':
-        return `暂定：${subject}发现，“${decision}”把${goalPhrase}推向新的时机或资源条件；必须重排优先级。`
+        return `暂定：${subject}发现，“${decisionLabel}”把${goalPhrase}推向新的时机或资源条件；必须重排优先级。`
       case 'relationship-tension':
-        return `暂定：${subject}发现，若绕开${commitment}，“${decision}”即使完成也会留下关系裂痕。`
+        return `暂定：${subject}发现，若绕开${commitment}，“${decisionLabel}”即使完成也会留下关系裂痕。`
       case 'contrast':
       default:
-        return `暂定：${subject}发现，“${decisionObject}”让自己最熟悉的办法反而失去作用；要继续${goalPhrase}必须承认这一点。`
+        return `暂定：${subject}发现，“${decisionObject}”让自己最熟悉的办法反而失去作用；要继续${goalPhrase}必须回应“${decisionLabel}”带来的新限制。`
     }
   }
   switch (brief.dramaticForces[0]) {
@@ -2270,22 +2465,24 @@ function getFallbackClimaxChoice(subject: string, goal: string, brief: CreativeB
   const tone = getToneCausalClause(brief, 'climax')
   if (storyMaterial && hasConcreteFallbackMaterial(storyMaterial.decision, goal)) {
     const decision = getConcreteMaterialHandle(storyMaterial.decision, goal, brief)
+    const propagatedDecision = getProgressionAnchor(material, storyMaterial, goal, brief, decision)
     const decisionObject = getGoalObject(decision)
+    const decisionLabel = propagatedDecision === decision ? decision : propagatedDecision
     const otherSide = hasConcreteFallbackMaterial(storyMaterial.commitment, goal)
       ? getConcreteMaterialHandle(storyMaterial.commitment, goal, brief)
       : `继续${goalPhrase}`
     switch (brief.dramaticForces[0]) {
       case 'misunderstanding':
-        return `暂定：${subject}必须在${decisionObject}与先澄清“${otherSide}”之间作出选择；选择会决定这项决定依据哪种理解继续。`
+        return `暂定：${subject}必须在${decisionObject}与先澄清“${otherSide}”之间作出选择；选择会决定“${decisionLabel}”依据哪种理解继续。`
       case 'cost':
-        return `暂定：${subject}必须在${decisionObject}与${otherSide}之间放弃一项条件；这项决定的代价不能再由别人承担。`
+        return `暂定：${subject}必须在${decisionObject}与${otherSide}之间放弃一项条件；“${decisionLabel}”的代价不能再由别人承担。`
       case 'surprise':
-        return `暂定：${subject}必须在${decisionObject}与${otherSide}之间重排先后；新条件会让其中一边失去原来的保障。`
+        return `暂定：${subject}必须在${decisionObject}与${otherSide}之间重排先后；“${decisionLabel}”带来的新条件会让其中一边失去原来的保障。`
       case 'relationship-tension':
-        return `暂定：${subject}必须在${decisionObject}与回应${otherSide}之间作出选择；两边不能靠沉默同时保住。`
+        return `暂定：${subject}必须在${decisionObject}与回应${otherSide}之间作出选择；“${decisionLabel}”不能靠沉默同时保住。`
       case 'contrast':
       default:
-        return `暂定：${subject}必须在${decisionObject}与${otherSide}之间作出选择；要继续${goalPhrase}，就得承认原来的办法已经失效。`
+        return `暂定：${subject}必须在${decisionObject}与${otherSide}之间作出选择；要继续${goalPhrase}，就得回应“${decisionLabel}”而不能照旧。`
     }
   }
   switch (brief.dramaticForces[0]) {
@@ -2335,18 +2532,20 @@ function getFallbackResolution(subject: string, goal: string, brief: CreativeBri
       ? getConcreteMaterialHandle(storyMaterial.commitment, goal, brief)
       : '这项承诺'
     const decisionObject = getGoalObject(decision)
+    const propagatedDecision = getProgressionAnchor(material, storyMaterial, goal, brief, decision)
+    const decisionLabel = propagatedDecision === decision ? decision : propagatedDecision
     switch (brief.dramaticForces[0]) {
       case 'misunderstanding':
-        return `暂定：${subject}如何解释“${decision}”并回应${commitmentLabel}，会决定这项选择最后留下的关系和信息缺口。`
+        return `暂定：${subject}如何解释“${decisionLabel}”并回应${commitmentLabel}，会决定这项选择最后留下的关系和信息缺口。`
       case 'cost':
-        return `暂定：${subject}如何处理${decisionObject}并回应${commitmentLabel}，会决定为了${goalPhrase}放弃什么，并留下可见代价。`
+        return `暂定：${subject}如何处理${decisionObject}并回应${commitmentLabel}，会决定“${decisionLabel}”让${goalPhrase}放弃什么，并留下可见代价。`
       case 'surprise':
-        return `暂定：${subject}如何处理${decisionObject}带来的新条件，会决定${goalPhrase}能否成立，以及旧计划被怎样改写。`
+        return `暂定：${subject}如何处理${decisionObject}带来的新条件，会决定“${decisionLabel}”让${goalPhrase}能否成立，以及旧计划被怎样改写。`
       case 'relationship-tension':
-        return `暂定：${subject}如何处理${decisionObject}并回应${commitmentLabel}，会决定这项选择与这项承诺能否同时被诚实面对。`
+        return `暂定：${subject}如何处理${decisionObject}并回应${commitmentLabel}，会决定“${decisionLabel}”与这项承诺能否同时被诚实面对。`
       case 'contrast':
       default:
-        return `暂定：${subject}处理${decisionObject}并回应${commitmentLabel}后，必须用一个可验证的改变替代旧办法；${subject}承认原来的局限。`
+        return `暂定：${subject}处理${decisionObject}并回应${commitmentLabel}后，必须用一个可验证的改变回应“${decisionLabel}”；${subject}承认原来的局限。`
     }
   }
   switch (brief.dramaticForces[0]) {
@@ -2643,55 +2842,14 @@ function compactCausalMaterial(value: string, fallback: string): string {
 }
 
 function compactAuthorMaterial(value: string): string {
-  const cleaned = value
-    .replace(/^暂定[：:]/u, '')
-    .replace(/^(?:作者(?:第一次)?(?:明确)?编辑|作者指令|作者调整)[：:]?/u, '')
-    .replace(/[“”"']/gu, '')
-    .replace(/\s+/gu, ' ')
-    .trim()
-  const clauses = cleaned.split(/[，。！？；\n]/u).map((part) => part.trim()).filter((part) => part.length >= 4)
-  // Keep an author's action and its stated purpose together. Splitting on
-  // punctuation and joining with a semicolon made the downstream proposal
-  // sound like two unrelated facts (and often dropped the purpose entirely).
-  const purposeIndex = clauses.findIndex((part, index) => index > 0 && /^(?:是)?(?:想|希望|为了|打算|准备|决定|选择|证明|要)/u.test(part))
-  if (purposeIndex > 0) {
-    const action = clauses.slice(0, purposeIndex).join('，')
-    const purpose = compactAuthorPurpose(clauses.slice(purposeIndex).join('，'))
-    return shortenAuthorAnchor(`${action}，${purpose}`)
-  }
-  const decisionClauses = clauses.filter((part) => /(?:回应|处理|兑现|改变|保留|放弃|承担|证明|坚持|决定|想|希望|打算|承诺|必须|愿意|不愿|独自|自己)/u.test(part))
-  if (decisionClauses.length >= 2) {
-    return shortenAuthorAnchor(`${decisionClauses[0]}，${decisionClauses.at(-1)}`)
-  }
-  const objectMatch = cleaned.match(/(?:回应|处理|兑现|改变|保留|放弃|承担|证明|坚持)(?:了|着|这|该)?([^，。；]+)$/u)
-  const object = objectMatch?.[1]
-    ?.replace(/^(?:先|再|继续|是否|要不要|自己的|当前的|也是在|就是)/u, '')
-    .trim()
-  if (object && object.length >= 4) return shortenAuthorAnchor(object)
-
-  // Prefer the clause that names the author's new decision or consequence.
-  // Taking the last matching clause preserves the useful object in inputs such
-  // as “不只是想玩，也是为了证明自己能独自做决定”。
-  const candidate = [...clauses].reverse().find((part) => /(?:想|希望|打算|决定|承诺|证明|必须|愿意|不愿|独自|自己)/u.test(part))
-    ?? clauses.at(-1)
-    ?? cleaned
-  return shortenAuthorAnchor(candidate)
-}
-
-function compactAuthorPurpose(value: string): string {
-  let normalized = value
-    .replace(/^(?:是)?(?:想|希望|为了|打算|准备|决定|选择)s*/u, '')
-    .replace(/^证明(?:自己)?(?:已经|能够|能)?s*/u, '')
-    .replace(/^让(?:自己)?(?:能够|能)?s*/u, '')
-    .trim()
-  const decision = normalized.match(/(?:独自|自己|亲自)?(?:作|做|承担|决定|选择|回应|处理|保留|放弃).+$/u)
-  if (decision?.[0]) normalized = decision[0].trim()
-  return normalized || value.trim()
+  const parts = parseAuthorCausalParts(value)
+  if (parts.action && parts.consequence) return shortenAuthorAnchor(`${parts.action}，${parts.consequence}`)
+  return shortenAuthorAnchor(parts.action || parts.consequence || value.trim())
 }
 
 function shortenAuthorAnchor(value: string): string {
   const normalized = value
-    .replace(/^(?:也是在|就是|而是|让|需要|先|再)\s*/u, '')
+    .replace(/^(?:也是在|就是|而是|所以|因此|于是|让|需要|先|再)\s*/u, '')
     .trim()
   return normalized.length > 54 ? `${normalized.slice(0, 54)}…` : normalized
 }

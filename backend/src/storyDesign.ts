@@ -84,8 +84,8 @@ export function buildStoryCurveFoundation(
   const triggerAnchor = getFoundationBeatAnchor(trigger, '当前触发点')
   const escalationAnchor = getFoundationBeatAnchor(escalation, '当前阻碍')
   const midpointAnchor = midpoint
-    ? getFoundationBeatAnchor(midpoint, '原来的办法不再足够')
-    : escalationAnchor
+    ? getFoundationProgressionAnchor(midpoint, '原来的办法不再足够', escalationAnchor)
+    : '原来的办法不再足够'
   const climaxAnchor = getFoundationBeatAnchor(climax, '选择会带来明确代价')
   const forceLabel = brief.dramaticForces[0] ? getDramaticForceLabel(brief.dramaticForces[0]) : '开放方向'
   const variationAxis: StoryCurveFoundation['predicament']['variationAxis'] = brief.dramaticForces.includes('relationship-tension')
@@ -119,7 +119,11 @@ export function buildStoryCurveFoundation(
   const midpointPressure = midpointAnchor
   const climaxPressure = tradeoff
   const decisionLabel = getFoundationDecisionLabel(preservedGoal)
-  const predicamentObstacle = `${shortenFoundationLabel(triggerAnchor)}使${decisionLabel}不能照原安排推进；${shortenFoundationLabel(escalationAnchor)}把取舍推到眼前。`
+  const predicamentObstacle = buildPredicamentObstacle(
+    triggerAnchor,
+    escalationAnchor,
+    decisionLabel,
+  )
 
   const allSourceFactIds = getSourceFactIds(active)
   const sourceFactIds = {
@@ -151,25 +155,25 @@ export function buildStoryCurveFoundation(
       title: `${forceLabel} · ${shortenFoundationLabel(triggerAnchor)}带来的困境`,
       variationAxis,
       immediateSituation: current.detail.trim(),
-        obstacle: shortenFoundationLabel(predicamentObstacle),
+      obstacle: shortenFoundationLabel(predicamentObstacle),
         tradeoff,
         urgency,
         choice: tradeoff,
         plausibleCost,
     },
     middleDevelopment: {
-        escalation: middleEscalation,
-        midpoint: midpointPressure,
-        climaxPressure,
+      escalation: middleEscalation,
+      midpoint: midpointPressure,
+      climaxPressure,
     },
     storyEnds: {
       opening,
-        openingClue,
-        // Keep the reviewed display sentences for the two ends. The compact
-        // causal handles above are used by the planner, while these fields are
-        // the author's visible wording carried into the confirmed map.
-        climax: climax.detail.trim(),
-        resolution: resolution.detail.trim(),
+      openingClue,
+      // Keep the reviewed display sentences for the two ends. The compact
+      // causal handles above are used by the planner, while these fields are
+      // the author's visible wording carried into the confirmed map.
+      climax: climax.detail.trim(),
+      resolution: resolution.detail.trim(),
       cost: plausibleCost,
       promise: `围绕${shortenFoundationLabel(decisionLabel)}处理${shortenFoundationLabel(escalationAnchor)}，让${forceLabel}的取舍决定结局变化。`,
     },
@@ -283,6 +287,41 @@ function getFoundationBeatAnchor(beat: CurveBeat, fallback: string): string {
     return shortenFoundationLabel(causalAnchor.replace(/^暂定[：:]/u, '').trim())
   }
   return getFoundationAnchor(beat.detail, fallback)
+}
+
+function getFoundationProgressionAnchor(
+  beat: CurveBeat,
+  fallback: string,
+  previousAnchor: string,
+): string {
+  const direct = getFoundationBeatAnchor(beat, fallback)
+  if (direct !== previousAnchor) return direct
+
+  // A sparse fallback can give adjacent beats the same compact anchor. Use a
+  // later causal clause from the reviewed sentence so the design map still
+  // records a progression instead of repeating one label in every section.
+  const clauses = beat.detail
+    .replace(/^暂定[：:]/u, '')
+    .split(/[。！？；]/u)
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 4)
+  const distinct = clauses
+    .map((part) => getFoundationAnchor(part, ''))
+    .find((part) => part && part !== previousAnchor)
+  return distinct || fallback
+}
+
+function buildPredicamentObstacle(
+  triggerAnchor: string,
+  escalationAnchor: string,
+  decisionLabel: string,
+): string {
+  const trigger = shortenFoundationLabel(triggerAnchor)
+  const escalation = shortenFoundationLabel(escalationAnchor)
+  if (trigger === escalation) {
+    return `${trigger}使${decisionLabel}不能照原安排推进，并把取舍推到眼前。`
+  }
+  return `${trigger}使${decisionLabel}不能照原安排推进；${escalation}把取舍推到眼前。`
 }
 
 function getFoundationTradeoff(detail: string, fallback: string): string {

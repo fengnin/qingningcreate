@@ -108,6 +108,17 @@ const sparseSeed = {
   unknowns: [],
 }
 
+const richCurveIdea = '毕业展布置前，沈乔在借来的投影仪里看到和前队友剪的短片。投影仪今晚要归还，她答应不再改动作品，却想在展出前决定要不要删掉自己的名字。'
+const richCurveSeed = {
+  subject: '沈乔',
+  activeSituation: richCurveIdea,
+  lockedGoal: '在展出前决定要不要删掉自己的名字',
+  lockedFacts: [richCurveIdea],
+  worldMode: 'realistic-default' as const,
+  expansionScope: 'keep-scale' as const,
+  unknowns: [],
+}
+
 const reportSeed = {
   activeSituation: '周岚要提交报告',
   lockedGoal: '提交报告',
@@ -137,6 +148,10 @@ test('co-creation start and node save are idempotent under duplicate requests', 
     assert.equal(first.revision, second.revision)
     const sequential = await startStoryCoCreation(request)
     assert.equal(sequential.storyId, first.storyId, 'a retry with the same operation id replays the result')
+    await assert.rejects(
+      () => startStoryCoCreation({ ...request, idea: `${request.idea}-changed` }),
+      (error: unknown) => error instanceof Error && 'code' in error && error.code === 'STORY_OPERATION_CONFLICT',
+    )
     const deliberate = await startStoryCoCreation({
       ...request,
       operationId: `${request.operationId}-deliberate`,
@@ -160,6 +175,10 @@ test('co-creation start and node save are idempotent under duplicate requests', 
     assert.equal(savedFirst.curve.id, savedSecond.curve.id)
     const savedRetry = await updateSessionCurveBeat(saveRequest)
     assert.equal(savedRetry.revision, savedFirst.revision, 'a save retry replays the same mutation')
+    await assert.rejects(
+      () => updateSessionCurveBeat({ ...saveRequest, detail: `${saveRequest.detail} changed` }),
+      (error: unknown) => error instanceof Error && 'code' in error && error.code === 'STORY_OPERATION_CONFLICT',
+    )
     const snapshot = getStorySessionSnapshot(first.storyId)
     assert.equal(snapshot.revision, savedFirst.revision)
   } finally {
@@ -409,6 +428,41 @@ test('materializes only current curve constraints as initial facts', () => {
   )
   assert.equal(foundation.headTail.climax, confirmed.beats.find((beat) => beat.id === 'beat-climax-choice')?.detail)
   assert.equal(foundation.headTail.resolution, confirmed.beats.find((beat) => beat.id === 'beat-resolution')?.detail)
+})
+
+test('confirmed spine materialization keeps the frozen foundation as its source of truth', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const confirmed = confirmProvisionalCurve(createProvisionalCurveFallback(richCurveIdea, richCurveSeed, brief)).confirmedCurve
+  const originalFoundation = confirmed.foundation!
+  const tamperedBeats = confirmed.beats.map((beat) => (
+    beat.kind === 'climax-choice'
+      ? { ...beat, detail: '暂定：这是未经审阅的另一条高潮句子。' }
+      : beat
+  ))
+  const beatSignatures = Object.fromEntries(tamperedBeats.map((beat) => [
+    beat.id,
+    [
+      beat.kind,
+      beat.detail.trim(),
+      beat.causalAnchor?.trim() ?? '',
+      [...(beat.sourceFactIds ?? [])].sort().join(','),
+    ].join('|'),
+  ]))
+  const tampered = {
+    ...confirmed,
+    beats: tamperedBeats,
+    foundation: { ...originalFoundation, beatSignatures },
+  }
+
+  const materialized = materializeConfirmedCurve(richCurveSeed, tampered)
+  assert.equal(materialized.headTail.climax, originalFoundation.storyEnds.climax)
+  assert.equal(materialized.predicament.obstacle, originalFoundation.predicament.obstacle)
+  assert.equal(materialized.approach.intent, originalFoundation.approach.intent)
+  assert.equal(materialized.predicament.facts.some((fact) => fact.statement.includes('未经审阅')), false)
 })
 
 test('rejects a confirmed-curve opening that invents access machinery', () => {
@@ -777,6 +831,27 @@ test('a new curve version does not silently reuse a rejected proposal', () => {
   assert.equal(regeneratedTrigger.includes(rejectedDetail.replace(/^暂定[：:]/u, '')), false)
 })
 
+test('replacing a rejected proposal keeps the author-selected dramatic direction', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const original = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const rejectedDetail = original.beats.find((beat) => beat.kind === 'trigger')!.detail
+  const replacement = createProvisionalCurveFallback(
+    sparseIdea,
+    sparseSeed,
+    brief,
+    undefined,
+    [rejectedDetail],
+  )
+
+  assert.deepEqual(replacement.brief.dramaticForces, brief.dramaticForces)
+  assert.equal(replacement.generation?.dramaticMechanism, original.generation?.dramaticMechanism)
+  assert.notEqual(replacement.beats.find((beat) => beat.kind === 'trigger')?.detail, rejectedDetail)
+})
+
 test('dependent fallback regeneration carries the author edit into later beats', async () => {
   const brief: CreativeBrief = {
     tones: ['growth'],
@@ -816,7 +891,7 @@ test('dependent fallback regeneration propagates consequences without recursive 
   assert.match(downstream[0], /独自作决定/u)
   assert.match(downstream[0], /青柠坚持去游乐园/u)
   assert.doesNotMatch(downstream[0], /青柠坚持去游乐园；是想/u)
-  assert.equal(downstream.slice(1).some((detail) => detail.includes(authorEdit.replace(/^暂定：/u, ''))), false)
+  assert.equal(downstream.some((detail) => detail.includes(authorEdit.replace(/^暂定：/u, ''))), false)
   assert.equal(downstream.some((detail) => /“[^”]*“[^”]*”[^”]*”/u.test(detail)), false)
   assert.doesNotMatch(downstream.join('\n'), /共同作品/u)
   assert.equal(new Set(downstream).size, downstream.length)
@@ -860,6 +935,94 @@ test('batch regeneration requires every decision and keeps rejected replacements
     resolved.curve.beats.find((beat) => beat.id === rejectedItem.beatId)?.status,
     'stale',
   )
+})
+
+test('batch regeneration gives each downstream proposal a new causal detail', async () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const edited = updateCurveBeat(
+    curve,
+    'beat-trigger',
+    '暂定：让高潮先回应已确认的归还承诺，再决定是否继续。',
+  ).curve
+  const preview = await previewAffectedCurveBeats(sparseIdea, sparseSeed, edited)
+  assert.ok(preview.preview.items.length >= 2)
+  assert.equal(
+    preview.preview.items.every((item) => item.newDetail !== item.oldDetail),
+    true,
+    'every affected system proposal needs an actual old/new difference',
+  )
+})
+
+test('rich-input batch regeneration keeps every downstream proposal causally distinct', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  process.env.STORY_DISABLE_MODEL = 'true'
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+
+  try {
+    const curve = createProvisionalCurveFallback(richCurveIdea, richCurveSeed, brief)
+    const authorEdit = '让高潮先回应已确认的归还承诺，再决定是否继续。'
+    const edited = updateCurveBeat(curve, 'beat-trigger', authorEdit).curve
+    const preview = await previewAffectedCurveBeats(richCurveIdea, richCurveSeed, edited)
+    const items = preview.preview.items
+
+    assert.ok(items.length >= 2)
+    assert.equal(items.every((item) => item.newDetail !== item.oldDetail), true)
+    assert.equal(new Set(items.map((item) => item.newDetail)).size, items.length)
+    assert.match(items[0]!.newDetail, /归还承诺|决定是否继续/u)
+    assert.match(items[0]!.newDetail, /回应已确认的归还承诺/u)
+    assert.doesNotMatch(items[0]!.newDetail, /投影仪今晚要归还，后续取舍/u)
+    assert.doesNotMatch(items[0]!.newDetail, /所以让高潮/u)
+    assert.equal(items.some((item) => item.newDetail.includes(authorEdit)), false)
+    assert.equal(items.some((item) => item.newDetail.includes(authorEdit.replace(/^让高潮先/u, ''))), false)
+    assert.equal(items.slice(1).some((item) => /继续带来的前置条件|前置条件带来的/u.test(item.newDetail)), false)
+    assert.match(items.find((item) => item.kind === 'midpoint-turn')!.newDetail, /是否继续[”"]改变了/u)
+    assert.match(items.find((item) => item.kind === 'climax-choice')!.newDetail, /归还承诺与是否继续之间的取舍/u)
+    assert.match(items.find((item) => item.kind === 'resolution')!.newDetail, /承担“是否继续”带来的责任/u)
+  } finally {
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+  }
+})
+
+test('batch regeneration preserves source-fact links needed for confirmation', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  process.env.STORY_DISABLE_MODEL = 'true'
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+
+  try {
+    const curve = createProvisionalCurveFallback(richCurveIdea, richCurveSeed, brief)
+    const edited = updateCurveBeat(
+      curve,
+      'beat-trigger',
+      '暂定：投影仪今晚要归还，所以让高潮先回应已确认的归还承诺，再决定是否继续。',
+    ).curve
+    const preview = await previewAffectedCurveBeats(richCurveIdea, richCurveSeed, edited)
+    const decisions = Object.fromEntries(preview.preview.items.map((item) => [item.id, 'accept' as const]))
+    const resolved = resolveAffectedCurveBeats(edited, preview.preview, decisions)
+
+    assert.equal(
+      resolved.curve.design?.sourceFacts.every((fact) => fact.disposition === 'integrated'),
+      true,
+      'regeneration must retain the original rich-input fact links',
+    )
+    assert.doesNotThrow(() => confirmProvisionalCurve(resolved.curve))
+  } finally {
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+  }
 })
 
 test('an author may explicitly park source material before confirmation', () => {

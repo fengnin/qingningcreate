@@ -638,6 +638,11 @@ interface CachedStoryOperation<T> {
   expiresAt: number
 }
 
+interface StoryOperationFingerprint {
+  fingerprint: string
+  expiresAt: number
+}
+
 /**
  * A browser can deliver two identical clicks before the first model request
  * resolves. Keep one promise per exact start operation so a new session or a
@@ -647,6 +652,8 @@ const inFlightCoCreationStarts = new Map<string, Promise<StoryCoCreationResponse
 const completedCoCreationStarts = new Map<string, CachedStoryOperation<StoryCoCreationResponse>>()
 const inFlightCurveBeatUpdates = new Map<string, Promise<StoryCurveMutationResponse>>()
 const completedCurveBeatUpdates = new Map<string, CachedStoryOperation<StoryCurveMutationResponse>>()
+const coCreationOperationFingerprints = new Map<string, StoryOperationFingerprint>()
+const curveBeatUpdateOperationFingerprints = new Map<string, StoryOperationFingerprint>()
 
 const retryableModelOutputErrorCodes = new Set([
   'INVALID_MODEL_OUTPUT',
@@ -2374,6 +2381,11 @@ function createConflictCoreResponse(
 export async function startStoryCoCreation(
   request: StoryCoCreationStartRequest,
 ): Promise<StoryCoCreationResponse> {
+  assertStableOperationIdentity(
+    coCreationOperationFingerprints,
+    request.operationId,
+    getCoCreationRequestFingerprint(request),
+  )
   const operationKey = getCoCreationStartOperationKey(request)
   const cached = readCachedStoryOperation(completedCoCreationStarts, operationKey)
   if (cached) return cached
@@ -2473,6 +2485,16 @@ function getCoCreationStartOperationKey(request: StoryCoCreationStartRequest): s
   })
 }
 
+function getCoCreationRequestFingerprint(request: StoryCoCreationStartRequest): string {
+  return JSON.stringify({
+    idea: request.idea,
+    brief: request.brief,
+    storyId: request.storyId ?? null,
+    revision: request.revision ?? null,
+    versionMode: request.versionMode ?? null,
+  })
+}
+
 function getCurveBeatUpdateOperationKey(request: StoryCurveBeatUpdateRequest): string {
   return JSON.stringify({
     // A client operation id distinguishes a deliberate second save from a
@@ -2484,6 +2506,39 @@ function getCurveBeatUpdateOperationKey(request: StoryCurveBeatUpdateRequest): s
     curveId: request.curveId,
     beatId: request.beatId,
     detail: request.detail,
+  })
+}
+
+function getCurveBeatRequestFingerprint(request: StoryCurveBeatUpdateRequest): string {
+  return JSON.stringify({
+    storyId: request.storyId,
+    revision: request.revision,
+    curveId: request.curveId,
+    beatId: request.beatId,
+    detail: request.detail,
+  })
+}
+
+function assertStableOperationIdentity(
+  fingerprints: Map<string, StoryOperationFingerprint>,
+  operationId: string | undefined,
+  fingerprint: string,
+): void {
+  if (!operationId) return
+  const existing = fingerprints.get(operationId)
+  if (existing && existing.expiresAt > Date.now()) {
+    if (existing.fingerprint !== fingerprint) {
+      throw new AppError(
+        '同一个操作标识不能提交不同内容，请重新发起一次操作。',
+        409,
+        'STORY_OPERATION_CONFLICT',
+      )
+    }
+    return
+  }
+  fingerprints.set(operationId, {
+    fingerprint,
+    expiresAt: Date.now() + storyOperationCacheTtlMs,
   })
 }
 
@@ -2535,6 +2590,11 @@ function getRejectedCurveProposalDetails(session: StorySessionRecord): string[] 
 export async function updateSessionCurveBeat(
   request: StoryCurveBeatUpdateRequest,
 ): Promise<StoryCurveMutationResponse> {
+  assertStableOperationIdentity(
+    curveBeatUpdateOperationFingerprints,
+    request.operationId,
+    getCurveBeatRequestFingerprint(request),
+  )
   const operationKey = getCurveBeatUpdateOperationKey(request)
   const cached = readCachedStoryOperation(completedCurveBeatUpdates, operationKey)
   if (cached) return cached

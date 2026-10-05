@@ -747,6 +747,7 @@ function parseCurveBeatList(value: unknown, minimumLength: number, maximumLength
       status,
       dependsOn: readIdentifierList(record, 'dependsOn'),
       ...(record.sourceFactIds === undefined ? {} : { sourceFactIds: readIdentifierList(record, 'sourceFactIds') }),
+      ...(record.causalAnchor === undefined ? {} : { causalAnchor: readText(record, 'causalAnchor') }),
     }
   })
 }
