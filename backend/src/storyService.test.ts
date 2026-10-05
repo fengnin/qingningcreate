@@ -158,6 +158,21 @@ test('co-creation start and node save are idempotent under duplicate requests', 
     })
     assert.notEqual(deliberate.storyId, first.storyId, 'a later deliberate start remains a new operation')
 
+    const semanticStartRequest = {
+      ...request,
+      idea: `${request.idea}-semantic-concurrency`,
+    }
+    const [semanticFirst, semanticSecond] = await Promise.all([
+      startStoryCoCreation({ ...semanticStartRequest, operationId: `${request.operationId}-semantic-a` }),
+      startStoryCoCreation({ ...semanticStartRequest, operationId: `${request.operationId}-semantic-b` }),
+    ])
+    assert.equal(
+      semanticFirst.storyId,
+      semanticSecond.storyId,
+      'same start mutation must deduplicate even when accidental clicks use different operation ids',
+    )
+    assert.equal(semanticFirst.revision, semanticSecond.revision)
+
     const beat = first.curve.beats.find((candidate) => candidate.kind === 'trigger')!
     const saveRequest = {
       storyId: first.storyId,
@@ -175,12 +190,30 @@ test('co-creation start and node save are idempotent under duplicate requests', 
     assert.equal(savedFirst.curve.id, savedSecond.curve.id)
     const savedRetry = await updateSessionCurveBeat(saveRequest)
     assert.equal(savedRetry.revision, savedFirst.revision, 'a save retry replays the same mutation')
+
+    const semanticSaveRequest = {
+      storyId: semanticFirst.storyId,
+      revision: semanticFirst.revision,
+      curveId: semanticFirst.curve.id,
+      beatId: semanticFirst.curve.beats.find((candidate) => candidate.kind === 'trigger')!.id,
+      operationId: `${saveRequest.operationId}-semantic-a`,
+      detail: '暂定：青柠必须先说明自己为何要去游乐园，再决定是否继续。',
+    }
+    const [semanticSavedFirst, semanticSavedSecond] = await Promise.all([
+      updateSessionCurveBeat(semanticSaveRequest),
+      updateSessionCurveBeat({
+        ...semanticSaveRequest,
+        operationId: `${saveRequest.operationId}-semantic-b`,
+      }),
+    ])
+    assert.equal(semanticSavedFirst.revision, semanticSavedSecond.revision)
+    assert.equal(semanticSavedFirst.curve.id, semanticSavedSecond.curve.id)
     await assert.rejects(
       () => updateSessionCurveBeat({ ...saveRequest, detail: `${saveRequest.detail} changed` }),
       (error: unknown) => error instanceof Error && 'code' in error && error.code === 'STORY_OPERATION_CONFLICT',
     )
     const snapshot = getStorySessionSnapshot(first.storyId)
-    assert.equal(snapshot.revision, savedFirst.revision)
+    assert.equal(snapshot.revision, semanticSavedFirst.revision)
   } finally {
     if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
     else process.env.STORY_DISABLE_MODEL = previousDisableModel

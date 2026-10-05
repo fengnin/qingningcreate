@@ -652,6 +652,11 @@ const inFlightCoCreationStarts = new Map<string, Promise<StoryCoCreationResponse
 const completedCoCreationStarts = new Map<string, CachedStoryOperation<StoryCoCreationResponse>>()
 const inFlightCurveBeatUpdates = new Map<string, Promise<StoryCurveMutationResponse>>()
 const completedCurveBeatUpdates = new Map<string, CachedStoryOperation<StoryCurveMutationResponse>>()
+// Operation ids protect transport retries. These semantic locks additionally
+// protect the write boundary when two browser events accidentally create
+// different ids for the same session/version mutation in the same tick.
+const inFlightCoCreationSemanticOperations = new Map<string, Promise<StoryCoCreationResponse>>()
+const inFlightCurveBeatSemanticOperations = new Map<string, Promise<StoryCurveMutationResponse>>()
 const coCreationOperationFingerprints = new Map<string, StoryOperationFingerprint>()
 const curveBeatUpdateOperationFingerprints = new Map<string, StoryOperationFingerprint>()
 
@@ -2392,12 +2397,20 @@ export async function startStoryCoCreation(
   const existingOperation = inFlightCoCreationStarts.get(operationKey)
   if (existingOperation) return structuredClone(await existingOperation)
 
+  const semanticKey = getCoCreationSemanticOperationKey(request)
+  const existingSemanticOperation = inFlightCoCreationSemanticOperations.get(semanticKey)
+  if (existingSemanticOperation) return structuredClone(await existingSemanticOperation)
+
   const operation = startStoryCoCreationInternal(request)
   inFlightCoCreationStarts.set(operationKey, operation)
+  inFlightCoCreationSemanticOperations.set(semanticKey, operation)
   try {
     return structuredClone(await operation)
   } finally {
     if (inFlightCoCreationStarts.get(operationKey) === operation) inFlightCoCreationStarts.delete(operationKey)
+    if (inFlightCoCreationSemanticOperations.get(semanticKey) === operation) {
+      inFlightCoCreationSemanticOperations.delete(semanticKey)
+    }
   }
 }
 
@@ -2477,6 +2490,16 @@ async function startStoryCoCreationInternal(
 function getCoCreationStartOperationKey(request: StoryCoCreationStartRequest): string {
   return JSON.stringify({
     operationId: request.operationId ?? null,
+    storyId: request.storyId ?? null,
+    revision: request.revision ?? null,
+    versionMode: request.versionMode ?? null,
+    idea: request.idea,
+    brief: request.brief,
+  })
+}
+
+function getCoCreationSemanticOperationKey(request: StoryCoCreationStartRequest): string {
+  return JSON.stringify({
     storyId: request.storyId ?? null,
     revision: request.revision ?? null,
     versionMode: request.versionMode ?? null,
@@ -2602,13 +2625,31 @@ export async function updateSessionCurveBeat(
   const existingOperation = inFlightCurveBeatUpdates.get(operationKey)
   if (existingOperation) return structuredClone(await existingOperation)
 
+  const semanticKey = getCurveBeatSemanticOperationKey(request)
+  const existingSemanticOperation = inFlightCurveBeatSemanticOperations.get(semanticKey)
+  if (existingSemanticOperation) return structuredClone(await existingSemanticOperation)
+
   const operation = updateSessionCurveBeatInternal(request, operationKey)
   inFlightCurveBeatUpdates.set(operationKey, operation)
+  inFlightCurveBeatSemanticOperations.set(semanticKey, operation)
   try {
     return structuredClone(await operation)
   } finally {
     if (inFlightCurveBeatUpdates.get(operationKey) === operation) inFlightCurveBeatUpdates.delete(operationKey)
+    if (inFlightCurveBeatSemanticOperations.get(semanticKey) === operation) {
+      inFlightCurveBeatSemanticOperations.delete(semanticKey)
+    }
   }
+}
+
+function getCurveBeatSemanticOperationKey(request: StoryCurveBeatUpdateRequest): string {
+  return JSON.stringify({
+    storyId: request.storyId,
+    revision: request.revision,
+    curveId: request.curveId,
+    beatId: request.beatId,
+    detail: request.detail,
+  })
 }
 
 async function updateSessionCurveBeatInternal(
