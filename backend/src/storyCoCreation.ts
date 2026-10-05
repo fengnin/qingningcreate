@@ -555,6 +555,7 @@ function parseAuthorCausalParts(value: string): AuthorCausalParts {
   const cleaned = value
     .replace(/^暂定[：:]/u, '')
     .replace(/^(?:作者(?:第一次)?(?:明确)?编辑|作者指令|作者调整)[：:]?/u, '')
+    .replace(/^(?:作者(?:希望|要求|想要)|我(?:希望|想要)|请)\s*/u, '')
     .replace(/[“”"']/gu, '')
     .replace(/\s+/gu, ' ')
     .trim()
@@ -571,7 +572,7 @@ function parseAuthorCausalParts(value: string): AuthorCausalParts {
   // also contains an action verb, but it is context rather than the author's
   // instruction and must not swallow the actual directive that follows it.
   const directedActionIndex = clauses.findIndex((clause) => (
-    /(?:让(?:高潮|主角|人物|自己|她|他|其)|回应|处理|兑现|改变|保留|放弃|坚持|删掉|删除|修改)/u.test(clause)
+    /(?:让(?:高潮|主角|人物|自己|她|他|其)|回应|处理|兑现|改变|改成|改为|保留|放弃|坚持|删掉|删除|修改)/u.test(clause)
     && !/^(?:决定|选择|是否|要不要|想|希望|为了|证明|准备|打算)/u.test(clause)
   ))
   const actionIndex = directedActionIndex >= 0
@@ -595,7 +596,10 @@ function parseAuthorCausalParts(value: string): AuthorCausalParts {
 
 function normalizeAuthorActionClause(value: string): string {
   return value
+    .replace(/^(?:作者(?:希望|要求|想要)|我(?:希望|想要)|请)\s*/u, '')
+    .replace(/^(?:把|将)(?:高潮|主线|这个节点|该节点)(?:改成|改为|调整为)\s*/u, '')
     .replace(/^让(?:高潮|主角|人物|自己|她|他|其|[\u4e00-\u9fff]{1,4})(?=(?:先|再|然后|随后|回应|处理|兑现|改变|保留|放弃|坚持|继续|完成|归还|提交|参加|寻找|离开|删掉|删除|修改|承担))/u, '')
+    .replace(/^(?:高潮|主角|人物|自己|她|他|其)(?=(?:先|再|然后|随后|回应|处理|兑现|改变|保留|放弃|坚持|继续|完成|归还|提交|参加|寻找|离开|删掉|删除|修改|承担))/u, '')
     .replace(/^(?:先|再|然后|随后)\s*/u, '')
     .replace(/^(?:是)?(?:要|想|希望|打算|准备)\s*/u, '')
     .trim()
@@ -2244,17 +2248,17 @@ function getFallbackTension(subject: string, goal: string, brief: CreativeBrief,
     }
     switch (brief.dramaticForces[0]) {
       case 'misunderstanding':
-        return `暂定：${observed}让${subject}无法确定这段材料究竟意味着什么；不同理解会把${goalDecision}带向不同方向。`
+        return `暂定：${observed}让${subject}无法确定这段材料究竟意味着什么；不同理解会把${goalDecision}带向不同方向；${tone}。`
       case 'cost':
-        return `暂定：${observed}让${subject}发现，继续${goalPhrase}必须先拿一项眼前条件来交换。`
+        return `暂定：${observed}让${subject}发现，继续${goalPhrase}必须先拿一项眼前条件来交换；${tone}。`
       case 'surprise':
-        return `暂定：${observed}打断了${subject}原本对${goalPhrase}的准备，原计划缺少一个关键条件。`
+        return `暂定：${observed}打断了${subject}原本对${goalPhrase}的准备，原计划缺少一个关键条件；${tone}。`
       case 'contrast':
-        return `暂定：${observed}暴露出${subject}最依赖的办法并不能直接支持${goalPhrase}；旧把握开始动摇。`
+        return `暂定：${observed}暴露出${subject}最依赖的办法并不能直接支持${goalPhrase}；${tone}。`
       default:
         break
     }
-    return `暂定：${observed}暴露出${subject}原本办法的缺口；${subject}仍要${goalPhrase}，却不能再假装条件齐全。`
+    return `暂定：${observed}暴露出${subject}原本办法的缺口；${subject}仍要${goalPhrase}，却不能再假装条件齐全；${tone}。`
   }
   if (brief.dramaticForces.includes('relationship-tension')) {
     return `暂定：${subject}${goalAction}，但“${commitment}”使已经说出的承诺与现在的选择无法同时成立；${tone}`
@@ -2294,16 +2298,16 @@ function getFallbackTriggerDetail(subject: string, goal: string, brief: Creative
     const deadline = getConcreteMaterialHandle(storyMaterial.deadline, goal, brief)
     switch (force) {
       case 'misunderstanding':
-        return `暂定：“${deadline}”让${subject}对${goalDecision}的理解出现分歧；在澄清前，原计划不能照常推进。`
+        return `暂定：“${deadline}”让${subject}对${goalDecision}的理解出现分歧；在澄清前，原计划不能照常推进；${tone}。`
       case 'cost':
-        return `暂定：“${deadline}”把${goalDecision}变成时间与${commitment}之间的取舍；继续${goalPhrase}会先消耗一项条件。`
+        return `暂定：“${deadline}”把${goalDecision}变成时间与${commitment}之间的取舍；继续${goalPhrase}会先消耗一项条件；${tone}。`
       case 'surprise':
-        return `暂定：“${deadline}”提前压缩了${subject}处理${goalDecision}的时间；原来安排的缓冲被意外拿走。`
+        return `暂定：“${deadline}”提前压缩了${subject}处理${goalDecision}的时间；原来安排的缓冲被意外拿走；${tone}。`
       case 'relationship-tension':
-        return `暂定：“${deadline}”让${subject}必须同时回应${commitment}和${goalDecision}，拖延会先伤到关系。`
+        return `暂定：“${deadline}”让${subject}必须同时回应${commitment}和${goalDecision}，拖延会先伤到关系；${tone}。`
       case 'contrast':
       default:
-        return `暂定：“${deadline}”暴露出${subject}原来以为足够的准备并不够；${goalDecision}不能照旧进行。`
+        return `暂定：“${deadline}”暴露出${subject}原来以为足够的准备并不够；${goalDecision}不能照旧进行；${tone}。`
     }
   }
   switch (force) {
@@ -2353,16 +2357,16 @@ function getFallbackEscalation(subject: string, goal: string, brief: CreativeBri
     const commitmentLabel = getConcreteMaterialHandle(storyMaterial.commitment, goal, brief)
     switch (brief.dramaticForces[0]) {
       case 'misunderstanding':
-        return `暂定：“${commitmentLabel}”与${subject}对${goalDecision}的理解不一致；继续推进会把误会扩大到下一步。`
+        return `暂定：“${commitmentLabel}”与${subject}对${goalDecision}的理解不一致；继续推进会把误会扩大到下一步；${tone}。`
       case 'cost':
-        return `暂定：“${commitmentLabel}”要求${subject}在${goalDecision}和一项已承诺条件之间先放弃其一；代价开始具体。`
+        return `暂定：“${commitmentLabel}”要求${subject}在${goalDecision}和一项已承诺条件之间先放弃其一；代价开始具体；${tone}。`
       case 'surprise':
-        return `暂定：“${commitmentLabel}”把${goalDecision}推向原计划没有预留的条件；越拖越难回到原办法。`
+        return `暂定：“${commitmentLabel}”把${goalDecision}推向原计划没有预留的条件；越拖越难回到原办法；${tone}。`
       case 'relationship-tension':
-        return `暂定：“${commitmentLabel}”让${subject}不能同时兑现承诺和${goalDecision}；回避本身会让关系失去退路。`
+        return `暂定：“${commitmentLabel}”让${subject}不能同时兑现承诺和${goalDecision}；回避本身会让关系失去退路；${tone}。`
       case 'contrast':
       default:
-        return `暂定：“${commitmentLabel}”让${subject}最依赖的办法反而卡住${goalDecision}；继续拖延会迫使${subject}承认旧办法失效。`
+        return `暂定：“${commitmentLabel}”让${subject}最依赖的办法反而卡住${goalDecision}；继续拖延会迫使${subject}承认旧办法失效；${tone}。`
     }
   }
   switch (brief.dramaticForces[0]) {
@@ -2415,16 +2419,16 @@ function getFallbackMidpointTurn(subject: string, goal: string, brief: CreativeB
     const decisionLabel = propagatedDecision === decision ? decision : propagatedDecision
     switch (brief.dramaticForces[0]) {
       case 'misunderstanding':
-        return `暂定：${subject}发现，对“${decisionLabel}”的不同理解会改变这项决定的后果；必须先选定自己相信的解释。`
+        return `暂定：${subject}发现，对“${decisionLabel}”的不同理解会改变这项决定的后果；必须先选定自己相信的解释；${tone}。`
       case 'cost':
-        return `暂定：${subject}发现，“${decisionLabel}”要求拿一项眼前条件换取${goalPhrase}；旧办法无法两全。`
+        return `暂定：${subject}发现，“${decisionLabel}”要求拿一项眼前条件换取${goalPhrase}；旧办法无法两全；${tone}。`
       case 'surprise':
-        return `暂定：${subject}发现，“${decisionLabel}”把${goalPhrase}推向新的时机或资源条件；必须重排优先级。`
+        return `暂定：${subject}发现，“${decisionLabel}”把${goalPhrase}推向新的时机或资源条件；必须重排优先级；${tone}。`
       case 'relationship-tension':
-        return `暂定：${subject}发现，若绕开${commitment}，“${decisionLabel}”即使完成也会留下关系裂痕。`
+        return `暂定：${subject}发现，若绕开${commitment}，“${decisionLabel}”即使完成也会留下关系裂痕；${tone}。`
       case 'contrast':
       default:
-        return `暂定：${subject}发现，“${decisionObject}”让自己最熟悉的办法反而失去作用；要继续${goalPhrase}必须回应“${decisionLabel}”带来的新限制。`
+        return `暂定：${subject}发现，“${decisionObject}”让自己最熟悉的办法反而失去作用；要继续${goalPhrase}必须回应“${decisionLabel}”带来的新限制；${tone}。`
     }
   }
   switch (brief.dramaticForces[0]) {
@@ -2473,16 +2477,16 @@ function getFallbackClimaxChoice(subject: string, goal: string, brief: CreativeB
       : `继续${goalPhrase}`
     switch (brief.dramaticForces[0]) {
       case 'misunderstanding':
-        return `暂定：${subject}必须在${decisionObject}与先澄清“${otherSide}”之间作出选择；选择会决定“${decisionLabel}”依据哪种理解继续。`
+        return `暂定：${subject}必须在${decisionObject}与先澄清“${otherSide}”之间作出选择；选择会决定“${decisionLabel}”依据哪种理解继续；${tone}。`
       case 'cost':
-        return `暂定：${subject}必须在${decisionObject}与${otherSide}之间放弃一项条件；“${decisionLabel}”的代价不能再由别人承担。`
+        return `暂定：${subject}必须在${decisionObject}与${otherSide}之间放弃一项条件；“${decisionLabel}”的代价不能再由别人承担；${tone}。`
       case 'surprise':
-        return `暂定：${subject}必须在${decisionObject}与${otherSide}之间重排先后；“${decisionLabel}”带来的新条件会让其中一边失去原来的保障。`
+        return `暂定：${subject}必须在${decisionObject}与${otherSide}之间重排先后；“${decisionLabel}”带来的新条件会让其中一边失去原来的保障；${tone}。`
       case 'relationship-tension':
-        return `暂定：${subject}必须在${decisionObject}与回应${otherSide}之间作出选择；“${decisionLabel}”不能靠沉默同时保住。`
+        return `暂定：${subject}必须在${decisionObject}与回应${otherSide}之间作出选择；“${decisionLabel}”不能靠沉默同时保住；${tone}。`
       case 'contrast':
       default:
-        return `暂定：${subject}必须在${decisionObject}与${otherSide}之间作出选择；要继续${goalPhrase}，就得回应“${decisionLabel}”而不能照旧。`
+        return `暂定：${subject}必须在${decisionObject}与${otherSide}之间作出选择；要继续${goalPhrase}，就得回应“${decisionLabel}”而不能照旧；${tone}。`
     }
   }
   switch (brief.dramaticForces[0]) {
@@ -2536,16 +2540,16 @@ function getFallbackResolution(subject: string, goal: string, brief: CreativeBri
     const decisionLabel = propagatedDecision === decision ? decision : propagatedDecision
     switch (brief.dramaticForces[0]) {
       case 'misunderstanding':
-        return `暂定：${subject}如何解释“${decisionLabel}”并回应${commitmentLabel}，会决定这项选择最后留下的关系和信息缺口。`
+        return `暂定：${subject}如何解释“${decisionLabel}”并回应${commitmentLabel}，会决定这项选择最后留下的关系和信息缺口；${toneChange}。`
       case 'cost':
-        return `暂定：${subject}如何处理${decisionObject}并回应${commitmentLabel}，会决定“${decisionLabel}”让${goalPhrase}放弃什么，并留下可见代价。`
+        return `暂定：${subject}如何处理${decisionObject}并回应${commitmentLabel}，会决定“${decisionLabel}”让${goalPhrase}放弃什么，并留下${toneChange}。`
       case 'surprise':
-        return `暂定：${subject}如何处理${decisionObject}带来的新条件，会决定“${decisionLabel}”让${goalPhrase}能否成立，以及旧计划被怎样改写。`
+        return `暂定：${subject}如何处理${decisionObject}带来的新条件，会决定“${decisionLabel}”让${goalPhrase}能否成立，以及旧计划被怎样改写；${toneChange}。`
       case 'relationship-tension':
-        return `暂定：${subject}如何处理${decisionObject}并回应${commitmentLabel}，会决定“${decisionLabel}”与这项承诺能否同时被诚实面对。`
+        return `暂定：${subject}如何处理${decisionObject}并回应${commitmentLabel}，会决定“${decisionLabel}”与这项承诺能否同时被诚实面对；${toneChange}。`
       case 'contrast':
       default:
-        return `暂定：${subject}处理${decisionObject}并回应${commitmentLabel}后，必须用一个可验证的改变回应“${decisionLabel}”；${subject}承认原来的局限。`
+        return `暂定：${subject}处理${decisionObject}并回应${commitmentLabel}后，必须用一个可验证的改变回应“${decisionLabel}”；${subject}承认原来的局限，并${toneChange}。`
     }
   }
   switch (brief.dramaticForces[0]) {

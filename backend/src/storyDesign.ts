@@ -98,27 +98,26 @@ export function buildStoryCurveFoundation(
           ? 'resource'
           : 'commitment'
 
-  const conflictObstacle = joinCausalDetails([
-    triggerAnchor,
-    escalationAnchor,
-    characterTension ? getFoundationBeatAnchor(characterTension, '') : undefined,
-  ], '当前办法会被这道阻碍打断')
+  const characterAnchor = characterTension ? getFoundationBeatAnchor(characterTension, '') : undefined
+  const conflictObstacle = buildConflictObstacle(triggerAnchor, escalationAnchor, characterAnchor)
   const tradeoff = getFoundationTradeoff(climax.detail, climaxAnchor)
+  const decisionLabel = getFoundationDecisionLabel(preservedGoal)
   // Urgency belongs to the first concrete interruption, while the plausible
   // cost belongs to the choice that follows. Reading both from the same
   // midpoint sentence made the frozen map look like a set of duplicated
   // labels instead of a progression.
   const urgency = triggerAnchor
-  const plausibleCost = getFoundationCost(
+  const extractedCost = getFoundationCost(
     resolution.detail,
     getFoundationCost(climax.detail, resolution.causalAnchor ?? '选择会改变目标和关系'),
   )
+  const plausibleCost = ensureConcreteFoundationCost(extractedCost, tradeoff, decisionLabel)
   const openingClue = triggerAnchor
   const opening = current.detail.trim()
   const middleEscalation = escalationAnchor
   const midpointPressure = midpointAnchor
-  const climaxPressure = tradeoff
-  const decisionLabel = getFoundationDecisionLabel(preservedGoal)
+  const choice = buildFoundationChoice(tradeoff, decisionLabel, urgency, climax.detail)
+  const climaxPressure = buildClimaxPressure(choice, plausibleCost)
   const predicamentObstacle = buildPredicamentObstacle(
     triggerAnchor,
     escalationAnchor,
@@ -156,10 +155,10 @@ export function buildStoryCurveFoundation(
       variationAxis,
       immediateSituation: current.detail.trim(),
       obstacle: shortenFoundationLabel(predicamentObstacle),
-        tradeoff,
-        urgency,
-        choice: tradeoff,
-        plausibleCost,
+      tradeoff,
+      urgency,
+      choice,
+      plausibleCost,
     },
     middleDevelopment: {
       escalation: middleEscalation,
@@ -175,10 +174,10 @@ export function buildStoryCurveFoundation(
       climax: climax.detail.trim(),
       resolution: resolution.detail.trim(),
       cost: plausibleCost,
-      promise: `围绕${shortenFoundationLabel(decisionLabel)}处理${shortenFoundationLabel(escalationAnchor)}，让${forceLabel}的取舍决定结局变化。`,
+      promise: `围绕${shortenFoundationLabel(decisionLabel)}先回应${shortenFoundationLabel(triggerAnchor)}，再处理${shortenFoundationLabel(escalationAnchor)}，让${forceLabel}留下${shortenFoundationLabel(plausibleCost)}。`,
     },
     approach: {
-      intent: `先处理${shortenFoundationLabel(triggerAnchor)}带来的限制，再围绕${shortenFoundationLabel(decisionLabel)}回应${shortenFoundationLabel(escalationAnchor)}。`,
+      intent: `先回应${shortenFoundationLabel(triggerAnchor)}，再处理${shortenFoundationLabel(escalationAnchor)}，并承担${shortenFoundationLabel(plausibleCost)}。`,
       cost: plausibleCost,
     },
     sourceFactIds,
@@ -334,7 +333,11 @@ function getFoundationTradeoff(detail: string, fallback: string): string {
     .map((part) => part.trim())
     .filter(Boolean)
   const candidate = clauses.find((part) => /(?:必须在|选择|取舍|放弃|还是|承担)/u.test(part))
-  return shortenFoundationLabel(candidate ?? fallback)
+  const normalized = candidate ?? fallback
+  const sides = getTradeoffSides(normalized)
+  return sides
+    ? shortenFoundationLabel(`在${sides[0]}与${sides[1]}之间的取舍`)
+    : shortenFoundationLabel(normalized)
 }
 
 function getFoundationDecisionLabel(goal: string): string {
@@ -362,12 +365,93 @@ function isFoundationMetaClause(value: string): boolean {
     || /^(?:[^，。！？；]{0,10})(?:发现|意识到|知道|认为)$/u.test(value)
 }
 
-function joinCausalDetails(values: Array<string | undefined>, fallback: string): string {
-  const unique = [...new Set(values
-    .filter((value): value is string => Boolean(value?.trim()))
-    .map((value) => getFoundationAnchor(value, ''))
-    .filter(Boolean))]
-  return unique.slice(0, 3).join('；') || fallback
+function buildConflictObstacle(
+  trigger: string,
+  escalation: string,
+  character: string | undefined,
+): string {
+  const parts = [...new Set([trigger, escalation, character]
+    .map((value) => normalizeConflictObstaclePart(value))
+    .filter((value): value is string => Boolean(value)))]
+  if (!parts.length) return '当前办法会被这道阻碍打断'
+  if (parts.length === 1) return `原有安排会被${shortenFoundationLabel(parts[0]!)}打断`
+  if (parts.length === 2) {
+    return `${shortenFoundationLabel(parts[0]!)}先打断原有安排，${shortenFoundationLabel(parts[1]!)}随后把目标推向必须取舍的边界`
+  }
+  const characterEffect = /暴露|局限/u.test(parts[2]!)
+    ? shortenFoundationLabel(parts[2]!)
+    : `由${shortenFoundationLabel(parts[2]!)}暴露原办法的局限`
+  return `${shortenFoundationLabel(parts[0]!)}先打断原有安排；${shortenFoundationLabel(parts[1]!)}把取舍推高，并${characterEffect}`
+}
+
+function normalizeConflictObstaclePart(value: string | undefined): string | undefined {
+  const normalized = value?.trim()
+  if (!normalized) return undefined
+  const movement = normalized.match(/^(.+?)的旧判断开始动摇$/u)
+  return movement?.[1]
+    ? `${movement[1]}暴露原有判断的局限`
+    : normalized
+}
+
+function buildFoundationChoice(
+  tradeoff: string,
+  decisionLabel: string,
+  urgency: string,
+  climaxDetail: string,
+): string {
+  const sides = getTradeoffSides(tradeoff)
+  if (sides) {
+    return shortenFoundationLabel(
+      `先回应${shortenFoundationLabel(urgency)}，再决定保留${sides[0]}还是承担${sides[1]}带来的后果`,
+    )
+  }
+
+  const explicit = getFoundationAnchor(climaxDetail, '')
+  if (explicit && explicit !== tradeoff) {
+    return shortenFoundationLabel(`围绕${decisionLabel}，由作者决定如何回应${explicit}`)
+  }
+  return shortenFoundationLabel(`先回应${shortenFoundationLabel(urgency)}，再决定如何承担${decisionLabel}这项取舍`)
+}
+
+function buildClimaxPressure(choice: string, cost: string): string {
+  const compactChoice = choice.replace(/^围绕/u, '').trim()
+  const choiceClause = compactChoice.split(/[；。]/u)[0]?.trim() || compactChoice
+  return shortenFoundationLabel(`先后顺序：${shortenFoundationLabel(choiceClause)}；代价：${shortenFoundationLabel(cost)}`)
+}
+
+function ensureConcreteFoundationCost(
+  extracted: string,
+  tradeoff: string,
+  decisionLabel: string,
+): string {
+  const normalized = extracted.trim()
+  const sides = getTradeoffSides(tradeoff)
+  const generic = !normalized
+    || /^(?:并)?留下(?:可见|明确)?代价$/u.test(normalized)
+    || /^(?:选择会|结果会|发生可见变化|得到什么结果)/u.test(normalized)
+    || /^(?:选择|取舍|承担这次选择)$/u.test(normalized)
+    || /^(?:并)?(?:留下)?(?:让|使)(?:主角|人物|她|他).*(?:重新定义|发生变化|获得新的位置|看见彼此|成长)/u.test(normalized)
+    || /^(?:并)?留下(?:可辨认|新的关系|新的理解)/u.test(normalized)
+  const unrelatedToTradeoff = Boolean(sides)
+    && !/(?:无法同时|放弃|失去|保留|承担代价|代价是)/u.test(normalized)
+    && !sides!.some((side) => normalized.includes(side))
+  if (!generic && !unrelatedToTradeoff) return normalized
+  if (sides) return shortenFoundationLabel(`无法同时保留${sides[0]}和${sides[1]}`)
+  return shortenFoundationLabel(`${decisionLabel}会让原有安排承担明确代价`)
+}
+
+function getTradeoffSides(value: string): [string, string] | undefined {
+  const cleaned = value
+    .replace(/^暂定[：:]/u, '')
+    .replace(/[“”"']/gu, '')
+    .replace(/^(?:[^，。！？；]{0,18})(?:必须|需要|只能)?在/u, '')
+    .trim()
+  const match = cleaned.match(/^(.{2,40}?)(?:与|和|还是)(.{2,40}?)(?:之间|中|的取舍|的要求|作出取舍|放弃一项条件)/u)
+  if (!match?.[1] || !match[2]) return undefined
+  const left = match[1].replace(/^(?:继续|选择|决定|是否)/u, '').trim()
+  const right = match[2].replace(/^(?:继续|选择|决定|是否)/u, '').trim()
+  if (left.length < 2 || right.length < 2 || left === right) return undefined
+  return [shortenFoundationLabel(left), shortenFoundationLabel(right)]
 }
 
 export function ensureStoryDesignRecord(

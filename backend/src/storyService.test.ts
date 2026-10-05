@@ -656,6 +656,27 @@ test('freezes one concrete design foundation before confirmation', () => {
   assert.throws(() => materializeConfirmedCurve(richSeed, tampered), /基础与节点不一致/u)
 })
 
+test('the draft foundation keeps conflict, choice, cost, and progression distinct', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['cost'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(richCurveIdea, richCurveSeed, brief)
+  const foundation = curve.foundation!
+
+  assert.notEqual(foundation.conflictCore.tradeoff, foundation.predicament.choice)
+  assert.notEqual(foundation.predicament.tradeoff, foundation.predicament.choice)
+  assert.notEqual(foundation.middleDevelopment.climaxPressure, foundation.predicament.tradeoff)
+  assert.match(foundation.predicament.choice, /投影仪|删掉自己的名字|不再改动作品/u)
+  assert.match(foundation.predicament.plausibleCost, /无法同时|保留|放弃/u)
+  assert.match(foundation.conflictCore.obstacle, /打断|取舍|局限/u)
+  assert.ok(foundation.sourceFactIds?.conflictCore.length)
+  assert.ok(foundation.sourceFactIds?.predicament.length)
+  assert.ok(foundation.sourceFactIds?.middleDevelopment.length)
+  assert.ok(foundation.sourceFactIds?.storyEnds.length)
+})
+
 test('rejecting a system proposal excludes it and makes only its dependents stale', () => {
   const brief: CreativeBrief = {
     tones: ['growth'],
@@ -849,6 +870,27 @@ test('same dramatic force still changes at least three causal beats across tones
   assert.ok(differences.length >= 3, `expected at least three causal differences, got ${differences.join(', ')}`)
 })
 
+test('rich input keeps tone changes causal when the dramatic force is unchanged', () => {
+  const growthCurve = createProvisionalCurveFallback(richCurveIdea, richCurveSeed, {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  })
+  const mysteryCurve = createProvisionalCurveFallback(richCurveIdea, richCurveSeed, {
+    tones: ['mystery'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  })
+  const comparableKinds = ['character-tension', 'trigger', 'escalation', 'midpoint-turn', 'climax-choice', 'resolution']
+  const differences = comparableKinds.filter((kind) => (
+    growthCurve.beats.find((beat) => beat.kind === kind)?.detail
+      !== mysteryCurve.beats.find((beat) => beat.kind === kind)?.detail
+  ))
+  assert.ok(differences.length >= 3, `expected rich-input tone differences, got ${differences.join(', ')}`)
+  assert.match(growthCurve.beats.map((beat) => beat.detail).join('\n'), /旧习惯|承担/u)
+  assert.match(mysteryCurve.beats.map((beat) => beat.detail).join('\n'), /信息缺口|解释/u)
+})
+
 test('a new curve version does not silently reuse a rejected proposal', () => {
   const brief: CreativeBrief = {
     tones: ['growth'],
@@ -928,6 +970,30 @@ test('dependent fallback regeneration propagates consequences without recursive 
   assert.equal(downstream.some((detail) => /“[^”]*“[^”]*”[^”]*”/u.test(detail)), false)
   assert.doesNotMatch(downstream.join('\n'), /共同作品/u)
   assert.equal(new Set(downstream).size, downstream.length)
+})
+
+test('author instruction wrappers are removed before causal propagation', async () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const wrappers = [
+    '作者希望高潮先回应已确认的归还承诺，再决定是否继续。',
+    '把高潮改成先回应归还承诺，再决定是否继续。',
+  ]
+  for (const instruction of wrappers) {
+    const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+    const edited = updateCurveBeat(curve, 'beat-trigger', instruction).curve
+    const result = await regenerateAffectedCurveBeats(sparseIdea, sparseSeed, edited)
+    const downstream = result.curve.beats
+      .filter((beat) => ['escalation', 'midpoint-turn', 'climax-choice', 'resolution'].includes(beat.kind))
+      .map((beat) => beat.detail)
+      .join('\n')
+
+    assert.doesNotMatch(downstream, /作者希望|把高潮改成|高潮先回应/u)
+    assert.match(downstream, /归还承诺|是否继续/u)
+  }
 })
 
 test('batch regeneration requires every decision and keeps rejected replacements out of the curve', async () => {
