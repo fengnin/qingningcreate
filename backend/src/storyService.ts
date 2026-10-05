@@ -644,6 +644,7 @@ interface CachedStoryOperation<T> {
  * new curve version is created at most once for that concurrent operation.
  */
 const inFlightCoCreationStarts = new Map<string, Promise<StoryCoCreationResponse>>()
+const completedCoCreationStarts = new Map<string, CachedStoryOperation<StoryCoCreationResponse>>()
 const inFlightCurveBeatUpdates = new Map<string, Promise<StoryCurveMutationResponse>>()
 const completedCurveBeatUpdates = new Map<string, CachedStoryOperation<StoryCurveMutationResponse>>()
 
@@ -662,9 +663,6 @@ const transientQwenErrorCodes = new Set([
 ])
 const localSystemDraftFallbackQwenErrorCodes = new Set([
   'QWEN_NOT_CONFIGURED',
-  'QWEN_AUTH_ERROR',
-  'QWEN_REQUEST_ERROR',
-  ...transientQwenErrorCodes,
 ])
 
 const retryableConflictCoreGenerationErrorCodes = new Set([
@@ -688,10 +686,6 @@ const retryableStoryTurnErrorCodes = new Set([
   'QWEN_EMPTY_RESPONSE',
   'QWEN_INVALID_JSON',
   'QWEN_INVALID_RESPONSE',
-  'QWEN_TIMEOUT',
-  'QWEN_NETWORK_ERROR',
-  'QWEN_RATE_LIMITED',
-  'QWEN_UPSTREAM_ERROR',
 ])
 
 interface StorySeedDraft {
@@ -732,7 +726,8 @@ export function parseDirectionRequest(body: unknown): StoryDirectionsRequest {
 }
 
 export function parseStoryCoCreationStartRequest(body: unknown): StoryCoCreationStartRequest {
-  const record = parseRequestRecord(body, ['idea', 'brief', 'storyId', 'revision', 'versionMode'])
+  const record = parseRequestRecord(body, ['idea', 'brief', 'operationId', 'storyId', 'revision', 'versionMode'])
+  const operationId = readOptionalIdentifier(record, 'operationId')
   const storyId = readOptionalIdentifier(record, 'storyId')
   const revision = readOptionalNonNegativeInteger(record, 'revision')
   const versionMode = record.versionMode === 'replace-draft' || record.versionMode === 'new-version'
@@ -747,17 +742,20 @@ export function parseStoryCoCreationStartRequest(body: unknown): StoryCoCreation
   return {
     idea: readText(record, 'idea', '请先写下一个故事想法。', maximumStoryIdeaLength, invalidRequestContext),
     brief: parseCreativeBrief(record.brief),
+    ...(operationId ? { operationId } : {}),
     ...(storyId ? { storyId, revision, ...(versionMode ? { versionMode } : {}) } : {}),
   }
 }
 
 export function parseStoryCurveBeatUpdateRequest(body: unknown): StoryCurveBeatUpdateRequest {
-  const record = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'beatId', 'detail'])
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'beatId', 'detail', 'operationId'])
+  const operationId = readOptionalIdentifier(record, 'operationId')
   return {
     ...parseStorySessionReference(record),
     curveId: readIdentifier(record, 'curveId', '暂定故事曲线不完整，请刷新后重试。', invalidRequestContext),
     beatId: readIdentifier(record, 'beatId', '请选择要编辑的曲线节点。', invalidRequestContext),
     detail: readText(record, 'detail', '曲线节点内容不能为空。', 220, invalidRequestContext),
+    ...(operationId ? { operationId } : {}),
   }
 }
 
@@ -1550,7 +1548,7 @@ async function generatePredicamentForCore(
 
 function isRetryablePredicamentGenerationError(error: unknown): error is AppError {
   return error instanceof AppError
-    && (retryableModelOutputErrorCodes.has(error.code) || transientQwenErrorCodes.has(error.code))
+    && retryableModelOutputErrorCodes.has(error.code)
 }
 
 function usesSelectedSystemDraftDirection(seed: Pick<StorySeed, 'systemDraft'>): boolean {
@@ -2377,6 +2375,8 @@ export async function startStoryCoCreation(
   request: StoryCoCreationStartRequest,
 ): Promise<StoryCoCreationResponse> {
   const operationKey = getCoCreationStartOperationKey(request)
+  const cached = readCachedStoryOperation(completedCoCreationStarts, operationKey)
+  if (cached) return cached
   const existingOperation = inFlightCoCreationStarts.get(operationKey)
   if (existingOperation) return structuredClone(await existingOperation)
 
@@ -2448,18 +2448,23 @@ async function startStoryCoCreationInternal(
     }
     clearCoCreationStoryPath(session)
     commitStorySessionChanges(session)
-    return createCoCreationResponse(session, curve)
+    const response = createCoCreationResponse(session, curve)
+    if (request.operationId) writeCachedStoryOperation(completedCoCreationStarts, getCoCreationStartOperationKey(request), response)
+    return response
   }
 
   const session = createCoCreationSession(request.idea, seed, curve)
   storySessions.set(session.id, session)
   persistStorySessions()
 
-  return createCoCreationResponse(session, curve)
+  const response = createCoCreationResponse(session, curve)
+  if (request.operationId) writeCachedStoryOperation(completedCoCreationStarts, getCoCreationStartOperationKey(request), response)
+  return response
 }
 
 function getCoCreationStartOperationKey(request: StoryCoCreationStartRequest): string {
   return JSON.stringify({
+    operationId: request.operationId ?? null,
     storyId: request.storyId ?? null,
     revision: request.revision ?? null,
     versionMode: request.versionMode ?? null,
@@ -2470,6 +2475,10 @@ function getCoCreationStartOperationKey(request: StoryCoCreationStartRequest): s
 
 function getCurveBeatUpdateOperationKey(request: StoryCurveBeatUpdateRequest): string {
   return JSON.stringify({
+    // A client operation id distinguishes a deliberate second save from a
+    // transport retry of the same save. Keep the content fields in the key as
+    // a compatibility guard for older clients that do not send an id.
+    operationId: request.operationId ?? null,
     storyId: request.storyId,
     revision: request.revision,
     curveId: request.curveId,
@@ -2960,11 +2969,17 @@ async function resolveStorySeed(request: StoryDirectionsRequest): Promise<Resolv
 
 function isRetryableStorySeedExtractionError(error: unknown): boolean {
   return error instanceof AppError
-    && (retryableModelOutputErrorCodes.has(error.code) || transientQwenErrorCodes.has(error.code))
+    && retryableModelOutputErrorCodes.has(error.code)
 }
 
 function shouldUseLocalSystemDraftFallback(error: unknown): error is AppError {
-  return error instanceof AppError && localSystemDraftFallbackQwenErrorCodes.has(error.code)
+  return error instanceof AppError
+    && localSystemDraftFallbackQwenErrorCodes.has(error.code)
+    && isExplicitLocalModelMode()
+}
+
+function isExplicitLocalModelMode(): boolean {
+  return /^(?:1|true|yes)$/iu.test(process.env.STORY_DISABLE_MODEL?.trim() ?? '')
 }
 
 function getStorySeedExtractionRepairMessage(error: unknown): string {
@@ -3626,7 +3641,7 @@ function normalizeSystemConflictCoreDraftCommonFields(
 
 function isRetryableSystemDraftGenerationError(error: unknown): boolean {
   return error instanceof AppError
-    && (retryableModelOutputErrorCodes.has(error.code) || transientQwenErrorCodes.has(error.code))
+    && retryableModelOutputErrorCodes.has(error.code)
 }
 
 function describeSystemDraftGenerationFailure(error: unknown): string {
@@ -4299,14 +4314,17 @@ export async function generateStoryTurn(request: StoryTurnRequest): Promise<Stor
     }
   }
 
-  if (request.confirmedCurve) {
+  // Deterministic turn text is reserved for the explicit local acceptance
+  // mode. In a configured environment a failed model call must remain a
+  // visible error instead of looking like a successful story continuation.
+  if (request.confirmedCurve && isExplicitLocalModelMode()) {
     const fallback = createConfirmedCurveStoryTurnFallback(request, state)
     validateConfirmedCurveStoryTurnContinuation(request, fallback)
     console.warn(`Story turn used the confirmed-curve fallback (mode=${request.mode}, confirmedTurns=${request.history.length}).`)
     return fallback
   }
 
-  if (usesSelectedSystemDraftDirection(request.seed)) {
+  if (usesSelectedSystemDraftDirection(request.seed) && isExplicitLocalModelMode()) {
     const fallback = createSystemDraftStoryTurnFallback(request, state)
     validateSystemDraftStoryTurnContinuation(request, fallback)
     console.warn(`Story turn used the selected-system-draft fallback (mode=${request.mode}, confirmedTurns=${request.history.length}).`)

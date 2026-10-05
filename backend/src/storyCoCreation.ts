@@ -1344,12 +1344,15 @@ function deriveFallbackStoryMaterial(
   // the whole premise. Other facts are assigned to the beat that develops
   // them, so repeating `observed` here would make a rich input look inflated.
   const current = currentBase
+  const goalPhrase = getGoalPhrase(goal)
+  const goalDecision = getGoalDecisionPhrase(goal)
+  const currentWithGoal = current.includes(goalPhrase) || current.includes(goalDecision)
+    ? current
+    : `${current}；${subject}当前要决定${goalDecision}`
   return {
     subject,
     goal,
-    current: current.includes(getGoalPhrase(goal))
-      ? current
-      : `${current}；当前要决定是否${getGoalPhrase(goal)}`,
+    current: currentWithGoal,
     observed,
     deadline,
     commitment,
@@ -1616,12 +1619,16 @@ function parseModelCurve(
   if (!isCurveGroundedToSeed(orderedBeats, seed)) return undefined
   const coveredDesign = updateStoryDesignCoverage(design, orderedBeats)
   if (getUnresolvedStorySourceFacts(coveredDesign).length) return undefined
+  if (!hasStableCreativeDirection(orderedBeats, brief)) return undefined
   const plannedFoundation = buildStoryCurveFoundation(orderedBeats, brief, seed)
-  // The model may suggest richer wording, but it cannot introduce a second
-  // design map. Derive the frozen foundation from the exact beats that passed
-  // the same source-fact and proposal checks so confirmation and first-spine
-  // materialization share one causal source of truth.
-  const foundation = plannedFoundation
+  // The model may suggest richer wording for the design map, but traceability
+  // always comes from the exact beats that passed the source-fact and proposal
+  // checks. This keeps one reviewed foundation shared by confirmation and the
+  // first spine instead of reconstructing it after the fact.
+  const modelFoundation = parseModelCurveFoundation(value.foundation)
+  const foundation = modelFoundation && isModelFoundationGoalCompatible(modelFoundation, seed)
+    ? mergeFoundationTrace(modelFoundation, plannedFoundation)
+    : plannedFoundation
   if (!foundation) return undefined
 
   const now = Date.now()
@@ -1641,6 +1648,57 @@ function parseModelCurve(
     createdAt: now,
     updatedAt: now,
   }
+}
+
+function mergeFoundationTrace(
+  foundation: StoryCurveFoundation,
+  trace: StoryCurveFoundation | undefined,
+): StoryCurveFoundation {
+  if (!trace) return foundation
+  return {
+    ...foundation,
+    sourceFactIds: trace.sourceFactIds,
+    beatSignatures: trace.beatSignatures,
+  }
+}
+
+function isModelFoundationGoalCompatible(
+  foundation: StoryCurveFoundation,
+  seed: Pick<StorySeed, 'lockedGoal' | 'activeSituation'>,
+): boolean {
+  const expected = seed.lockedGoal?.trim()
+  if (!expected) return true
+  const expectedPhrase = getGoalPhrase(expected).replace(/[“”"']/gu, '')
+  const candidate = `${foundation.preservedGoal} ${foundation.conflictCore.goal}`.replace(/[“”"']/gu, '')
+  return Boolean(expectedPhrase)
+    && (candidate.includes(expectedPhrase) || expectedPhrase.includes(getGoalPhrase(foundation.preservedGoal)))
+}
+
+function hasStableCreativeDirection(beats: readonly CurveBeat[], brief: CreativeBrief): boolean {
+  const details = beats
+    .filter((beat) => beat.kind !== 'current-state' && beat.status !== 'rejected')
+    .map((beat) => beat.detail)
+  const force = brief.dramaticForces[0]
+  const tone = brief.tones[0]
+  const forcePattern: Record<DramaticForce, RegExp> = {
+    misunderstanding: /误会|理解|澄清|猜测|解释|信息/u,
+    cost: /代价|放弃|牺牲|承担|交换|两全/u,
+    surprise: /意外|突然|新条件|变化|时机|失效/u,
+    contrast: /反而|局限|旧办法|依赖|露出|失效/u,
+    'relationship-tension': /承诺|关系|信任|回应|裂痕|分歧/u,
+  }
+  const tonePattern: Record<CreativeTone, RegExp> = {
+    comedy: /尴尬|体面|笑/u,
+    warm: /理解|照顾|温暖|彼此/u,
+    friendship: /朋友|信任|友情|同行/u,
+    romance: /心意|喜欢|恋爱|告白/u,
+    growth: /改变|成长|习惯|重新|承担/u,
+    mystery: /信息|疑问|真相|解释|缺口/u,
+    fantasy: /规则|边界|奇幻|魔法/u,
+  }
+  const forceHits = force ? details.filter((detail) => forcePattern[force].test(detail)).length : 3
+  const toneHits = tone ? details.filter((detail) => tonePattern[tone].test(detail)).length : 3
+  return forceHits >= 3 && toneHits >= 3
 }
 
 function parseModelCurveFoundation(value: unknown): StoryCurveFoundation | undefined {
@@ -1983,6 +2041,7 @@ function getFallbackTension(subject: string, goal: string, brief: CreativeBrief,
   const hasCommitment = !isPlaceholderMaterial(commitmentSource, goal)
   const anchor = hasMaterial ? getConcreteMaterialHandle(material, goal, brief) : getDirectionAnchor(brief, goal)
   const goalPhrase = getGoalPhrase(goal)
+  const goalDecision = getGoalDecisionPhrase(goal)
   const goalObject = getGoalObject(goal)
   const goalAction = getWantGoal(goal)
   const commitment = hasCommitment
@@ -1993,6 +2052,18 @@ function getFallbackTension(subject: string, goal: string, brief: CreativeBrief,
     const observed = getConcreteMaterialHandle(storyMaterial.observed, goal, brief)
     if (brief.dramaticForces.includes('relationship-tension') && hasConcreteFallbackMaterial(storyMaterial.commitment, goal)) {
       return `暂定：${observed}让${subject}原本的安排出现缺口，而${commitment}把这项帮忙变成必须回应的承诺；${tone}。`
+    }
+    switch (brief.dramaticForces[0]) {
+      case 'misunderstanding':
+        return `暂定：${observed}让${subject}无法确定这段材料究竟意味着什么；不同理解会把${goalDecision}带向不同方向。`
+      case 'cost':
+        return `暂定：${observed}让${subject}发现，继续${goalPhrase}必须先拿一项眼前条件来交换。`
+      case 'surprise':
+        return `暂定：${observed}打断了${subject}原本对${goalPhrase}的准备，原计划缺少一个关键条件。`
+      case 'contrast':
+        return `暂定：${observed}暴露出${subject}最依赖的办法并不能直接支持${goalPhrase}；旧把握开始动摇。`
+      default:
+        break
     }
     return `暂定：${observed}暴露出${subject}原本办法的缺口；${subject}仍要${goalPhrase}，却不能再假装条件齐全。`
   }
@@ -2023,6 +2094,7 @@ function getFallbackTriggerDetail(subject: string, goal: string, brief: Creative
   const hasCommitment = !isPlaceholderMaterial(commitmentSource, goal)
   const anchor = hasMaterial ? getConcreteMaterialHandle(material, goal, brief) : getDirectionAnchor(brief, goal)
   const goalPhrase = getGoalPhrase(goal)
+  const goalDecision = getGoalDecisionPhrase(goal)
   const goalAction = getWantGoal(goal)
   const commitment = hasCommitment
     ? getConcreteMaterialHandle(commitmentSource, goal, brief)
@@ -2031,7 +2103,19 @@ function getFallbackTriggerDetail(subject: string, goal: string, brief: Creative
   const force = brief.dramaticForces[0]
   if (storyMaterial && hasConcreteFallbackMaterial(storyMaterial.deadline, goal)) {
     const deadline = getConcreteMaterialHandle(storyMaterial.deadline, goal, brief)
-    return `暂定：在“${deadline}”的限制下，${subject}的时间窗口被压到眼前；若要${goalPhrase}，必须先处理这项限制。`
+    switch (force) {
+      case 'misunderstanding':
+        return `暂定：“${deadline}”让${subject}对${goalDecision}的理解出现分歧；在澄清前，原计划不能照常推进。`
+      case 'cost':
+        return `暂定：“${deadline}”把${goalDecision}变成时间与${commitment}之间的取舍；继续${goalPhrase}会先消耗一项条件。`
+      case 'surprise':
+        return `暂定：“${deadline}”提前压缩了${subject}处理${goalDecision}的时间；原来安排的缓冲被意外拿走。`
+      case 'relationship-tension':
+        return `暂定：“${deadline}”让${subject}必须同时回应${commitment}和${goalDecision}，拖延会先伤到关系。`
+      case 'contrast':
+      default:
+        return `暂定：“${deadline}”暴露出${subject}原来以为足够的准备并不够；${goalDecision}不能照旧进行。`
+    }
   }
   switch (force) {
     case 'misunderstanding':
@@ -2073,11 +2157,24 @@ function getFallbackEscalation(subject: string, goal: string, brief: CreativeBri
   const commitmentEvidence = hasCommitment
     ? getCommitmentEvidence(commitment, goal, brief)
     : `由${subject}承担这次选择`
+  const goalDecision = getGoalDecisionPhrase(goal)
   const progression = getProgressionAnchor(material, storyMaterial, goal, brief, commitment)
   const tone = getToneCausalClause(brief, 'escalation')
   if (storyMaterial && hasConcreteFallbackMaterial(storyMaterial.commitment, goal)) {
     const commitmentLabel = getConcreteMaterialHandle(storyMaterial.commitment, goal, brief)
-    return `暂定：“${commitmentLabel}”这项约定让${subject}不能同时保住${goalObject}和眼前安排；继续拖延会迫使${subject}作出选择。`
+    switch (brief.dramaticForces[0]) {
+      case 'misunderstanding':
+        return `暂定：“${commitmentLabel}”与${subject}对${goalDecision}的理解不一致；继续推进会把误会扩大到下一步。`
+      case 'cost':
+        return `暂定：“${commitmentLabel}”要求${subject}在${goalDecision}和一项已承诺条件之间先放弃其一；代价开始具体。`
+      case 'surprise':
+        return `暂定：“${commitmentLabel}”把${goalDecision}推向原计划没有预留的条件；越拖越难回到原办法。`
+      case 'relationship-tension':
+        return `暂定：“${commitmentLabel}”让${subject}不能同时兑现承诺和${goalDecision}；回避本身会让关系失去退路。`
+      case 'contrast':
+      default:
+        return `暂定：“${commitmentLabel}”让${subject}最依赖的办法反而卡住${goalDecision}；继续拖延会迫使${subject}承认旧办法失效。`
+    }
   }
   switch (brief.dramaticForces[0]) {
     case 'misunderstanding':
@@ -2120,7 +2217,20 @@ function getFallbackMidpointTurn(subject: string, goal: string, brief: CreativeB
   const tone = getToneCausalClause(brief, 'midpoint')
   if (storyMaterial && hasConcreteFallbackMaterial(storyMaterial.decision, goal)) {
     const decision = getConcreteMaterialHandle(storyMaterial.decision, goal, brief)
-    return `暂定：${subject}必须面对${decision}；一旦作出这项决定，${goalObject}的送达安排也会改变。`
+    const decisionObject = getGoalObject(decision)
+    switch (brief.dramaticForces[0]) {
+      case 'misunderstanding':
+        return `暂定：${subject}发现，对“${decision}”的不同理解会改变这项决定的后果；必须先选定自己相信的解释。`
+      case 'cost':
+        return `暂定：${subject}发现，“${decision}”要求拿一项眼前条件换取${goalPhrase}；旧办法无法两全。`
+      case 'surprise':
+        return `暂定：${subject}发现，“${decision}”把${goalPhrase}推向新的时机或资源条件；必须重排优先级。`
+      case 'relationship-tension':
+        return `暂定：${subject}发现，若绕开${commitment}，“${decision}”即使完成也会留下关系裂痕。`
+      case 'contrast':
+      default:
+        return `暂定：${subject}发现，“${decisionObject}”让自己最熟悉的办法反而失去作用；要继续${goalPhrase}必须承认这一点。`
+    }
   }
   switch (brief.dramaticForces[0]) {
     case 'misunderstanding':
@@ -2160,10 +2270,23 @@ function getFallbackClimaxChoice(subject: string, goal: string, brief: CreativeB
   const tone = getToneCausalClause(brief, 'climax')
   if (storyMaterial && hasConcreteFallbackMaterial(storyMaterial.decision, goal)) {
     const decision = getConcreteMaterialHandle(storyMaterial.decision, goal, brief)
+    const decisionObject = getGoalObject(decision)
     const otherSide = hasConcreteFallbackMaterial(storyMaterial.commitment, goal)
       ? getConcreteMaterialHandle(storyMaterial.commitment, goal, brief)
       : `继续${goalPhrase}`
-    return `暂定：${subject}必须在${decision}与${otherSide}之间作出选择；无论先保住哪一边，${goalObject}的安排都会承担可见代价。`
+    switch (brief.dramaticForces[0]) {
+      case 'misunderstanding':
+        return `暂定：${subject}必须在${decisionObject}与先澄清“${otherSide}”之间作出选择；选择会决定这项决定依据哪种理解继续。`
+      case 'cost':
+        return `暂定：${subject}必须在${decisionObject}与${otherSide}之间放弃一项条件；这项决定的代价不能再由别人承担。`
+      case 'surprise':
+        return `暂定：${subject}必须在${decisionObject}与${otherSide}之间重排先后；新条件会让其中一边失去原来的保障。`
+      case 'relationship-tension':
+        return `暂定：${subject}必须在${decisionObject}与回应${otherSide}之间作出选择；两边不能靠沉默同时保住。`
+      case 'contrast':
+      default:
+        return `暂定：${subject}必须在${decisionObject}与${otherSide}之间作出选择；要继续${goalPhrase}，就得承认原来的办法已经失效。`
+    }
   }
   switch (brief.dramaticForces[0]) {
     case 'misunderstanding':
@@ -2211,7 +2334,20 @@ function getFallbackResolution(subject: string, goal: string, brief: CreativeBri
     const commitmentLabel = hasConcreteFallbackMaterial(storyMaterial.commitment, goal)
       ? getConcreteMaterialHandle(storyMaterial.commitment, goal, brief)
       : '这项承诺'
-    return `暂定：${subject}如何处理${decision}并回应${commitmentLabel}，会决定这项安排最后留下什么；${toneChange}。`
+    const decisionObject = getGoalObject(decision)
+    switch (brief.dramaticForces[0]) {
+      case 'misunderstanding':
+        return `暂定：${subject}如何解释“${decision}”并回应${commitmentLabel}，会决定这项选择最后留下的关系和信息缺口。`
+      case 'cost':
+        return `暂定：${subject}如何处理${decisionObject}并回应${commitmentLabel}，会决定为了${goalPhrase}放弃什么，并留下可见代价。`
+      case 'surprise':
+        return `暂定：${subject}如何处理${decisionObject}带来的新条件，会决定${goalPhrase}能否成立，以及旧计划被怎样改写。`
+      case 'relationship-tension':
+        return `暂定：${subject}如何处理${decisionObject}并回应${commitmentLabel}，会决定这项选择与这项承诺能否同时被诚实面对。`
+      case 'contrast':
+      default:
+        return `暂定：${subject}处理${decisionObject}并回应${commitmentLabel}后，必须用一个可验证的改变替代旧办法；${subject}承认原来的局限。`
+    }
   }
   switch (brief.dramaticForces[0]) {
     case 'misunderstanding':
@@ -2282,6 +2418,17 @@ function getGoalPhrase(goal: string): string {
   return compactGoalPhrase(normalized || '作出选择')
 }
 
+function getGoalDecisionPhrase(goal: string): string {
+  const normalized = goal
+    .trim()
+    .replace(/^当前(?:目标|想法)[：:]\s*/u, '')
+    .replace(/^(?:想要|想|希望|打算|准备|计划)\s*/u, '')
+  const decisionMatch = normalized.match(/(?:决定|选择|判断|确认)(?:要不要|是否)(.+)$/u)
+  if (decisionMatch?.[1]) return `是否${compactGoalPhrase(decisionMatch[1].trim())}`
+  if (normalized.startsWith('是否')) return compactGoalPhrase(normalized)
+  return `是否${getGoalPhrase(goal)}`
+}
+
 function getWantGoal(goal: string): string {
   const phrase = getGoalPhrase(goal)
   return `想${phrase}`
@@ -2341,6 +2488,8 @@ function getConcreteMaterialHandle(value: string, fallback: string, brief?: Crea
   }
   const decisionMatch = cleaned.match(/(?:决定|选择|判断|确认)(?:要不要|是否)(.+)$/u)
   if (decisionMatch?.[1]) return `是否${decisionMatch[1].trim()}`
+  const intentionDecisionMatch = cleaned.match(/(?:想|希望|打算|准备|计划)(?:在[^，。！？；]{0,24})?(?:决定|选择|判断|确认)(?:要不要|是否)(.+)$/u)
+  if (intentionDecisionMatch?.[1]) return `是否${intentionDecisionMatch[1].trim()}`
   const clauses = cleaned.split(/[，。！？；\n]/u).map((part) => part.trim()).filter(Boolean)
   const candidate = clauses.find((part) => (
     part.length >= 4

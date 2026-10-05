@@ -125,6 +125,7 @@ test('co-creation start and node save are idempotent under duplicate requests', 
   const request = {
     idea: `重复点击验收-${Date.now()}：青柠去游乐园`,
     brief,
+    operationId: `start-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   }
 
   try {
@@ -135,7 +136,12 @@ test('co-creation start and node save are idempotent under duplicate requests', 
     assert.equal(first.storyId, second.storyId)
     assert.equal(first.revision, second.revision)
     const sequential = await startStoryCoCreation(request)
-    assert.notEqual(sequential.storyId, first.storyId, 'a later deliberate start remains a new operation')
+    assert.equal(sequential.storyId, first.storyId, 'a retry with the same operation id replays the result')
+    const deliberate = await startStoryCoCreation({
+      ...request,
+      operationId: `${request.operationId}-deliberate`,
+    })
+    assert.notEqual(deliberate.storyId, first.storyId, 'a later deliberate start remains a new operation')
 
     const beat = first.curve.beats.find((candidate) => candidate.kind === 'trigger')!
     const saveRequest = {
@@ -144,6 +150,7 @@ test('co-creation start and node save are idempotent under duplicate requests', 
       curveId: first.curve.id,
       beatId: beat.id,
       detail: '暂定：青柠必须先说明自己为何要去游乐园。',
+      operationId: `save-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     }
     const [savedFirst, savedSecond] = await Promise.all([
       updateSessionCurveBeat(saveRequest),
@@ -151,6 +158,8 @@ test('co-creation start and node save are idempotent under duplicate requests', 
     ])
     assert.equal(savedFirst.revision, savedSecond.revision)
     assert.equal(savedFirst.curve.id, savedSecond.curve.id)
+    const savedRetry = await updateSessionCurveBeat(saveRequest)
+    assert.equal(savedRetry.revision, savedFirst.revision, 'a save retry replays the same mutation')
     const snapshot = getStorySessionSnapshot(first.storyId)
     assert.equal(snapshot.revision, savedFirst.revision)
   } finally {
@@ -506,6 +515,31 @@ test('keeps every rich source fact visible in the fact-preserving curve fallback
   assert.match(beatDetails, /删掉自己的名字/u)
   assert.equal(new Set(curve.design?.sourceFacts.map((fact) => fact.text)).size, curve.design?.sourceFacts.length)
   assert.equal(curve.beats.filter((beat) => beat.detail.includes('毕业展布置前，沈乔在借来的投影仪')).length, 0)
+})
+
+test('deduplicates equivalent decision wording without dropping the original clause', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const richIdea = '毕业展布置前，沈乔在借来的投影仪里看到和前队友剪的短片。投影仪今晚要归还，她答应不再改动作品，却想在展出前决定要不要删掉自己的名字。'
+  const richSeed = {
+    ...sparseSeed,
+    subject: '沈乔',
+    activeSituation: richIdea,
+    lockedGoal: '是否删掉自己的名字',
+    lockedFacts: ['毕业展布置前', '投影仪今晚要归还', '她答应不再改动作品', '展出前决定要不要删掉自己的名字'],
+  }
+  const curve = createProvisionalCurveFallback(richIdea, richSeed, brief)
+  const facts = curve.design?.sourceFacts.map((fact) => fact.text) ?? []
+  assert.equal(facts.filter((fact) => /删掉自己的名字/u.test(fact)).length, 1)
+  assert.equal(curve.beats.filter((beat) => /删掉自己的名字/u.test(beat.detail)).length >= 1, true)
+  assert.equal(curve.beats.some((beat) => /删掉自己的名字的安排|会决定删掉自己的名字是否/u.test(beat.detail)), false)
+  const foundation = curve.foundation!
+  assert.notEqual(foundation.predicament.plausibleCost, foundation.predicament.tradeoff)
+  assert.match(foundation.predicament.plausibleCost, /(?:改变|改用|局限|代价|保留|放弃|留下|无法)/u)
+  assert.notEqual(foundation.storyEnds.resolution, foundation.storyEnds.climax)
 })
 
 test('freezes one concrete design foundation before confirmation', () => {

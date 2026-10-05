@@ -44,6 +44,12 @@ import type { StoryStageRequest } from './useStoryStageRequest'
 
 const defaultStoryExpansionScope = 'keep-scale' as const
 
+function createClientOperationId(): string {
+  const randomUuid = globalThis.crypto?.randomUUID
+  if (randomUuid) return randomUuid.call(globalThis.crypto)
+  return `op-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
 interface ConflictCoreGenerationOptions {
   context?: StoryConflictCoreContext
   generateSystemDraft?: boolean
@@ -175,6 +181,7 @@ function createCoCreationActions(
       () => requestStoryCoCreationStart({
         idea: state.trimmedIdea,
         brief,
+        operationId: createClientOperationId(),
         ...(existingSession ? { ...existingSession, versionMode } : {}),
       }),
       (result) => {
@@ -189,8 +196,9 @@ function createCoCreationActions(
   }
 
   const updateCurveBeat = async (beatId: string, detail: string) => {
+    const operationId = createClientOperationId()
     await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => (
-      requestCurveBeatUpdate({ storyId, revision, curveId, beatId, detail })
+      requestCurveBeatUpdate({ storyId, revision, curveId, beatId, detail, operationId })
     ))
   }
 

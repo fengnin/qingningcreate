@@ -78,12 +78,15 @@ export function buildStoryCurveFoundation(
 
   const characterTension = byKind('character-tension')
   const preservedGoal = (seed.lockedGoal?.trim() || current.detail.trim() || seed.activeSituation.trim()).trim()
-  // The visible proposal is the reviewed design input. Causal anchors are
-  // compact planner handles, not a substitute for the author's chosen
-  // wording; using the detail first keeps different directions materially
-  // different in the frozen foundation as well as on the cards.
-  const triggerAnchor = getFoundationAnchor(trigger.detail, trigger.causalAnchor ?? '当前触发点')
-  const escalationAnchor = getFoundationAnchor(escalation.detail, escalation.causalAnchor ?? '当前阻碍')
+  // Causal anchors are the compact planner handles selected while the draft
+  // is being reviewed. Prefer them here so the confirmed foundation does not
+  // turn a short deadline or promise into a repeated full sentence.
+  const triggerAnchor = getFoundationBeatAnchor(trigger, '当前触发点')
+  const escalationAnchor = getFoundationBeatAnchor(escalation, '当前阻碍')
+  const midpointAnchor = midpoint
+    ? getFoundationBeatAnchor(midpoint, '原来的办法不再足够')
+    : escalationAnchor
+  const climaxAnchor = getFoundationBeatAnchor(climax, '选择会带来明确代价')
   const forceLabel = brief.dramaticForces[0] ? getDramaticForceLabel(brief.dramaticForces[0]) : '开放方向'
   const variationAxis: StoryCurveFoundation['predicament']['variationAxis'] = brief.dramaticForces.includes('relationship-tension')
     ? 'relationship'
@@ -96,28 +99,27 @@ export function buildStoryCurveFoundation(
           : 'commitment'
 
   const conflictObstacle = joinCausalDetails([
-    trigger.causalAnchor ?? trigger.detail,
-    escalation.causalAnchor ?? escalation.detail,
-    characterTension?.causalAnchor ?? characterTension?.detail,
+    triggerAnchor,
+    escalationAnchor,
+    characterTension ? getFoundationBeatAnchor(characterTension, '') : undefined,
   ], '当前办法会被这道阻碍打断')
-  const tradeoff = getFoundationAnchor(climax.detail, climax.causalAnchor ?? '需要由主角作出取舍')
+  const tradeoff = getFoundationTradeoff(climax.detail, climaxAnchor)
   // Urgency belongs to the first concrete interruption, while the plausible
   // cost belongs to the choice that follows. Reading both from the same
   // midpoint sentence made the frozen map look like a set of duplicated
   // labels instead of a progression.
-  const urgency = getFoundationAnchor(
-    trigger.detail,
-    trigger.causalAnchor ?? '继续回避会扩大代价',
-  )
+  const urgency = triggerAnchor
   const plausibleCost = getFoundationCost(
-    climax.detail,
-    getFoundationCost(resolution.detail, resolution.causalAnchor ?? '选择会改变目标和关系'),
+    resolution.detail,
+    getFoundationCost(climax.detail, resolution.causalAnchor ?? '选择会改变目标和关系'),
   )
-  const openingClue = getFoundationAnchor(trigger.detail, trigger.causalAnchor ?? '原计划出现具体阻碍')
+  const openingClue = triggerAnchor
   const opening = current.detail.trim()
-  const middleEscalation = getFoundationAnchor(escalation.detail, escalation.causalAnchor ?? '阻碍开始升级')
-  const midpointPressure = getFoundationAnchor(midpoint?.detail ?? midpoint?.causalAnchor ?? escalation.detail, '原来的办法不再足够')
-  const climaxPressure = getFoundationAnchor(climax.detail, climax.causalAnchor ?? '选择会带来明确代价')
+  const middleEscalation = escalationAnchor
+  const midpointPressure = midpointAnchor
+  const climaxPressure = tradeoff
+  const decisionLabel = getFoundationDecisionLabel(preservedGoal)
+  const predicamentObstacle = `${shortenFoundationLabel(triggerAnchor)}使${decisionLabel}不能照原安排推进；${shortenFoundationLabel(escalationAnchor)}把取舍推到眼前。`
 
   const allSourceFactIds = getSourceFactIds(active)
   const sourceFactIds = {
@@ -146,10 +148,10 @@ export function buildStoryCurveFoundation(
     },
     preservedGoal,
     predicament: {
-      title: `${forceLabel} · ${shortenFoundationLabel(triggerAnchor)}造成的困境`,
+      title: `${forceLabel} · ${shortenFoundationLabel(triggerAnchor)}带来的困境`,
       variationAxis,
       immediateSituation: current.detail.trim(),
-        obstacle: shortenFoundationLabel(joinCausalDetails([triggerAnchor, escalationAnchor], '原来的办法逐步失效')),
+        obstacle: shortenFoundationLabel(predicamentObstacle),
         tradeoff,
         urgency,
         choice: tradeoff,
@@ -169,11 +171,11 @@ export function buildStoryCurveFoundation(
         climax: climax.detail.trim(),
         resolution: resolution.detail.trim(),
       cost: plausibleCost,
-      promise: `围绕“${shortenFoundationLabel(preservedGoal)}”处理${shortenFoundationLabel(escalationAnchor)}，让${forceLabel}的取舍决定结局变化。`,
+      promise: `围绕${shortenFoundationLabel(decisionLabel)}处理${shortenFoundationLabel(escalationAnchor)}，让${forceLabel}的取舍决定结局变化。`,
     },
     approach: {
-      intent: `先回应${shortenFoundationLabel(triggerAnchor)}，再决定如何处理${shortenFoundationLabel(preservedGoal)}与${shortenFoundationLabel(tradeoff)}之间的冲突。`,
-      cost: tradeoff,
+      intent: `先处理${shortenFoundationLabel(triggerAnchor)}带来的限制，再围绕${shortenFoundationLabel(decisionLabel)}回应${shortenFoundationLabel(escalationAnchor)}。`,
+      cost: plausibleCost,
     },
     sourceFactIds,
     beatSignatures,
@@ -191,8 +193,24 @@ function getFoundationCost(value: string, fallback: string): string {
     .replace(/[“”"']/gu, '')
     .trim()
   const clauses = cleaned.split(/[，。！？；\n]/u).map((part) => part.trim()).filter((part) => part.length >= 4)
-  const costClause = [...clauses].reverse().find((part) => /(?:还是|放弃|失去|承担|代价|无法同时|暂缓)/u.test(part))
-  return shortenFoundationLabel(costClause ?? getFoundationAnchor(cleaned, fallback))
+  const costClause = [...clauses].reverse().find((part) => /(?:还是|放弃|失去|承担|代价|无法同时|暂缓|留下|改变|改用|局限)/u.test(part))
+  if (costClause) {
+    const choice = costClause.match(/(?:必须在|在)(.+?)与(.+?)之间(?:作出选择|放弃一项条件|取舍)/u)
+    if (choice?.[1] && choice[2]) {
+      return shortenFoundationLabel(`无法同时保留${choice[1].trim()}和${choice[2].trim()}`)
+    }
+    const consequence = costClause.match(/(?:会|将|只能|必须)(.+)$/u)
+    if (consequence?.[1] && !/(?:选择|取舍|放弃一项条件)/u.test(consequence[1])) {
+      const consequenceText = consequence[1].trim()
+      if (consequenceText.length >= 4) return shortenFoundationLabel(consequenceText)
+    }
+    const explicitCost = costClause
+      .replace(/^(?:代价(?:是|还包括)|需要承担|必须承担)\s*/u, '')
+      .trim()
+    if (explicitCost && explicitCost !== costClause) return shortenFoundationLabel(explicitCost)
+    return shortenFoundationLabel(costClause)
+  }
+  return shortenFoundationLabel(getFoundationAnchor(cleaned, fallback))
 }
 
 /**
@@ -257,6 +275,38 @@ function getFoundationAnchor(value: string, fallback: string): string {
     .find(({ part }) => !isFoundationMetaClause(part))
     ?.part ?? fallback
   return normalized.length > 72 ? `${normalized.slice(0, 72)}…` : normalized
+}
+
+function getFoundationBeatAnchor(beat: CurveBeat, fallback: string): string {
+  const causalAnchor = beat.causalAnchor?.trim()
+  if (causalAnchor && !isFoundationMetaClause(causalAnchor)) {
+    return shortenFoundationLabel(causalAnchor.replace(/^暂定[：:]/u, '').trim())
+  }
+  return getFoundationAnchor(beat.detail, fallback)
+}
+
+function getFoundationTradeoff(detail: string, fallback: string): string {
+  const cleaned = detail
+    .replace(/^暂定[：:]/u, '')
+    .replace(/[“”"']/gu, '')
+    .trim()
+  const clauses = cleaned
+    .split(/[。！？；]/u)
+    .map((part) => part.trim())
+    .filter(Boolean)
+  const candidate = clauses.find((part) => /(?:必须在|选择|取舍|放弃|还是|承担)/u.test(part))
+  return shortenFoundationLabel(candidate ?? fallback)
+}
+
+function getFoundationDecisionLabel(goal: string): string {
+  const cleaned = goal
+    .replace(/^当前(?:目标|想法)[：:]\s*/u, '')
+    .replace(/^(?:想要|想|希望|打算|准备|计划)\s*/u, '')
+    .trim()
+  const decision = cleaned.match(/(?:决定|选择|判断|确认)(?:要不要|是否)(.+)$/u)
+  if (decision?.[1]) return `是否${shortenFoundationLabel(decision[1].trim())}`
+  if (cleaned.startsWith('是否')) return shortenFoundationLabel(cleaned)
+  return `是否${shortenFoundationLabel(cleaned || '作出选择')}`
 }
 
 function scoreFoundationClause(value: string): number {
@@ -433,15 +483,17 @@ function dedupeAuthorFacts(values: readonly { text: string; priority: number }[]
   // Preserve the author's original order. Sorting by length makes a rich
   // paragraph look like unrelated facts and causes later beats to inherit the
   // wrong clause. Duplicate entries are replaced in place by the richer form.
-  const kept: Array<{ text: string; compact: string; priority: number }> = []
+  const kept: Array<{ text: string; compact: string; canonical: string; priority: number }> = []
 
   for (const raw of values) {
     const candidate = { text: normalizeText(raw.text), priority: raw.priority }
     if (!candidate.text) continue
     const compact = compactFact(candidate.text)
+    const canonical = canonicalFact(candidate.text)
     if (compact.length < 3) continue
     const duplicate = kept.find((existing) => (
       existing.compact === compact
+      || (canonical.length >= 4 && existing.canonical === canonical)
       || (Math.min(existing.compact.length, compact.length) >= 6
         && (existing.compact.includes(compact) || compact.includes(existing.compact))
         && isNearDuplicateFact(existing.text, candidate.text))
@@ -451,13 +503,14 @@ function dedupeAuthorFacts(values: readonly { text: string; priority: number }[]
       // to survive when it is not actually represented in the prose.
        if (candidate.priority > duplicate.priority
          || (candidate.priority === duplicate.priority && candidate.text.length > duplicate.text.length)) {
-        duplicate.text = candidate.text
-        duplicate.compact = compact
-        duplicate.priority = candidate.priority
+         duplicate.text = candidate.text
+         duplicate.compact = compact
+         duplicate.canonical = canonical
+         duplicate.priority = candidate.priority
       }
       continue
     }
-    kept.push({ text: candidate.text, compact, priority: candidate.priority })
+    kept.push({ text: candidate.text, compact, canonical, priority: candidate.priority })
   }
 
   // For a one-clause idea, the explicit goal is the useful atomic fact; the
@@ -476,7 +529,12 @@ function dedupeAuthorFacts(values: readonly { text: string; priority: number }[]
     const ideaLength = compactFact(originalIdea)
     const goalLength = compactFact(explicitGoal).length
     if (ideaLength.length <= goalLength + 6) {
-      kept.push({ text: explicitGoal, compact: compactFact(explicitGoal), priority: 4 })
+      kept.push({
+        text: explicitGoal,
+        compact: compactFact(explicitGoal),
+        canonical: canonicalFact(explicitGoal),
+        priority: 4,
+      })
     }
   }
 
@@ -492,6 +550,33 @@ function dedupeAuthorFacts(values: readonly { text: string; priority: number }[]
       return contained.length < 2
     })
     .map(({ text }) => text)
+}
+
+/**
+ * Normalize decision wording before comparing source facts. Rich ideas often
+ * state the same decision three ways ("想在展出前决定要不要...",
+ * "决定要不要...", and an explicit "是否..."). Those are one author fact,
+ * not three independent items for the curve to repeat.
+ */
+function canonicalFact(value: string): string {
+  let normalized = stripFactLead(value)
+    .replace(/^(?:她|他|其|主角|我|你)\s*/u, '')
+    .trim()
+
+  const decision = normalized.match(/(?:想|希望|打算|准备|计划|决定|选择|判断|确认)(?:在[^，。！？；]{0,24})?(?:决定|选择|判断|确认)?(?:要不要|是否)(.+)$/u)
+  if (decision?.[1]) return compactFact(decision[1])
+
+  const explicitDecision = normalized.match(/(?:决定|选择|判断|确认)(?:要不要|是否)(.+)$/u)
+  if (explicitDecision?.[1]) return compactFact(explicitDecision[1])
+
+  const leadingDecision = normalized.match(/^(?:是否|要不要)(.+)$/u)
+  if (leadingDecision?.[1]) return compactFact(leadingDecision[1])
+
+  normalized = normalized
+    .replace(/^(?:想|希望|打算|准备|计划)\s*/u, '')
+    .replace(/^(?:在[^，。！？；]{0,24})前\s*/u, '')
+    .replace(/^(?:是否|要不要)\s*/u, '')
+  return compactFact(normalized)
 }
 
 function isNearDuplicateFact(left: string, right: string): boolean {

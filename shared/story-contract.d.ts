@@ -552,6 +552,8 @@ export interface StoryDirectionsRequest {
 export interface StoryCoCreationStartRequest {
   idea: string
   brief: CreativeBrief
+  /** Stable identity for one browser submission; retries replay this operation. */
+  operationId?: string
   /** Present only when the author deliberately creates another curve version. */
   storyId?: string
   revision?: number
@@ -562,6 +564,8 @@ export interface StoryCurveBeatUpdateRequest extends StorySessionVersion {
   curveId: string
   beatId: string
   detail: string
+  /** Optional client identity for retrying one save without a second mutation. */
+  operationId?: string
 }
 
 export interface StoryCurveBeatRegenerationRequest extends StorySessionVersion {
