@@ -1036,6 +1036,39 @@ test('batch regeneration requires every decision and keeps rejected replacements
   )
 })
 
+test('batch regeneration preview is non-mutating and keeps confirmation gated after a rejection', async () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const curve = createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)
+  const edited = updateCurveBeat(
+    curve,
+    'beat-trigger',
+    '暂定：让高潮先回应已确认的归还承诺，再决定是否继续。',
+  ).curve
+  const beforePreview = structuredClone(edited)
+  const preview = await previewAffectedCurveBeats(sparseIdea, sparseSeed, edited)
+
+  assert.deepEqual(edited, beforePreview)
+  assert.ok(preview.preview.items.length >= 2)
+
+  const decisions = Object.fromEntries(preview.preview.items.map((item, index) => [
+    item.id,
+    (index === 0 ? 'reject' : 'accept') as StoryCurveRegenerationDecision,
+  ])) as Record<string, StoryCurveRegenerationDecision>
+  const resolved = resolveAffectedCurveBeats(edited, preview.preview, decisions)
+  assert.throws(
+    () => confirmProvisionalCurve(resolved.curve),
+    /先处理被修改影响/u,
+  )
+  assert.equal(
+    resolved.curve.rejectedProposals?.some((proposal) => proposal.detail === preview.preview.items[0]!.newDetail),
+    true,
+  )
+})
+
 test('batch regeneration gives each downstream proposal a new causal detail', async () => {
   const brief: CreativeBrief = {
     tones: ['growth'],
