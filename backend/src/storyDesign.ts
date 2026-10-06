@@ -376,7 +376,7 @@ function buildConflictObstacle(
   if (!parts.length) return '当前办法会被这道阻碍打断'
   if (parts.length === 1) return `原有安排会被${shortenFoundationLabel(parts[0]!)}打断`
   if (parts.length === 2) {
-    return `${shortenFoundationLabel(parts[0]!)}先打断原有安排，${shortenFoundationLabel(parts[1]!)}随后把目标推向必须取舍的边界`
+    return `${shortenFoundationLabel(parts[0]!)}先打断原有安排；${shortenFoundationLabel(parts[1]!)}随后把目标推向必须取舍的边界`
   }
   const characterEffect = /暴露|局限/u.test(parts[2]!)
     ? shortenFoundationLabel(parts[2]!)
@@ -446,7 +446,7 @@ function getTradeoffSides(value: string): [string, string] | undefined {
     .replace(/[“”"']/gu, '')
     .replace(/^(?:[^，。！？；]{0,18})(?:必须|需要|只能)?在/u, '')
     .trim()
-  const match = cleaned.match(/^(.{2,40}?)(?:与|和|还是)(.{2,40}?)(?:之间|中|的取舍|的要求|作出取舍|放弃一项条件)/u)
+  const match = cleaned.match(/^(.{2,40}?)(?:与|和|还是|或)(.{2,40}?)(?:之间|中|的取舍|的要求|作出取舍|放弃一项条件|之间选择)/u)
   if (!match?.[1] || !match[2]) return undefined
   const left = match[1].replace(/^(?:继续|选择|决定|是否)/u, '').trim()
   const right = match[2].replace(/^(?:继续|选择|决定|是否)/u, '').trim()

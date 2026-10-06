@@ -26,13 +26,19 @@ import {
   parseStoryAuthorInstructionRequest,
   parseStoryActionProposalRequest,
   looksLikeAuthorInstruction,
+  createDirectCoCreationSeed,
   getStorySessionSnapshot,
+  generateDirections,
   startStoryCoCreation,
+  confirmSessionCurve,
+  startSessionStorySpineFromCurve,
   updateSessionCurveBeat,
 } from './storyService.js'
+import { AppError } from './qwen.js'
 import {
   confirmProvisionalCurve,
   createProvisionalCurveFallback,
+  generateProvisionalCurve,
   isSystemCurveProposalSafe,
   materializeConfirmedCurve,
   previewAffectedCurveBeats,
@@ -108,6 +114,34 @@ const sparseSeed = {
   unknowns: [],
 }
 
+function createConfirmedOpeningTurn(event: string): StoryTurn {
+  return {
+    id: 'turn-1',
+    phase: 'opening',
+    node: {
+      id: 'node-1',
+      title: '首回合边界',
+      event,
+      purpose: '让主角先面对已确认的阻碍。',
+      goalState: 'trying',
+    },
+    conflict: {
+      nodeId: 'node-1',
+      conflict: '原来的安排需要重新判断。',
+      action: '选择一个此刻可以承担的方向。',
+      consequence: '选择会留下需要继续面对的取舍。',
+      intensity: 1,
+      anchor: '起点',
+    },
+    question: '现在先怎么做？',
+    options: [],
+    narrativeAction: null,
+    transition: null,
+    canConclude: false,
+    isConclusion: false,
+  }
+}
+
 const richCurveIdea = '毕业展布置前，沈乔在借来的投影仪里看到和前队友剪的短片。投影仪今晚要归还，她答应不再改动作品，却想在展出前决定要不要删掉自己的名字。'
 const richCurveSeed = {
   subject: '沈乔',
@@ -124,6 +158,382 @@ const reportSeed = {
   lockedGoal: '提交报告',
   lockedFacts: ['周岚要提交报告'],
 }
+
+// The regression suite exercises deterministic, explicitly-labelled local
+// fallbacks. Individual tests temporarily opt into the real-model branch only
+// to verify its error boundary; none of these results are model-quality proof.
+const initialStoryDisableModel = process.env.STORY_DISABLE_MODEL
+test.before(() => {
+  process.env.STORY_DISABLE_MODEL = 'true'
+})
+test.after(() => {
+  if (initialStoryDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+  else process.env.STORY_DISABLE_MODEL = initialStoryDisableModel
+})
+
+function createCompactOpeningModelResponse(event: string): Response {
+  return new Response(JSON.stringify({
+    choices: [{
+      message: {
+        content: JSON.stringify({
+          node: {
+            title: '确认后的起点',
+            event,
+            purpose: '只承接作者已经确认的阻碍与取舍。',
+          },
+          conflict: {
+            conflict: '原来的安排不能照旧推进。',
+            action: '在已经确认的取舍中决定当前下一步。',
+            consequence: '选择会留下仍待处理的代价。',
+          },
+          question: '现在先怎样回应已经确认的阻碍？',
+          options: [
+            {
+              label: '先说明取舍',
+              action: '先说明自己愿意承担哪一边的取舍。',
+              immediateConsequence: '当前选择的边界变得清楚。',
+              laterEffect: '下一步仍要回应已经确认的代价。',
+            },
+            {
+              label: '先保留目标',
+              action: '先确认如何在不改变已知条件的前提下保留目标。',
+              immediateConsequence: '目标与限制被同时看见。',
+              laterEffect: '后续仍需承担不能兼得的部分。',
+            },
+            {
+              label: '先面对承诺',
+              action: '先说明已确认承诺会怎样影响当前决定。',
+              immediateConsequence: '承诺不再被当成可以略过的背景。',
+              laterEffect: '接下来的选择需要回应这项承诺。',
+            },
+          ],
+        }),
+      },
+    }],
+  }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+function createCurveModelResponse(payload: unknown): Response {
+  return new Response(JSON.stringify({
+    choices: [{ message: { content: JSON.stringify(payload) } }],
+  }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+test('accepts concrete relationship-language synonyms without accepting model-language leakage', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  const previousApiKey = process.env.DASHSCOPE_API_KEY
+  const previousBaseUrl = process.env.DASHSCOPE_BASE_URL
+  const previousFetch = globalThis.fetch
+  const idea = '周岚想和姐姐一起保住父亲留下的书店，却答应过不再替姐姐做决定；姐姐准备把店卖掉。'
+  const seed = createDirectCoCreationSeed(idea)
+  assert.ok(seed)
+  const brief: CreativeBrief = {
+    tones: ['friendship'],
+    dramaticForces: ['relationship-tension'],
+    allowSystemNamedCharacters: false,
+  }
+  const beats = [
+    { kind: 'current-state', detail: idea, sourceFactIds: ['source-fact-1', 'source-fact-2', 'source-fact-3'], dependsOn: [] },
+    { kind: 'trigger', detail: '暂定：承诺让周岚无法替姐姐作决定，关系中的目标因此停住', sourceFactIds: ['source-fact-2'], dependsOn: ['beat-current-state'] },
+    { kind: 'escalation', detail: '暂定：姐姐准备把店卖掉，让共同守店的目标面对姐妹关系分歧', sourceFactIds: ['source-fact-3'], dependsOn: ['beat-trigger'] },
+    { kind: 'climax-choice', detail: '暂定：周岚必须在继续替姐姐做决定与面对姐姐准备卖店之间选择', sourceFactIds: ['source-fact-2', 'source-fact-3'], dependsOn: ['beat-escalation'] },
+    { kind: 'resolution', detail: '暂定：这次选择改变周岚不再替姐姐做决定、也面对姐姐准备卖店的方式', sourceFactIds: ['source-fact-2', 'source-fact-3'], dependsOn: ['beat-climax-choice'] },
+  ]
+  const prompts: string[] = []
+
+  process.env.STORY_DISABLE_MODEL = 'false'
+  process.env.DASHSCOPE_API_KEY = 'test-only-key'
+  process.env.DASHSCOPE_BASE_URL = 'https://model.test.invalid'
+  try {
+    globalThis.fetch = async (_input, init) => {
+      const request = JSON.parse(String(init?.body)) as { messages?: Array<{ content?: string }> }
+      prompts.push(request.messages?.[1]?.content ?? '')
+      return createCurveModelResponse({ title: '关系主线', beats })
+    }
+    const curve = await generateProvisionalCurve(idea, seed, brief)
+    assert.equal(curve.generation?.origin, 'model')
+    assert.equal(curve.beats.filter((beat) => beat.kind !== 'current-state').length, 4)
+    assert.match(prompts[0] ?? '', /按以下事实锚点写/u)
+    assert.match(prompts[0] ?? '', /答应过不再替姐姐做决定/u)
+    assert.match(prompts[0] ?? '', /单个提案节点只列/u)
+
+    globalThis.fetch = async () => createCurveModelResponse({
+      title: '关系主线',
+      beats: beats.map((beat) => beat.kind === 'resolution'
+        ? { ...beat, detail: '暂定：shared history 改变姐妹共同面对分歧的方式' }
+        : beat),
+    })
+    await assert.rejects(
+      () => generateProvisionalCurve(idea, seed, brief),
+      (error: unknown) => error instanceof AppError
+        && error.code === 'STORY_CURVE_MODEL_GENERATION_FAILED'
+        && /英文或模板短语/u.test(error.message),
+    )
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+    if (previousApiKey === undefined) delete process.env.DASHSCOPE_API_KEY
+    else process.env.DASHSCOPE_API_KEY = previousApiKey
+    if (previousBaseUrl === undefined) delete process.env.DASHSCOPE_BASE_URL
+    else process.env.DASHSCOPE_BASE_URL = previousBaseUrl
+  }
+})
+
+test('repairs a deadline curve that invents a relative\'s wish without mislabeling the result', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  const previousApiKey = process.env.DASHSCOPE_API_KEY
+  const previousBaseUrl = process.env.DASHSCOPE_BASE_URL
+  const previousFetch = globalThis.fetch
+  const idea = '林澈答应在周五前把祖母的手稿交给出版社，但他发现最后一页缺失，不知道是否该按承诺提交。'
+  const seed = createDirectCoCreationSeed(idea)
+  assert.ok(seed)
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['cost'],
+    allowSystemNamedCharacters: false,
+  }
+  const invalidBeats = [
+    { kind: 'current-state', detail: idea, sourceFactIds: ['source-fact-1', 'source-fact-2', 'source-fact-3'] },
+    { kind: 'trigger', detail: '暂定：周五前交稿的期限使按承诺提交的目标停住', sourceFactIds: ['source-fact-1'] },
+    { kind: 'escalation', detail: '暂定：继续按承诺提交会违背祖母的遗愿', sourceFactIds: ['source-fact-2'] },
+    { kind: 'climax-choice', detail: '暂定：林澈必须在按承诺提交与保留手稿完整性之间选择', sourceFactIds: ['source-fact-1', 'source-fact-2'] },
+    { kind: 'resolution', detail: '暂定：这次选择改变他对承诺与完整性的理解', sourceFactIds: ['source-fact-2', 'source-fact-3'] },
+  ]
+  const repairedBeats = [
+    { kind: 'current-state', detail: idea, sourceFactIds: ['source-fact-1', 'source-fact-2', 'source-fact-3'] },
+    { kind: 'trigger', detail: '暂定：周五前交稿的期限使按承诺提交的目标停住', sourceFactIds: ['source-fact-1'] },
+    { kind: 'escalation', detail: '暂定：继续按承诺提交会承担最后一页缺失带来的完整性代价', sourceFactIds: ['source-fact-2'] },
+    { kind: 'climax-choice', detail: '暂定：林澈必须在按承诺提交祖母的手稿并承担最后一页缺失的代价，与暂缓之间选择', sourceFactIds: ['source-fact-1', 'source-fact-2', 'source-fact-3'] },
+    { kind: 'resolution', detail: '暂定：这次选择改变他对按承诺提交、承担最后一页缺失代价的理解', sourceFactIds: ['source-fact-2', 'source-fact-3'] },
+  ]
+  const prompts: string[] = []
+  let calls = 0
+
+  process.env.STORY_DISABLE_MODEL = 'false'
+  process.env.DASHSCOPE_API_KEY = 'test-only-key'
+  process.env.DASHSCOPE_BASE_URL = 'https://model.test.invalid'
+  try {
+    globalThis.fetch = async (_input, init) => {
+      calls += 1
+      const request = JSON.parse(String(init?.body)) as { messages?: Array<{ content?: string }> }
+      prompts.push(request.messages?.[1]?.content ?? '')
+      return createCurveModelResponse({
+        title: '手稿承诺',
+        beats: calls === 1 ? invalidBeats : repairedBeats,
+      })
+    }
+
+    const curve = await generateProvisionalCurve(idea, seed, brief)
+
+    assert.equal(calls, 2, 'the rejected first response should receive one bounded repair attempt')
+    assert.match(prompts[1] ?? '', /遗愿|祖母/u)
+    assert.doesNotMatch(prompts[1] ?? '', /上一轮失败原因：.*遗愿/u)
+    assert.match(prompts[1] ?? '', /逐字|原文锚点/u)
+    assert.equal(curve.generation?.origin, 'model')
+    assert.doesNotMatch(curve.beats.map((beat) => beat.detail).join('\n'), /遗愿|遗嘱|生前/u)
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+    if (previousApiKey === undefined) delete process.env.DASHSCOPE_API_KEY
+    else process.env.DASHSCOPE_API_KEY = previousApiKey
+    if (previousBaseUrl === undefined) delete process.env.DASHSCOPE_BASE_URL
+    else process.env.DASHSCOPE_BASE_URL = previousBaseUrl
+  }
+})
+
+test('repairs a rich contrast-and-growth curve with directional evidence across causal layers', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  const previousApiKey = process.env.DASHSCOPE_API_KEY
+  const previousBaseUrl = process.env.DASHSCOPE_BASE_URL
+  const previousFetch = globalThis.fetch
+  const seed = createDirectCoCreationSeed(richCurveIdea)
+  assert.ok(seed)
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const missingContrastBeats = [
+    { kind: 'current-state', detail: richCurveIdea, sourceFactIds: ['source-fact-1', 'source-fact-2', 'source-fact-3', 'source-fact-4', 'source-fact-5'] },
+    { kind: 'trigger', detail: '暂定：投影仪今晚要归还使删掉自己的名字的决定停住', sourceFactIds: ['source-fact-3', 'source-fact-5'] },
+    { kind: 'escalation', detail: '暂定：继续删掉自己的名字会触碰不再改动作品的承诺', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+    { kind: 'climax-choice', detail: '暂定：沈乔必须在删掉自己的名字与不再改动作品之间选择', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+    { kind: 'resolution', detail: '暂定：这次选择改变她对前队友剪的短片和自己的名字的理解', sourceFactIds: ['source-fact-2', 'source-fact-5'] },
+  ]
+  const repairedBeats = [
+    { kind: 'current-state', detail: richCurveIdea, sourceFactIds: ['source-fact-1', 'source-fact-2', 'source-fact-3', 'source-fact-4', 'source-fact-5'] },
+    { kind: 'trigger', detail: '暂定：投影仪今晚要归还让删掉自己的名字无法按原有安排推进', sourceFactIds: ['source-fact-3', 'source-fact-5'] },
+    { kind: 'escalation', detail: '暂定：继续删掉自己的名字反而会触碰不再改动作品的承诺', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+    { kind: 'climax-choice', detail: '暂定：沈乔必须在保留旧办法的自己的名字与不再改动作品之间选择', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+    { kind: 'resolution', detail: '暂定：这次选择改变她对前队友剪的短片、自己的名字与旧办法的理解', sourceFactIds: ['source-fact-2', 'source-fact-5'] },
+  ]
+  const prompts: string[] = []
+  let calls = 0
+
+  process.env.STORY_DISABLE_MODEL = 'false'
+  process.env.DASHSCOPE_API_KEY = 'test-only-key'
+  process.env.DASHSCOPE_BASE_URL = 'https://model.test.invalid'
+  try {
+    globalThis.fetch = async (_input, init) => {
+      calls += 1
+      const request = JSON.parse(String(init?.body)) as { messages?: Array<{ content?: string }> }
+      prompts.push(request.messages?.[1]?.content ?? '')
+      return createCurveModelResponse({
+        title: '署名决定',
+        beats: calls === 1 ? missingContrastBeats : repairedBeats,
+      })
+    }
+
+    const curve = await generateProvisionalCurve(richCurveIdea, seed, brief)
+
+    assert.equal(calls, 2, 'directional evidence failures should use one bounded repair attempt')
+    assert.match(prompts[0] ?? '', /方向层级硬约束/u)
+    assert.match(prompts[1] ?? '', /反差|因果层级/u)
+    assert.equal(curve.generation?.origin, 'model')
+    assert.match(curve.beats.find((beat) => beat.kind === 'trigger')?.detail ?? '', /原有安排/u)
+    assert.match(curve.beats.find((beat) => beat.kind === 'climax-choice')?.detail ?? '', /旧办法/u)
+    assert.match(curve.beats.find((beat) => beat.kind === 'resolution')?.detail ?? '', /改变|理解/u)
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+    if (previousApiKey === undefined) delete process.env.DASHSCOPE_API_KEY
+    else process.env.DASHSCOPE_API_KEY = previousApiKey
+    if (previousBaseUrl === undefined) delete process.env.DASHSCOPE_BASE_URL
+    else process.env.DASHSCOPE_BASE_URL = previousBaseUrl
+  }
+})
+
+test('model curves keep three creative directions causally distinct on the same author facts', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  const previousApiKey = process.env.DASHSCOPE_API_KEY
+  const previousBaseUrl = process.env.DASHSCOPE_BASE_URL
+  const previousFetch = globalThis.fetch
+  const seed = createDirectCoCreationSeed(richCurveIdea)
+  assert.ok(seed)
+
+  const currentState = {
+    kind: 'current-state',
+    detail: richCurveIdea,
+    sourceFactIds: ['source-fact-1', 'source-fact-2', 'source-fact-3', 'source-fact-4', 'source-fact-5'],
+  }
+  const contrastBeats = [
+    currentState,
+    { kind: 'trigger', detail: '暂定：投影仪今晚要归还让在展出前决定要不要删掉自己的名字无法按原有安排推进', sourceFactIds: ['source-fact-3', 'source-fact-5'] },
+    { kind: 'escalation', detail: '暂定：继续在展出前决定要不要删掉自己的名字反而会触碰她答应不再改动作品的承诺', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+    { kind: 'climax-choice', detail: '暂定：沈乔必须在在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择，不能再沿用旧办法', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+    { kind: 'resolution', detail: '暂定：这次选择让原有安排不再照旧，并重新理解在展出前决定要不要删掉自己的名字', sourceFactIds: ['source-fact-5'] },
+  ]
+  const costBeats = [
+    currentState,
+    { kind: 'trigger', detail: '暂定：投影仪今晚要归还让在展出前决定要不要删掉自己的名字必须承担时间取舍', sourceFactIds: ['source-fact-3', 'source-fact-5'] },
+    { kind: 'escalation', detail: '暂定：继续在展出前决定要不要删掉自己的名字会承担她答应不再改动作品的代价', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+    { kind: 'climax-choice', detail: '暂定：沈乔必须在在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择，并承担代价', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+    { kind: 'resolution', detail: '暂定：这次选择改变她对在展出前决定要不要删掉自己的名字的理解，并承担不再改动作品的代价', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+  ]
+  const relationshipBeats = [
+    currentState,
+    { kind: 'trigger', detail: '暂定：沈乔在借来的投影仪里看到和前队友剪的短片，使她在展出前决定要不要删掉自己的名字不能只按个人安排推进', sourceFactIds: ['source-fact-2', 'source-fact-5'] },
+    { kind: 'escalation', detail: '暂定：继续在展出前决定要不要删掉自己的名字会触碰她答应不再改动作品的承诺，前队友关系的分歧因此更明显', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+    { kind: 'climax-choice', detail: '暂定：沈乔必须在在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择，并回应与前队友的关系', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+    { kind: 'resolution', detail: '暂定：这次选择改变她如何回应与前队友的关系，并重新理解在展出前决定要不要删掉自己的名字', sourceFactIds: ['source-fact-5'] },
+  ]
+  const responses = [contrastBeats, costBeats, relationshipBeats]
+
+  process.env.STORY_DISABLE_MODEL = 'false'
+  process.env.DASHSCOPE_API_KEY = 'test-only-key'
+  process.env.DASHSCOPE_BASE_URL = 'https://model.test.invalid'
+  try {
+    globalThis.fetch = async () => createCurveModelResponse({
+      title: '同一事实的不同因果方向',
+      beats: responses.shift(),
+    })
+
+    const curves = [
+      await generateProvisionalCurve(richCurveIdea, seed, { tones: ['growth'], dramaticForces: ['contrast'], allowSystemNamedCharacters: false }),
+      await generateProvisionalCurve(richCurveIdea, seed, { tones: ['growth'], dramaticForces: ['cost'], allowSystemNamedCharacters: false }),
+      await generateProvisionalCurve(richCurveIdea, seed, { tones: ['friendship'], dramaticForces: ['relationship-tension'], allowSystemNamedCharacters: false }),
+    ]
+
+    assert.equal(curves.every((curve) => curve.generation?.origin === 'model'), true)
+    const proposalDetails = curves.map((curve) => curve.beats
+      .filter((beat) => beat.kind !== 'current-state')
+      .map((beat) => beat.detail))
+    for (let index = 0; index < proposalDetails.length; index += 1) {
+      for (let otherIndex = index + 1; otherIndex < proposalDetails.length; otherIndex += 1) {
+        const distinctCount = proposalDetails[index]!
+          .filter((detail, beatIndex) => detail !== proposalDetails[otherIndex]![beatIndex]).length
+        assert.ok(distinctCount >= 3, 'each selected direction must change at least three causal proposals')
+      }
+    }
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+    if (previousApiKey === undefined) delete process.env.DASHSCOPE_API_KEY
+    else process.env.DASHSCOPE_API_KEY = previousApiKey
+    if (previousBaseUrl === undefined) delete process.env.DASHSCOPE_BASE_URL
+    else process.env.DASHSCOPE_BASE_URL = previousBaseUrl
+  }
+})
+
+test('rejects a model source-fact claim when the proposal has no visible author anchor', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  const previousApiKey = process.env.DASHSCOPE_API_KEY
+  const previousBaseUrl = process.env.DASHSCOPE_BASE_URL
+  const previousFetch = globalThis.fetch
+  const seed = createDirectCoCreationSeed(richCurveIdea)
+  assert.ok(seed)
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const beats = [
+    { kind: 'current-state', detail: richCurveIdea, sourceFactIds: ['source-fact-1', 'source-fact-2', 'source-fact-3', 'source-fact-4', 'source-fact-5'] },
+    // source-fact-5 is the decision about the author's name. It is not
+    // present in this generic trigger, so the traceability claim must fail.
+    { kind: 'trigger', detail: '暂定：投影仪今晚要归还让原有安排无法推进', sourceFactIds: ['source-fact-3', 'source-fact-5'] },
+    { kind: 'escalation', detail: '暂定：继续删掉自己的名字反而会触碰不再改动作品的承诺', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+    { kind: 'climax-choice', detail: '暂定：沈乔必须在保留旧办法的自己的名字与不再改动作品之间选择', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+    { kind: 'resolution', detail: '暂定：这次选择改变她对前队友剪的短片、自己的名字与旧办法的理解', sourceFactIds: ['source-fact-2', 'source-fact-5'] },
+  ]
+  let calls = 0
+
+  process.env.STORY_DISABLE_MODEL = 'false'
+  process.env.DASHSCOPE_API_KEY = 'test-only-key'
+  process.env.DASHSCOPE_BASE_URL = 'https://model.test.invalid'
+  try {
+    globalThis.fetch = async () => {
+      calls += 1
+      return createCurveModelResponse({ title: '署名决定', beats })
+    }
+
+    await assert.rejects(
+      () => generateProvisionalCurve(richCurveIdea, seed, brief),
+      (error: unknown) => error instanceof AppError
+        && error.code === 'STORY_CURVE_MODEL_GENERATION_FAILED'
+        && /sourceFactIds.*原文锚点/u.test(error.message),
+    )
+    assert.equal(calls, 3, 'a bad traceability claim receives only the bounded repair attempts')
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+    if (previousApiKey === undefined) delete process.env.DASHSCOPE_API_KEY
+    else process.env.DASHSCOPE_API_KEY = previousApiKey
+    if (previousBaseUrl === undefined) delete process.env.DASHSCOPE_BASE_URL
+    else process.env.DASHSCOPE_BASE_URL = previousBaseUrl
+  }
+})
 
 test('co-creation start and node save are idempotent under duplicate requests', async () => {
   const previousDisableModel = process.env.STORY_DISABLE_MODEL
@@ -317,6 +727,60 @@ test('rejects scene-level model content from a provisional curve', () => {
       '暂定：青柠想去游乐园玩时，一个意外让原计划停住。',
     ),
     true,
+  )
+  assert.equal(
+    isSystemCurveProposalSafe(
+      'trigger',
+      '暂定：原有安排——投影仪今晚要归还——使目标停住。',
+      ['投影仪今晚要归还'],
+    ),
+    true,
+    'an inline dash around an author-confirmed condition is not a scene or dialogue',
+  )
+  assert.equal(
+    isSystemCurveProposalSafe(
+      'trigger',
+      '暂定：投影仪今晚要归还使目标停住。',
+      ['投影仪今晚要归还'],
+    ),
+    true,
+    'an author-confirmed object may remain an abstract causal condition',
+  )
+  assert.equal(
+    isSystemCurveProposalSafe(
+      'trigger',
+      '暂定：手机今晚要归还使目标停住。',
+      ['投影仪今晚要归还'],
+    ),
+    false,
+    'an unconfirmed object must remain blocked',
+  )
+  assert.equal(
+    isSystemCurveProposalSafe(
+      'trigger',
+      '暂定：打开投影仪看到短片，随后目标停住。',
+      ['投影仪今晚要归还', '在借来的投影仪里看到和前队友剪的短片'],
+    ),
+    false,
+    'an author-confirmed object cannot authorize a newly invented action chain',
+  )
+  assert.equal(
+    isSystemCurveProposalSafe(
+      'trigger',
+      '暂定：按承诺提交手稿的目标因最后一页缺失而停住。',
+      ['答应在周五前把祖母的手稿交给出版社', '最后一页缺失'],
+    ),
+    true,
+    'confirmed commitment wording may remain an abstract causal condition',
+  )
+  assert.equal(
+    isSystemCurveProposalSafe(
+      'climax-choice',
+      '暂定：回应姐姐准备把店卖掉的决定，迫使周岚在保店与尊重姐姐之间选择。',
+      ['姐姐准备把店卖掉', '周岚想和姐姐一起保住父亲留下的书店'],
+    ),
+    true,
+    'confirmed relationship wording may remain an abstract choice condition',
   )
 })
 
@@ -544,6 +1008,279 @@ test('rejects a confirmed-curve opening that invents access machinery', () => {
     }, turn),
     /手机/u,
   )
+})
+
+test('rejects an unconfirmed first-turn timestamp even when the curve is confirmed', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const confirmed = confirmProvisionalCurve(createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)).confirmedCurve
+  const foundation = materializeConfirmedCurve(sparseSeed, confirmed)
+  const turn: StoryTurn = {
+    id: 'turn-1',
+    phase: 'opening',
+    node: {
+      id: 'node-1',
+      title: '停住的安排',
+      event: '青柠明天会按原计划继续去游乐园，但当前阻碍还没有被确认。',
+      purpose: '让主角先看清已确认的阻碍。',
+      goalState: 'trying',
+    },
+    conflict: {
+      nodeId: 'node-1',
+      conflict: '原来的安排需要重新判断。',
+      action: '选择一个此刻可以承担的方向。',
+      consequence: '选择会留下需要继续面对的取舍。',
+      intensity: 1,
+      anchor: '起点',
+    },
+    question: '现在先怎么做？',
+    options: [],
+    narrativeAction: null,
+    transition: null,
+    canConclude: false,
+    isConclusion: false,
+  }
+
+  assert.throws(
+    () => validateConfirmedCurveStoryTurnContinuation({
+      idea: sparseIdea,
+      seed: foundation.seed,
+      predicament: foundation.predicament,
+      approach: foundation.approach,
+      headTail: foundation.headTail,
+      history: [],
+      confirmedCurve: confirmed,
+    }, turn),
+    /明天/u,
+  )
+})
+
+test('rejects introduced facts from a confirmed first-turn option', () => {
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  const confirmed = confirmProvisionalCurve(createProvisionalCurveFallback(sparseIdea, sparseSeed, brief)).confirmedCurve
+  const foundation = materializeConfirmedCurve(sparseSeed, confirmed)
+  const action: StoryAction = {
+    id: 'turn-1-option-1-action',
+    intent: '先确认当前阻碍',
+    preconditions: [],
+    effects: [],
+    source: 'generated',
+  }
+  const transition: StoryTransition = {
+    actionId: action.id,
+    consumedFacts: [],
+    changedFacts: [],
+    introducedFacts: [{
+      id: 'fact-unconfirmed-opening',
+      statement: '主角已经作出新的决定',
+      source: 'confirmed-action',
+      mutability: 'changeable',
+    }],
+  }
+  const turn: StoryTurn = {
+    id: 'turn-1',
+    phase: 'opening',
+    node: {
+      id: 'node-1',
+      title: '停住的安排',
+      event: '青柠仍要去游乐园，但原来的安排暂时停住。',
+      purpose: '让主角先看清已确认的阻碍。',
+      goalState: 'trying',
+    },
+    conflict: {
+      nodeId: 'node-1',
+      conflict: '原来的安排需要重新判断。',
+      action: '选择一个此刻可以承担的方向。',
+      consequence: '选择会留下需要继续面对的取舍。',
+      intensity: 1,
+      anchor: '起点',
+    },
+    question: '现在先怎么做？',
+    options: [{
+      id: 'turn-1-option-1',
+      label: '先确认阻碍',
+      action: action.intent,
+      immediateConsequence: '阻碍被摆到眼前。',
+      laterEffect: '后续仍需作出选择。',
+      narrativeAction: action,
+      transition,
+    }],
+    narrativeAction: null,
+    transition: null,
+    canConclude: false,
+    isConclusion: false,
+  }
+
+  assert.throws(
+    () => validateConfirmedCurveStoryTurnContinuation({
+      idea: sparseIdea,
+      seed: foundation.seed,
+      predicament: foundation.predicament,
+      approach: foundation.approach,
+      headTail: foundation.headTail,
+      history: [],
+      confirmedCurve: confirmed,
+    }, turn),
+    /首回合不能把/u,
+  )
+})
+
+test('asks for author detail for a bare premise in real model mode', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  process.env.STORY_DISABLE_MODEL = 'false'
+  try {
+    await assert.rejects(
+      () => startStoryCoCreation({
+        idea: '青柠去游乐园',
+        brief: {
+          tones: ['growth'],
+          dramaticForces: ['contrast'],
+          allowSystemNamedCharacters: false,
+        },
+        operationId: `clarification-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      }),
+      (error: unknown) => error instanceof Error
+        && 'code' in error
+        && error.code === 'STORY_IDEA_NEEDS_AUTHOR_DETAIL',
+    )
+  } finally {
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+  }
+})
+
+test('legacy directions also ask for author detail instead of inventing a sparse hook', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  process.env.STORY_DISABLE_MODEL = 'false'
+  try {
+    await assert.rejects(
+      () => generateDirections({
+        idea: '青柠去游乐园',
+        expansionScope: 'keep-scale',
+        generateSystemDraft: true,
+      }),
+      (error: unknown) => error instanceof AppError
+        && error.code === 'STORY_IDEA_NEEDS_AUTHOR_DETAIL',
+    )
+  } finally {
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+  }
+})
+
+test('uses the compact confirmed-curve opening contract without inventing state facts', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  const previousApiKey = process.env.DASHSCOPE_API_KEY
+  const previousBaseUrl = process.env.DASHSCOPE_BASE_URL
+  const previousFetch = globalThis.fetch
+  process.env.STORY_DISABLE_MODEL = 'true'
+  try {
+    const draft = await startStoryCoCreation({
+      idea: richCurveIdea,
+      brief: { tones: ['growth'], dramaticForces: ['contrast'], allowSystemNamedCharacters: false },
+      operationId: `opening-compact-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    })
+    const confirmed = await confirmSessionCurve({
+      storyId: draft.storyId,
+      revision: draft.revision,
+      curveId: draft.curve.id,
+    })
+
+    let calls = 0
+    process.env.STORY_DISABLE_MODEL = 'false'
+    process.env.DASHSCOPE_API_KEY = 'test-only-key'
+    process.env.DASHSCOPE_BASE_URL = 'https://model.test.invalid'
+    globalThis.fetch = async () => {
+      calls += 1
+      return createCompactOpeningModelResponse('沈乔面对已经确认的阻碍，先要决定怎样回应。')
+    }
+
+    const spine = await startSessionStorySpineFromCurve({
+      storyId: confirmed.storyId,
+      revision: confirmed.revision,
+      curveId: confirmed.curve.id,
+    })
+
+    assert.equal(calls, 1, 'the confirmed opening should use the compact contract on its first model request')
+    assert.equal(spine.turn.options.length, 3)
+    assert.equal(spine.turn.narrativeAction, null)
+    assert.equal(spine.turn.transition, null)
+    assert.equal(spine.turn.options.every((option) => option.narrativeAction.effects.length === 0), true)
+    assert.equal(spine.turn.options.every((option) => option.transition.introducedFacts.length === 0), true)
+    assert.equal(spine.history.length, 0)
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+    if (previousApiKey === undefined) delete process.env.DASHSCOPE_API_KEY
+    else process.env.DASHSCOPE_API_KEY = previousApiKey
+    if (previousBaseUrl === undefined) delete process.env.DASHSCOPE_BASE_URL
+    else process.env.DASHSCOPE_BASE_URL = previousBaseUrl
+  }
+})
+
+test('does not persist a confirmed-curve opening after bounded model failure', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  const previousApiKey = process.env.DASHSCOPE_API_KEY
+  const previousBaseUrl = process.env.DASHSCOPE_BASE_URL
+  const previousFetch = globalThis.fetch
+  process.env.STORY_DISABLE_MODEL = 'true'
+  try {
+    const draft = await startStoryCoCreation({
+      idea: `${richCurveIdea}（失败边界）`,
+      brief: { tones: ['growth'], dramaticForces: ['contrast'], allowSystemNamedCharacters: false },
+      operationId: `opening-failure-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    })
+    const confirmed = await confirmSessionCurve({
+      storyId: draft.storyId,
+      revision: draft.revision,
+      curveId: draft.curve.id,
+    })
+    const before = getStorySessionSnapshot(confirmed.storyId)
+
+    let calls = 0
+    process.env.STORY_DISABLE_MODEL = 'false'
+    process.env.DASHSCOPE_API_KEY = 'test-only-key'
+    process.env.DASHSCOPE_BASE_URL = 'https://model.test.invalid'
+    globalThis.fetch = async () => {
+      calls += 1
+      return createCompactOpeningModelResponse('沈乔拿出一部尚未确认的手机，等待一个未发生的回复。')
+    }
+
+    await assert.rejects(
+      () => startSessionStorySpineFromCurve({
+        storyId: confirmed.storyId,
+        revision: confirmed.revision,
+        curveId: confirmed.curve.id,
+      }),
+      (error: unknown) => error instanceof AppError
+        && error.code === 'STORY_TURN_RETRY_EXHAUSTED'
+        && error.modelDiagnostic?.attempt === 3
+        && error.modelDiagnostic?.stage === 'story-turn-validation',
+    )
+
+    assert.equal(calls, 3, 'a model validation failure must use bounded retries')
+    const after = getStorySessionSnapshot(confirmed.storyId)
+    assert.equal(after.revision, before.revision)
+    assert.equal(after.currentTurn, undefined)
+    assert.equal(after.history.length, 0)
+    assert.equal(after.predicament, undefined)
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+    if (previousApiKey === undefined) delete process.env.DASHSCOPE_API_KEY
+    else process.env.DASHSCOPE_API_KEY = previousApiKey
+    if (previousBaseUrl === undefined) delete process.env.DASHSCOPE_BASE_URL
+    else process.env.DASHSCOPE_BASE_URL = previousBaseUrl
+  }
 })
 
 test('uses an author-edited current state as the confirmed story goal', () => {
@@ -1243,7 +1980,22 @@ test('extracts a conservative subject and goal from rich fallback prose', () => 
   assert.equal(seed.subject, '沈乔')
   assert.equal(seed.lockedGoal, '在展出前决定要不要删掉自己的名字')
   assert.equal(seed.activeSituation, idea)
-  assert.ok(seed.lockedFacts.includes(idea))
+  assert.ok(seed.lockedFacts.includes('毕业展布置前'))
+  assert.ok(seed.lockedFacts.includes('投影仪今晚要归还'))
+  assert.ok(seed.lockedFacts.includes('她答应不再改动作品'))
+  assert.ok(seed.lockedFacts.includes('却想在展出前决定要不要删掉自己的名字'))
+  assert.equal(seed.lockedFacts.includes(idea), false)
+})
+
+test('uses the direct co-creation seed for a rich Chinese idea with a clear subject and goal', () => {
+  const idea = '毕业展布置前，沈乔在借来的投影仪里看到和前队友剪的短片。投影仪今晚要归还，她答应不再改动作品，却想在展出前决定要不要删掉自己的名字。'
+  const seed = createDirectCoCreationSeed(idea)
+
+  assert.ok(seed)
+  assert.equal(seed.subject, '沈乔')
+  assert.equal(seed.lockedGoal, '在展出前决定要不要删掉自己的名字')
+  assert.ok(seed.lockedFacts.includes('投影仪今晚要归还'))
+  assert.ok(seed.lockedFacts.includes('她答应不再改动作品'))
 })
 
 test('keeps a leading goal clause separate from later rich source facts', () => {
@@ -1364,7 +2116,8 @@ test('keeps a partial creative draft and fills its missing directions with visib
 
   const fallback = createSystemDraftCandidatePreservingFallback(sparseIdea, sparseSeed, candidate)
 
-  assert.equal(fallback.origin, 'model')
+  assert.equal(fallback.origin, 'deterministic-fallback')
+  assert.match(fallback.fallbackReason ?? '', /未整体通过校验|本地结构草案/u)
   assert.equal(fallback.directions?.[0]?.label, '旧照片上的陌生日期')
   assert.deepEqual(fallback.directions?.slice(1).map((direction) => direction.mechanismType), [
     'boundary-conflict',
@@ -1398,7 +2151,8 @@ test('does not discard retained directions when they use a different valid mecha
 
   const fallback = createSystemDraftCandidatePreservingFallback(sparseIdea, sparseSeed, candidate)
 
-  assert.equal(fallback.origin, 'model')
+  assert.equal(fallback.origin, 'deterministic-fallback')
+  assert.match(fallback.fallbackReason ?? '', /未整体通过校验|本地结构草案/u)
   assert.deepEqual(fallback.directions?.map((direction) => direction.mechanismType), [
     'information-gap',
     'meaning-commitment',

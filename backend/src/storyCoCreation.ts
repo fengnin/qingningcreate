@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { AppError, requestQwenJson } from './qwen.js'
+import { AppError, requestQwenJson, summarizeModelResponse, withModelDiagnostic } from './qwen.js'
 import {
   createStoryDesignRecord,
   buildStoryCurveFoundation,
@@ -42,6 +42,7 @@ import type {
 const maximumCurveBeatLength = 220
 const maximumModelCurveBeatLength = 120
 const maximumCurveInstructionLength = 180
+const maxCurveGenerationAttempts = 3
 const curveBeatKinds: readonly CurveBeatKind[] = [
   'current-state',
   'character-tension',
@@ -83,12 +84,38 @@ const dramaticForces: readonly DramaticForce[] = [
 ]
 
 const curveProposalPrefixPattern = /^暂定[：:]/u
-const curveSceneSignalPattern = /(?:[“”"']|——|(?:一阵|这时|随后|紧接着|与此同时)|(?:站在|走向|走进|钻进|翻过|爬上|蹲下|握紧|掀飞|飘向|落在|赶来|喊|广播|门票|手环|围栏|检修|铁链|闸机|工作人员|手机|电话|账号|预约|VIP|快速通行|代排|通道卡))/iu
+// A bare dash is ordinary prose punctuation (for example, a parenthetical
+// deadline), not evidence of a scene. Keep action/observation signals separate
+// from concrete nouns: an author-confirmed object may be an abstract condition
+// ("投影仪今晚要归还"), but the model must not turn it into a scene.
+const curveSceneActionSignalPattern = /(?:[“”‘’"']|(?:一阵|这时|随后|紧接着|与此同时)|(?:站在|走向|走进|钻进|翻过|爬上|蹲下|握紧|掀飞|飘向|落在|赶来|喊|广播|打开|播放|拿出|捡起|关机|重启|导出|下载|上传|悬停|手写|黑场|调试|循环))/iu
+const curveSceneObservationPattern = /(?:发现|听见|看到)[^，。！？；\n]{0,12}(?:文件|消息|屏幕|设备|短片|录音|纸条|便签|声音|对白|画面)/iu
+const curveConcreteObjectPattern = /(?:门票|票务|电子票|纸质票|订单|购票|售票|检票|二维码|身份证|证件|凭证|支付|付款|现金|金额|退款|退票|手环|围栏|检修|铁链|闸机|工作人员|客服|管理员|前台|柜台|服务台|负责人|手机|电话|短信|号码|账号|密码|验证码|网络|邮箱|通讯录|社交账号|U盘|电脑|硬盘|设备|投影仪|相机|录音机|短片|文件|备份|导出|下载|上传|消息|屏幕|便签|展签|纸条|声音|对白|画面|手稿|作品|展板|预约|VIP|快速通行|代排|通道卡)/giu
 const curveActionChainPattern = /(?:先[^。！？；\n]{0,28}再|然后|接着|随后|(?:一边|并且)[^。！？；\n]{0,28}(?:走|拿|捡|钻|翻|爬|交|放))/u
 const curveSettledOutcomePattern = /(?:最终|终于|真相大白|已经(?:成功|完成|解决|得到|失去|到达|离开))/u
+const curveUnestablishedPrecisionPattern = /(?:\d+(?:\.\d+)?\s*(?:%|秒|分钟|小时|天|周|月|年|步|次|米|公里|点(?:钟)?|时|分)|[零〇一二两三四五六七八九十百千万亿半]+\s*(?:%|秒|分钟|小时|天|周|月|年|米|公里|点钟|时|分)|倒数|第(?:\d+|[零〇一二两三四五六七八九十百千万亿半]+)(?:步|次))/gu
+const curveLatinPhrasePattern = /\b[A-Za-z]{3,}(?:\s+[A-Za-z]{2,})+\b/g
+const curveUnsupportedDetailRules: readonly { label: string; pattern: RegExp }[] = [
+  { label: '票务、凭证或支付细节', pattern: /(?:门票|票务|电子票|纸质票|订单|购票|售票|检票|闸机|二维码|身份证|证件|凭证|支付|付款|现金|金额|退款|退票)/gu },
+  { label: '设备、通讯或文件操作', pattern: /(?:手机|电话|短信|号码|账号|密码|验证码|网络|邮箱|通讯录|社交账号|U盘|电脑|硬盘|设备|文件|备份|导出|下载|上传|消息|便签|展签)/giu },
+  { label: '机构、工作人员或程序流程', pattern: /(?:工作人员|客服|管理员|前台|柜台|服务台|负责人|机构|平台|手续|申请|审批|登记|审核|规则|规定)/gu },
+  { label: '未经确认的过去经历或人物意图', pattern: /(?:遗愿|遗嘱|生前|临终|童年|过去经历|历史背景|曾经|当年|旧日心愿|未说出口的愿望)/gu },
+  { label: '未经确认的具体人数或永久后果', pattern: /(?:[零〇一二两三四五六七八九十百千万亿]+人|永久|永远|彻底|无法挽回|不可逆)/gu },
+]
 const curveFallbackModelErrorCodes = new Set([
   'INVALID_MODEL_OUTPUT',
+  'STORY_CURVE_MODEL_VALIDATION_FAILED',
   'QWEN_NOT_CONFIGURED',
+  'QWEN_EMPTY_RESPONSE',
+  'QWEN_INVALID_JSON',
+  'QWEN_INVALID_RESPONSE',
+])
+const curveModelValidationErrorCodes = new Set([
+  'STORY_CURVE_MODEL_VALIDATION_FAILED',
+])
+const curveModelRetryableErrorCodes = new Set([
+  ...curveModelValidationErrorCodes,
+  'INVALID_MODEL_OUTPUT',
   'QWEN_EMPTY_RESPONSE',
   'QWEN_INVALID_JSON',
   'QWEN_INVALID_RESPONSE',
@@ -267,27 +294,144 @@ export async function generateProvisionalCurve(
   excludedProposalDetails: readonly string[] = [],
 ): Promise<ProvisionalCurve> {
   const design = createStoryDesignRecord(idea, seed)
-  try {
-    const modelOutput = await requestQwenJson({
-      systemPrompt: curveGenerationSystemPrompt,
-      userPrompt: buildCurveGenerationPrompt(idea, seed, brief, design, excludedProposalDetails),
-      temperature: 0.72,
-      maxTokens: 1_700,
-    })
-    const curve = parseModelCurve(modelOutput, idea, seed, brief, design, excludedProposalDetails)
-    if (curve) return curve
-  } catch (error) {
-    // A deterministic draft is only a valid recovery for the explicit local
-    // acceptance switch or an unusable model payload. Configuration, auth and
-    // network failures must remain visible instead of being returned as a
-    // seemingly successful curve.
-    if (!(error instanceof AppError)
-      || (!isModelDisabled() && !curveFallbackModelErrorCodes.has(error.code))) {
-      throw error
+  let repairMessage: string | undefined
+  let lastFailure: AppError | undefined
+  let lastFailureDescription: string | undefined
+
+  for (let attempt = 0; attempt < maxCurveGenerationAttempts; attempt += 1) {
+    try {
+      const modelOutput = await requestQwenJson({
+        systemPrompt: attempt === 0 ? compactCurveGenerationSystemPrompt : compactCurveGenerationRepairSystemPrompt,
+        userPrompt: buildCurveGenerationPrompt(idea, seed, brief, design, excludedProposalDetails, repairMessage),
+        temperature: attempt === 0 ? 0.35 : attempt === 1 ? 0.18 : 0.08,
+        // The model contract is intentionally compact: the server derives the
+        // shared foundation only after every beat has passed grounding and
+        // causal checks. A smaller response is less likely to drift into a
+        // scene or invent a second schema.
+        maxTokens: 2_400,
+        diagnosticStage: 'curve-generation',
+      })
+      return parseModelCurve(modelOutput, idea, seed, brief, design, excludedProposalDetails)
+    } catch (error) {
+      if (isModelDisabled() && error instanceof AppError && curveFallbackModelErrorCodes.has(error.code)) {
+        return createProvisionalCurveFallback(idea, seed, brief, design, excludedProposalDetails)
+      }
+
+      if (!(error instanceof AppError)) throw error
+      lastFailure = withModelDiagnostic(error, {
+        stage: error.modelDiagnostic?.stage ?? 'curve-generation-validation',
+        attempt: attempt + 1,
+        maxAttempts: maxCurveGenerationAttempts,
+        reason: error.modelDiagnostic?.reason ?? error.message,
+        response: error.modelDiagnostic?.response,
+      })
+      // Transport/configuration/auth failures are not repaired by asking the
+      // model again. Keep those errors visible; only malformed or rejected
+      // model content gets a bounded structural repair attempt.
+      if (!curveModelRetryableErrorCodes.has(error.code)) {
+        throw error
+      }
+
+      lastFailureDescription = describeCurveModelFailure(lastFailure)
+      // The author-facing reason may quote the rejected token so the problem
+      // is explainable. Do not feed that token back into the model: negative
+      // examples are frequently echoed by JSON-capable models. The retry gets
+      // a fact-slot repair contract instead.
+      repairMessage = buildCurveModelRepairInstruction(lastFailure)
+      console.warn(`[curve] model response rejected ${JSON.stringify({
+        code: lastFailure.code,
+        stage: lastFailure.modelDiagnostic?.stage,
+        attempt: attempt + 1,
+        maxAttempts: maxCurveGenerationAttempts,
+        reason: lastFailure.modelDiagnostic?.reason ?? lastFailure.message,
+        response: lastFailure.modelDiagnostic?.response,
+      })}`)
     }
   }
 
-  return createProvisionalCurveFallback(idea, seed, brief, design, excludedProposalDetails)
+  throw new AppError(
+    `模型暂定曲线连续 ${maxCurveGenerationAttempts} 次未通过事实与因果校验（${lastFailureDescription ?? '模型没有返回可用结构'}），请重试或先补充作者信息。`,
+    502,
+    'STORY_CURVE_MODEL_GENERATION_FAILED',
+    undefined,
+    undefined,
+    undefined,
+    lastFailure?.modelDiagnostic ?? {
+      stage: 'curve-generation-validation',
+      attempt: maxCurveGenerationAttempts,
+      maxAttempts: maxCurveGenerationAttempts,
+    },
+  )
+}
+
+/**
+ * Keep retry instructions actionable without repeating rejected model prose.
+ * In particular, a token that triggered a boundary rule must not be supplied
+ * as a negative example again, because smaller models often copy it verbatim.
+ */
+function buildCurveModelRepairInstruction(error: AppError): string {
+  const reason = error.modelDiagnostic?.reason ?? error.message
+  if (/sourceFactIds|原文锚点/u.test(reason)) {
+    return '逐条核对事实 ID：每个节点只列 detail 中逐字出现的作者短语对应的 ID；没有照抄锚点的材料不要列入该节点。'
+  }
+  if (/创意方向|戏剧力量|故事感觉|因果层级/u.test(reason)) {
+    return '重写为四个不同因果层级：目标受阻、取舍升级、主动选择、选择后的变化；让所选方向词紧贴对应作者锚点。'
+  }
+  if (/英文|模板短语/u.test(reason)) {
+    return '只使用简体中文，并且每一句都以作者原文中的目标、期限、承诺、关系或对象作为可核对的中心。'
+  }
+  if (/dependsOn|beats|kind|JSON|结构/u.test(reason)) {
+    return '只输出规定的五个节点和所要求的 JSON 字段，按固定顺序组织，不增加额外字段。'
+  }
+  return '删除所有不在作者材料中的断言，只用给出的事实锚点写出抽象的受阻、取舍、选择和变化。'
+}
+
+function describeCurveModelFailure(error: AppError): string {
+  if (error.code === 'STORY_CURVE_MODEL_VALIDATION_FAILED') {
+    const message = error.message
+    if (/场景|对白|具体物件/u.test(message)) {
+      return `${message}请删除新增的场景动作、连续操作和对白；作者原文中已明确出现的对象、期限、承诺或关系可以作为抽象因果条件保留，但不能扩写出新的动作、回应或结果。`
+    }
+    if (/精确数值|时限|具体人数|永久|不可逆|倒数/u.test(message)) {
+      return `${message}请删除未在原始材料中逐字出现的数字、时刻、人数、倒数和永久后果；只保留抽象的期限、承诺或取舍。`
+    }
+    if (/戏剧力量「代价」.*climax-choice\/resolution/u.test(message)) {
+      return `${message}请让 climax-choice 或 resolution 明确写出一项可审阅的取舍结构，例如“在[作者原文两端]之间选择”“承担[作者原文条件]的代价”或“保留一端、放弃另一端”；至少保留对应作者锚点，不要只写“理解调整”。`
+    }
+    if (/戏剧力量「代价」.*trigger\/escalation/u.test(message)) {
+      return `${message}请让 trigger 或 escalation 明确写出“承担、放弃、失去、保留、取舍”之一，并紧贴对应作者原文锚点；不要只写目标停住。`
+    }
+    if (/戏剧力量「反差」.*trigger\/escalation/u.test(message)) {
+      return `${message}请让 trigger 或 escalation 逐字出现“原有安排、旧办法、局限、反而、失效”之一，并说明该作者条件为何不能照旧推进；不要新增场景。`
+    }
+    if (/戏剧力量「反差」.*climax-choice\/resolution/u.test(message)) {
+      return `${message}请让 climax-choice 或 resolution 逐字出现“旧办法、原有安排、局限、反而、失效、重新”之一，并紧贴作者目标或承诺说明变化。`
+    }
+    if (/创意方向|戏剧力量|故事感觉|因果层级/u.test(message)) {
+      return `${message}请只在指定的节点层级使用提示中的抽象方向词，并让每个方向词紧贴原文目标、期限、承诺、关系或对象；方向词不能替代事实，也不能单独凑关键词。`
+    }
+    if (/过去经历|人物意图|遗愿|遗嘱|生前|童年/u.test(message)) {
+      return `${message}请删除所有从亲属、身份或物品推断出的愿望、遗嘱、过去经历和人物意图；只能逐字使用作者提供的目标、期限、承诺、关系或对象，不得把“祖母/父亲/前队友”等身份扩写成未说出的心愿。`
+    }
+    if (/sourceFactIds/u.test(message)) {
+      const factId = message.match(/(source-fact-\d+)/u)?.[1]
+      if (factId) {
+        return `${message}本次只修复这个节点：除非 detail 逐字包含 ${factId} 对应的作者锚点，否则从该节点的 sourceFactIds 删除 ${factId}；不要用“原有安排、完整性、当前问题”等近义概括冒充锚点。整条曲线仍由 current-state 覆盖全部材料。`
+      }
+      return `${message}请只使用输入材料给出的 source-fact ID，并让每条材料至少被一个节点引用。`
+    }
+    if (/dependsOn/u.test(message)) {
+      return `${message}请只引用前面已出现的 beat ID，例如 beat-current-state 或 beat-trigger。`
+    }
+    if (/创意方向|戏剧机制/u.test(message)) {
+      return `${message}请在至少两条不同节点中各使用一个明确的方向词（反差：旧办法、局限、反而、失效、原本；成长：改变、重新、承担、选择、理解），并分别推进目标受阻、代价升级、主动选择与变化；不要只换同义词。`
+    }
+    return message
+  }
+  if (error.code === 'QWEN_INVALID_JSON' || error.code === 'QWEN_INVALID_RESPONSE' || error.code === 'QWEN_EMPTY_RESPONSE') {
+    return '模型没有返回可读取的完整 JSON。'
+  }
+  return '模型请求没有完成。'
 }
 
 export function updateCurveBeat(
@@ -373,6 +517,7 @@ async function generateCurveBeatDetail(
       userPrompt: buildCurveBeatRegenerationPrompt(idea, seedWithAuthorEdits, curve, target, feedback),
       temperature: 0.68,
       maxTokens: 480,
+      diagnosticStage: 'curve-beat-regeneration',
     })
     const modelDetail = parseRegeneratedBeatDetail(
       modelOutput,
@@ -399,12 +544,28 @@ async function generateCurveBeatDetail(
         usedFallback: false,
       }
     }
+    throw new AppError(
+      '模型重推的曲线节点没有通过事实、因果或差异校验。',
+      502,
+      'STORY_CURVE_MODEL_VALIDATION_FAILED',
+      undefined,
+      undefined,
+      undefined,
+      {
+        stage: 'curve-beat-validation',
+        reason: !modelDetail
+          ? '节点结构、事实锚点或提案边界不合法'
+          : '新节点没有形成相对旧节点的有效因果差异',
+        response: summarizeModelResponse(modelOutput),
+      },
+    )
   } catch (error) {
     // Invalid/empty model payloads may use the visible deterministic draft,
     // but configuration, auth, network and timeout failures must reach the
     // author instead of being disguised as a successful regeneration.
     if (!(error instanceof AppError)
-      || (!isModelDisabled() && !curveFallbackModelErrorCodes.has(error.code))) {
+      || !isLocalFallbackAllowed()
+      || (!curveFallbackModelErrorCodes.has(error.code) && !curveModelValidationErrorCodes.has(error.code))) {
       throw error
     }
   }
@@ -1771,58 +1932,139 @@ function parseModelCurve(
   brief: CreativeBrief,
   design: StoryDesignRecord,
   excludedProposalDetails: readonly string[] = [],
-): ProvisionalCurve | undefined {
-  if (!isRecord(value) || !Array.isArray(value.beats)) return undefined
-  if (value.beats.length < 5 || value.beats.length > 7) return undefined
+): ProvisionalCurve {
+  if (!isRecord(value) || !Array.isArray(value.beats)) {
+    throwCurveModelValidationFailure('缺少 beats 数组', value)
+  }
+  if (value.beats.length < 5 || value.beats.length > 7) {
+    throwCurveModelValidationFailure(`beats 数量为 ${value.beats.length}，应为 5 至 7`, value)
+  }
   const title = `${getShortIdeaLabel(idea)}的暂定主线`
   const parsedBeats: CurveBeat[] = []
   const seenKinds = new Set<CurveBeatKind>()
 
   for (const item of value.beats) {
-    if (!isRecord(item) || typeof item.kind !== 'string' || !isCurveBeatKind(item.kind)) return undefined
-    if (seenKinds.has(item.kind)) return undefined
+    if (!isRecord(item) || typeof item.kind !== 'string' || !isCurveBeatKind(item.kind)) {
+      throwCurveModelValidationFailure(`第 ${parsedBeats.length + 1} 个 beat 的 kind 不合法`, value)
+    }
+    if (seenKinds.has(item.kind)) {
+      throwCurveModelValidationFailure(`重复的 beat kind：${item.kind}`, value)
+    }
     const detail = readOptionalText(item.detail, maximumModelCurveBeatLength)
-    if (
-      !detail
-      || (!brief.allowSystemNamedCharacters && hasNewNamedCharacter(detail, seed))
-      || (item.kind !== 'current-state' && !isSystemCurveProposalSafe(item.kind, detail))
-      || (item.kind !== 'current-state' && repeatsExcludedProposal(detail, excludedProposalDetails))
-    ) return undefined
+    if (!detail) throwCurveModelValidationFailure(`beat ${item.kind} 缺少 detail`, value)
+    if (!brief.allowSystemNamedCharacters && hasNewNamedCharacter(detail, seed)) {
+      throwCurveModelValidationFailure(`beat ${item.kind} 引入了未允许的具名人物`, value)
+    }
+    if (item.kind !== 'current-state') {
+      const safetyFailure = getCurveProposalSafetyFailure(
+        item.kind,
+        detail,
+        design.sourceFacts.map((fact) => fact.text),
+      )
+      if (safetyFailure) throwCurveModelValidationFailure(`beat ${item.kind}${safetyFailure}`, value)
+      const unsupported = findUnsupportedCurveDetail(detail, seed, design)
+      if (unsupported) {
+        throwCurveModelValidationFailure(`beat ${item.kind} 引入了未建立的${unsupported.label}“${unsupported.value}”`, value)
+      }
+      const languageLeak = findUnestablishedCurveLatinPhrase(detail, seed, design)
+      if (languageLeak) {
+        throwCurveModelValidationFailure(`beat ${item.kind} 包含未由作者材料支持的英文或模板短语“${languageLeak}”`, value)
+      }
+      const repeatedUpstream = findRepeatedCurveBeatDetail(detail, parsedBeats)
+      if (repeatedUpstream) {
+        throwCurveModelValidationFailure(`beat ${item.kind} 整句复述了上游节点“${repeatedUpstream}”，没有形成新的因果推进`, value)
+      }
+    }
+    if (item.kind !== 'current-state' && repeatsExcludedProposal(detail, excludedProposalDetails)) {
+      throwCurveModelValidationFailure(`beat ${item.kind} 重复了作者已拒绝的提案`, value)
+    }
     seenKinds.add(item.kind)
-    const sourceFactIds = parseSourceFactIds(item.sourceFactIds, design)
-      ?? deriveCoveredSourceFactIds(design, detail)
+    const parsedSourceFactIds = parseSourceFactIds(item.sourceFactIds, design)
+    if (item.sourceFactIds !== undefined && !parsedSourceFactIds) {
+      throwCurveModelValidationFailure(`beat ${item.kind} 的 sourceFactIds 不是当前原始材料 ID`, value)
+    }
+    const sourceFactIds = parsedSourceFactIds ?? deriveCoveredSourceFactIds(design, detail)
+    if (item.kind !== 'current-state' && !sourceFactIds.length) {
+      throwCurveModelValidationFailure(`beat ${item.kind} 没有列出可追溯的 sourceFactIds`, value)
+    }
+    if (item.kind !== 'current-state' && parsedSourceFactIds) {
+      // sourceFactIds are an auditable claim, not a loose list of context the
+      // model happened to receive. A model may abstract an author fact, but it
+      // still needs a distinctive textual handle in the beat for review.
+      const ungroundedFact = parsedSourceFactIds
+        .map((sourceFactId) => design.sourceFacts.find((fact) => fact.id === sourceFactId))
+        .find((fact): fact is StorySourceFact => fact !== undefined && !hasModelSourceFactEvidence(detail, fact.text))
+      if (ungroundedFact) {
+        throwCurveModelValidationFailure(
+          `beat ${item.kind} 的 sourceFactIds 声称承接 ${ungroundedFact.id}，但 detail 没有对应的原文锚点`,
+          value,
+        )
+      }
+    }
     const parsedDetail = item.kind === 'current-state' ? getCurrentState(seed, idea) : detail
-    const suppliedAnchor = readOptionalText(item.causalAnchor, 90)
+    const dependencies = parseDependencies(item.dependsOn)
+    if (dependencies === undefined) {
+      throwCurveModelValidationFailure(`beat ${item.kind} 的 dependsOn 包含未知或重复节点`, value)
+    }
     parsedBeats.push(createCurveBeat(
       item.kind,
       getCurveBeatTitle(item.kind),
       parsedDetail,
       item.kind === 'current-state' ? 'user-input' : 'system-proposal',
       item.kind === 'current-state' ? 'confirmed' : 'proposed',
-      parseDependencies(item.dependsOn),
+      dependencies,
       sourceFactIds,
-      suppliedAnchor ?? compactCausalMaterial(parsedDetail, parsedDetail),
+      // The compact model contract does not ask the model to write a second
+      // causal map. Derive this planner handle from its already validated
+      // detail and source-fact claims instead, so an unreviewed auxiliary
+      // field cannot smuggle a new premise into the frozen foundation.
+      deriveModelCurveCausalAnchor(item.kind, parsedDetail, sourceFactIds, design),
       ))
   }
 
-  if (requiredConfirmationBeatKinds.some((kind) => !seenKinds.has(kind))) return undefined
-  const orderedBeats = curveBeatKinds
-    .filter((kind) => seenKinds.has(kind))
-    .map((kind) => parsedBeats.find((beat) => beat.kind === kind)!)
-  if (!isCurveGroundedToSeed(orderedBeats, seed)) return undefined
+  if (requiredConfirmationBeatKinds.some((kind) => !seenKinds.has(kind))) {
+    throwCurveModelValidationFailure('缺少必需的 current-state/trigger/escalation/climax-choice/resolution 节点', value)
+  }
+  const orderedBeats = orderCurveBeatsByDependencies(parsedBeats)
+  if (!isCurveGroundedToSeed(orderedBeats, seed)) {
+    throwCurveModelValidationFailure('至少两个提案没有引用原始目标或事实锚点', value)
+  }
   const coveredDesign = updateStoryDesignCoverage(design, orderedBeats)
-  if (getUnresolvedStorySourceFacts(coveredDesign).length) return undefined
-  if (!hasStableCreativeDirection(orderedBeats, brief)) return undefined
+  const unresolvedFacts = getUnresolvedStorySourceFacts(coveredDesign)
+  if (unresolvedFacts.length) {
+    throwCurveModelValidationFailure(`仍有 ${unresolvedFacts.length} 条原始材料没有被 sourceFactIds 承接`, value)
+  }
+  const directionFailure = getCreativeDirectionValidationFailure(orderedBeats, brief)
+  if (directionFailure) {
+    throwCurveModelValidationFailure(directionFailure, value)
+  }
+  // The model only owns the reviewed beat proposals.  Build the single
+  // foundation from those exact beats after validation so confirmation and
+  // the first spine share one source of truth.  If a model emits a legacy
+  // foundation anyway, reject malformed data rather than silently accepting a
+  // second, unvalidated design map.
+  const suppliedFoundation = value.foundation === undefined
+    ? undefined
+    : parseModelCurveFoundation(value.foundation)
+  if (value.foundation !== undefined && !suppliedFoundation) {
+    throwCurveModelValidationFailure('foundation 结构不符合当前模型合同；请只输出 title 和 beats', value)
+  }
+  if (suppliedFoundation) {
+    if (!isModelFoundationGoalCompatible(suppliedFoundation, seed)) {
+      throwCurveModelValidationFailure('foundation 没有保留作者锁定目标', value)
+    }
+    const foundationIssue = flattenFoundationTexts(suppliedFoundation)
+      .map((text) => findUnsupportedCurveDetail(text, seed, design))
+      .find((issue): issue is { label: string; value: string } => Boolean(issue))
+    if (foundationIssue) {
+      throwCurveModelValidationFailure(`foundation 引入了未建立的${foundationIssue.label}“${foundationIssue.value}”`, value)
+    }
+  }
   const plannedFoundation = buildStoryCurveFoundation(orderedBeats, brief, seed)
-  // The model may suggest richer wording for the design map, but traceability
-  // always comes from the exact beats that passed the source-fact and proposal
-  // checks. This keeps one reviewed foundation shared by confirmation and the
-  // first spine instead of reconstructing it after the fact.
-  const modelFoundation = parseModelCurveFoundation(value.foundation)
-  const foundation = modelFoundation && isModelFoundationGoalCompatible(modelFoundation, seed)
-    ? mergeFoundationTrace(modelFoundation, plannedFoundation)
+  if (!plannedFoundation) throwCurveModelValidationFailure('无法从已校验 beats 构造共享 foundation', value)
+  const foundation = suppliedFoundation
+    ? mergeFoundationTrace(suppliedFoundation, plannedFoundation)
     : plannedFoundation
-  if (!foundation) return undefined
 
   const now = Date.now()
   return {
@@ -1841,6 +2083,301 @@ function parseModelCurve(
     createdAt: now,
     updatedAt: now,
   }
+}
+
+function deriveModelCurveCausalAnchor(
+  kind: CurveBeatKind,
+  detail: string,
+  sourceFactIds: readonly string[],
+  design: StoryDesignRecord,
+): string {
+  if (kind === 'current-state') {
+    return getModelCurveFactAnchor(design.sourceFacts[0]?.text ?? detail)
+  }
+
+  const referencedFact = sourceFactIds
+    .map((id) => design.sourceFacts.find((fact) => fact.id === id))
+    .find((fact): fact is StorySourceFact => fact !== undefined && hasModelSourceFactEvidence(detail, fact.text))
+  if (referencedFact) return getModelCurveFactAnchor(referencedFact.text)
+
+  return compactCausalMaterial(detail, detail)
+}
+
+function orderCurveBeatsByDependencies(beats: readonly CurveBeat[]): CurveBeat[] {
+  const canonicalOrder = new Map(curveBeatKinds.map((kind, index) => [kind, index]))
+  const remaining = new Map(beats.map((beat) => [beat.id, beat]))
+  const ordered: CurveBeat[] = []
+
+  while (remaining.size) {
+    const available = [...remaining.values()]
+      .filter((beat) => beat.dependsOn.every((dependency) => ordered.some((candidate) => candidate.id === dependency)))
+      .sort((left, right) => (canonicalOrder.get(left.kind) ?? 99) - (canonicalOrder.get(right.kind) ?? 99))
+    if (!available.length) {
+      throw new AppError(
+        '模型曲线的 dependsOn 形成了循环或引用了未先建立的节点。',
+        502,
+        'STORY_CURVE_MODEL_VALIDATION_FAILED',
+        undefined,
+        undefined,
+        undefined,
+        { stage: 'curve-validation', reason: 'dependsOn-cycle' },
+      )
+    }
+    const next = available[0]!
+    ordered.push(next)
+    remaining.delete(next.id)
+  }
+
+  return ordered
+}
+
+function getCurveProposalSafetyFailure(
+  kind: CurveBeatKind,
+  detail: string,
+  authorSourceFacts: readonly string[] = [],
+): string | undefined {
+  if (kind === 'current-state') return undefined
+  const normalized = detail.trim()
+  if (!curveProposalPrefixPattern.test(normalized)) return '没有以“暂定：”开头'
+  const sceneSignal = getCurveSceneSignal(normalized, authorSourceFacts)
+  if (sceneSignal) return `包含了场景、对白或连续操作（${sceneSignal}）`
+  const observation = normalized.match(curveSceneObservationPattern)?.[0]
+  if (observation && !isAuthorConfirmedPhrase(observation, authorSourceFacts)) {
+    return '包含了未经确认的场景观察'
+  }
+  const unsupportedObject = Array.from(normalized.matchAll(curveConcreteObjectPattern))
+    .map((match) => match[0])
+    .find((candidate) => !isAuthorConfirmedConcreteObject(candidate, authorSourceFacts))
+  if (unsupportedObject) return `包含了未经确认的具体物件“${unsupportedObject}”`
+  if (curveActionChainPattern.test(normalized)) return '包含了连续行动步骤'
+  if (curveSettledOutcomePattern.test(normalized)) return '把结果写成了既成事实'
+
+  const requirement: Record<Exclude<CurveBeatKind, 'current-state'>, RegExp> = {
+    'character-tension': /(?:想|却|但|不愿|害怕|恐惧|习惯|容易|总|表面|性格|关系|承诺|名字|目标|原来|开始|需要|无法|不能)/u,
+    trigger: /(?:想|目标|计划|原来的办法|出现|让|迫使|阻碍|停住|无法|不能|不得|受限|期限|归还|截止|之前|缺少|没有|尚未|只能|必须|却|但|承诺|关系|冲突)/u,
+    escalation: /(?:继续|若|必须|取舍|代价|原本|升级|两难|因此|意味着|承担|不再|承诺|关系|责任|删|保留|公开|分歧|边界)/u,
+    'midpoint-turn': /(?:发现|办法|代价|重新|转折|问题|表面|真正|改变|改成|不只是|意识|承认|转向|开始|选择|理解|判断)/u,
+    'climax-choice': /(?:必须|选择|承担|放下|决定|代价|保留|删|是否|还是|改写|拒绝|接受|继续|停止|目标|承诺|关系)/u,
+    resolution: /(?:结果|变化|得到|失去|理解|成长|离开|落点|保留|改写|接受|承担|决定|转为|不再|仍然|改变|关系|承诺)/u,
+  }
+  if (!requirement[kind].test(normalized)) return '没有表达该节点所需的结构语义'
+  return undefined
+}
+
+function getCurveSceneSignal(
+  detail: string,
+  authorSourceFacts: readonly string[],
+): string | undefined {
+  if (/[“”‘’"']/u.test(detail)) {
+    const quoted = detail.match(/[“”‘’"']/u)?.[0] ?? '引号'
+    // Quotation marks around a verbatim author phrase are review notation, not
+    // dialogue. Any other quote remains a scene/dialogue boundary violation.
+    if (!isAuthorConfirmedPhrase(quoted, authorSourceFacts) && !hasOnlyConfirmedQuotedPhrases(detail, authorSourceFacts)) {
+      return '未确认引号内容'
+    }
+  }
+  if (curveSceneActionSignalPattern.test(detail)) return '新增场景动作或调度'
+  const observation = detail.match(curveSceneObservationPattern)?.[0]
+  if (observation && !isAuthorConfirmedPhrase(observation, authorSourceFacts)) return '未确认场景观察'
+  return undefined
+}
+
+function hasOnlyConfirmedQuotedPhrases(
+  detail: string,
+  authorSourceFacts: readonly string[],
+): boolean {
+  const quotedPhrases = detail.match(/[“”‘’"]([^“”‘’"]+)[”’"]/gu) ?? []
+  if (!quotedPhrases.length) return false
+  return quotedPhrases.every((quoted) => isAuthorConfirmedPhrase(quoted, authorSourceFacts))
+}
+
+function isAuthorConfirmedConcreteObject(
+  candidate: string,
+  authorSourceFacts: readonly string[],
+): boolean {
+  const normalizedCandidate = normalizeCurveEvidence(candidate)
+  if (normalizedCandidate.length < 2) return false
+  return authorSourceFacts.some((fact) => {
+    const normalizedFact = normalizeCurveEvidence(fact)
+    // The object must occur in the author's wording itself. Merely mentioning
+    // a different confirmed fact in the same sentence cannot authorize it.
+    return normalizedFact.includes(normalizedCandidate)
+  })
+}
+
+function isAuthorConfirmedPhrase(
+  phrase: string,
+  authorSourceFacts: readonly string[],
+): boolean {
+  const normalizedPhrase = normalizeCurveEvidence(phrase)
+  if (normalizedPhrase.length < 3) return false
+  return authorSourceFacts.some((fact) => normalizeCurveEvidence(fact).includes(normalizedPhrase))
+}
+
+function throwCurveModelValidationFailure(reason: string, value: unknown): never {
+  throw new AppError(
+    `模型曲线校验失败：${reason}。`,
+    502,
+    'STORY_CURVE_MODEL_VALIDATION_FAILED',
+    undefined,
+    undefined,
+    undefined,
+    {
+      stage: 'curve-validation',
+      reason,
+      response: summarizeModelResponse(value),
+    },
+  )
+}
+
+function findUnsupportedCurveDetail(
+  value: string,
+  seed: StorySeed,
+  design: StoryDesignRecord,
+): { label: string; value: string } | undefined {
+  const established = [
+    seed.activeSituation,
+    seed.lockedGoal ?? '',
+    ...seed.lockedFacts,
+    ...design.sourceFacts.map((fact) => fact.text),
+  ].join('\n')
+  const normalizedEstablished = normalizeCurveEvidence(established)
+  const precision = Array.from(value.matchAll(curveUnestablishedPrecisionPattern))
+    .map((match) => match[0])
+    .find((match) => !normalizedEstablished.includes(normalizeCurveEvidence(match)))
+  if (precision) return { label: '精确数值或时限', value: precision }
+
+  for (const rule of curveUnsupportedDetailRules) {
+    const match = Array.from(value.matchAll(rule.pattern))
+      .map((candidate) => candidate[0])
+      .find((candidate) => (
+        !normalizedEstablished.includes(normalizeCurveEvidence(candidate))
+        && !isSupportedCurveCategory(candidate, normalizedEstablished)
+      ))
+    if (match) return { label: rule.label, value: match }
+  }
+  return undefined
+}
+
+function findUnestablishedCurveLatinPhrase(
+  value: string,
+  seed: StorySeed,
+  design: StoryDesignRecord,
+): string | undefined {
+  const established = normalizeCurveEvidence([
+    seed.activeSituation,
+    seed.lockedGoal ?? '',
+    ...seed.lockedFacts,
+    ...design.sourceFacts.map((fact) => fact.text),
+  ].join('\n'))
+  return Array.from(value.matchAll(curveLatinPhrasePattern))
+    .map((match) => match[0])
+    .find((phrase) => !established.includes(normalizeCurveEvidence(phrase)))
+}
+
+function findRepeatedCurveBeatDetail(
+  detail: string,
+  previousBeats: readonly CurveBeat[],
+): string | undefined {
+  const normalized = normalizeCausalText(detail)
+  if (normalized.length < 18) return undefined
+  return previousBeats
+    .filter((beat) => beat.kind !== 'current-state' && beat.status !== 'rejected')
+    .map((beat) => normalizeCausalText(beat.detail))
+    .filter((upstream) => upstream.length >= 18)
+    .find((upstream) => normalized.includes(upstream) || upstream.includes(normalized))
+}
+
+function isSupportedCurveCategory(match: string, normalizedEstablished: string): boolean {
+  const normalizedMatch = normalizeCurveEvidence(match)
+  const categoryEvidence: Array<{ match: string[]; source: RegExp }> = [
+    { match: ['设备'], source: /投影仪|手机|电话|电脑|相机|录音机|机器|装置|设备/iu },
+    { match: ['文件'], source: /文件|短片|作品|报告|文档|资料/iu },
+    { match: ['消息'], source: /消息|短信|通知|邮件/iu },
+    { match: ['工作人员'], source: /工作人员|负责人|客服|管理员|前队友|队友/iu },
+  ]
+  return categoryEvidence.some(({ match: aliases, source }) => aliases.includes(normalizedMatch) && source.test(normalizedEstablished))
+}
+
+function normalizeCurveEvidence(value: string): string {
+  return value.replace(/[\s，。！？；、：“”‘’"'（）()]/gu, '').toLocaleLowerCase()
+}
+
+const nonDistinctCurveEvidenceFragments = new Set([
+  '作者', '主角', '目标', '选择', '决定', '继续', '已经', '确认', '原来', '原有',
+  '当前', '情况', '条件', '问题', '关系', '承诺', '因此', '所以', '但是', '因为',
+  '这个', '那个', '他们', '我们', '自己', '对方', '之间', '无法', '不能', '需要',
+  '必须', '可以', '以及', '然后', '还是', '是否', '要不要', '暂定',
+])
+
+/**
+ * A declared source fact needs a visible, non-generic anchor in the proposal.
+ * Contiguous source text is intentional: semantic similarity allowed a generic
+ * "原有安排" sentence to claim an unrelated deadline, relationship, or commitment.
+ */
+function hasModelSourceFactEvidence(detail: string, sourceFact: string): boolean {
+  const normalizedDetail = normalizeCurveEvidence(detail)
+  const normalizedFact = normalizeCurveEvidence(sourceFact)
+  if (!normalizedDetail || normalizedFact.length < 3) return false
+  if (getModelFactAnchors(sourceFact).some((anchor) => normalizedDetail.includes(anchor))) return true
+
+  // A rich source fact can contain several clauses. Accept a meaningful
+  // contiguous handle from one clause, but not a generic story-structure word.
+  const maximumFragmentLength = Math.min(10, normalizedFact.length)
+  for (let length = maximumFragmentLength; length >= 3; length -= 1) {
+    for (let index = 0; index <= normalizedFact.length - length; index += 1) {
+      const fragment = normalizedFact.slice(index, index + length)
+      if (nonDistinctCurveEvidenceFragments.has(fragment)) continue
+      if (normalizedDetail.includes(fragment)) return true
+    }
+  }
+  return false
+}
+
+function getModelFactAnchors(sourceFact: string): string[] {
+  const normalized = normalizeCurveEvidence(sourceFact)
+  if (normalized.length < 3) return []
+  const anchors = new Set<string>([normalized])
+  const stripped = normalized
+    .replace(/^(?:却|但|同时|并且)/u, '')
+    .replace(/^[\u4e00-\u9fff]{1,4}(?:发现|答应|承诺|想要|想|准备|决定|不知道|认为)/u, '')
+  if (stripped.length >= 3) anchors.add(stripped)
+  for (const marker of ['发现', '答应', '承诺', '不知道', '想要', '想', '准备', '决定']) {
+    const markerIndex = stripped.indexOf(marker)
+    if (markerIndex >= 0 && stripped.length - markerIndex - marker.length >= 3) {
+      anchors.add(stripped.slice(markerIndex + marker.length))
+    }
+  }
+  return [...anchors]
+    .filter((anchor) => anchor.length >= 3 && !nonDistinctCurveEvidenceFragments.has(anchor))
+    .sort((left, right) => right.length - left.length)
+}
+
+function flattenFoundationTexts(foundation: StoryCurveFoundation): string[] {
+  return [
+    foundation.conflictCore.goal,
+    foundation.conflictCore.obstacle,
+    foundation.conflictCore.tradeoff,
+    foundation.preservedGoal,
+    foundation.predicament.title,
+    foundation.predicament.immediateSituation,
+    foundation.predicament.obstacle,
+    foundation.predicament.tradeoff,
+    foundation.predicament.urgency,
+    foundation.predicament.choice,
+    foundation.predicament.plausibleCost,
+    foundation.middleDevelopment.escalation,
+    foundation.middleDevelopment.midpoint,
+    foundation.middleDevelopment.climaxPressure,
+    foundation.storyEnds.opening,
+    foundation.storyEnds.openingClue,
+    foundation.storyEnds.climax,
+    foundation.storyEnds.resolution,
+    foundation.storyEnds.cost,
+    foundation.storyEnds.promise,
+    foundation.approach.intent,
+    foundation.approach.cost,
+  ]
 }
 
 function mergeFoundationTrace(
@@ -1867,31 +2404,216 @@ function isModelFoundationGoalCompatible(
     && (candidate.includes(expectedPhrase) || expectedPhrase.includes(getGoalPhrase(foundation.preservedGoal)))
 }
 
+interface CreativeDirectionEvidenceRequirement {
+  label: string
+  earlyKinds: readonly CurveBeatKind[]
+  earlyPattern: RegExp
+  earlyInstruction: string
+  lateKinds: readonly CurveBeatKind[]
+  latePattern: RegExp
+  lateInstruction: string
+}
+
+function getCreativeDirectionValidationFailure(
+  beats: readonly CurveBeat[],
+  brief: CreativeBrief,
+): string | undefined {
+  const proposals = beats.filter((beat) => beat.kind !== 'current-state' && beat.status !== 'rejected')
+  const byKind = new Map(proposals.map((beat) => [beat.kind, beat.detail]))
+  const requirements = getCreativeDirectionEvidenceRequirements(brief)
+  const missingEvidence: string[] = []
+
+  for (const requirement of requirements) {
+    const earlyMatches = getDirectionEvidenceKinds(byKind, requirement.earlyKinds, requirement.earlyPattern)
+    const lateMatches = getDirectionEvidenceKinds(byKind, requirement.lateKinds, requirement.latePattern)
+    if (!earlyMatches.length) {
+      missingEvidence.push(`${requirement.label}缺少${requirement.earlyKinds.join('/')}层级的因果证据`)
+    }
+    if (!lateMatches.length) {
+      missingEvidence.push(`${requirement.label}缺少${requirement.lateKinds.join('/')}层级的因果证据`)
+    }
+  }
+
+  const distinctDetailCount = new Set(proposals.map((beat) => normalizeCausalText(beat.detail))).size
+  // A selected direction has to change both the pressure that stops the goal
+  // and the later choice/change. This is stronger than counting keywords in
+  // arbitrary sentences, while keeping the evidence inside the author's
+  // reviewed, fact-grounded curve instead of adding a hidden explanation.
+  if (missingEvidence.length || distinctDetailCount < Math.min(3, proposals.length)) {
+    const diagnostics = [
+      ...missingEvidence,
+      ...(distinctDetailCount < Math.min(3, proposals.length)
+        ? [`不同因果节点 ${distinctDetailCount}/${Math.min(3, proposals.length)}`]
+        : []),
+    ]
+    return `提案没有在不同因果层级持续体现所选创意方向（${diagnostics.join('；')}）`
+  }
+  return undefined
+}
+
+function getDirectionEvidenceKinds(
+  details: ReadonlyMap<CurveBeatKind, string>,
+  kinds: readonly CurveBeatKind[],
+  pattern: RegExp,
+): CurveBeatKind[] {
+  return kinds.filter((kind) => pattern.test(details.get(kind) ?? ''))
+}
+
+function getCreativeDirectionEvidenceRequirements(brief: CreativeBrief): CreativeDirectionEvidenceRequirement[] {
+  const requirements: CreativeDirectionEvidenceRequirement[] = []
+  const earlyPressureKinds: readonly CurveBeatKind[] = ['trigger', 'escalation']
+  const lateChoiceKinds: readonly CurveBeatKind[] = ['climax-choice', 'resolution']
+
+  for (const force of brief.dramaticForces) {
+    switch (force) {
+      case 'contrast':
+        requirements.push({
+          label: '戏剧力量「反差」',
+          earlyKinds: earlyPressureKinds,
+          earlyPattern: /反而|反倒|反过来|局限|旧办法|旧路径|原本|原计划|原有安排|依赖|惯用|习惯|露出|失效|不再奏效/u,
+          earlyInstruction: '原有安排、旧办法、局限、反而或失效之一，说明目标为何不能照旧推进',
+          lateKinds: lateChoiceKinds,
+          latePattern: /反而|反倒|局限|旧办法|旧路径|原本|原计划|原有安排|失效|不再奏效|重新/u,
+          lateInstruction: '旧办法、原有安排、局限、反而、失效或重新之一，说明选择怎样不再照旧',
+        })
+        break
+      case 'cost':
+        requirements.push({
+          label: '戏剧力量「代价」',
+          earlyKinds: earlyPressureKinds,
+          earlyPattern: /代价|放弃|牺牲|承担|交换|两难|两全|失去|保留|取舍/u,
+          earlyInstruction: '代价、承担、放弃、失去、保留或取舍之一，说明继续目标会失去什么',
+          lateKinds: lateChoiceKinds,
+          // A concrete two-sided choice is itself an auditable cost signal.
+          // Models often write "在 A 与 B 之间选择" rather than repeat the
+          // abstract word "代价"; both sides still have to be present.
+          latePattern: /代价|放弃|牺牲|承担|交换|两难|两全|失去|保留|取舍|(?:在|必须在)[^。！？；\n]{1,48}(?:与|还是)[^。！？；\n]{1,48}(?:之间)?(?:选择|取舍)|(?:选择|取舍)[^。！？；\n]{0,48}(?:代价|承担|放弃|失去|保留)/u,
+          lateInstruction: '代价、承担、放弃、失去、保留或取舍之一，说明选择由谁承担',
+        })
+        break
+      case 'misunderstanding':
+        requirements.push({
+          label: '戏剧力量「误会」',
+          earlyKinds: earlyPressureKinds,
+          earlyPattern: /误会|误解|信息|疑问|猜测|不一致|弄清|缺口/u,
+          earlyInstruction: '误会、信息、疑问、猜测、不一致或缺口之一，说明什么尚未被同样理解',
+          lateKinds: lateChoiceKinds,
+          latePattern: /澄清|解释|理解|误会|误解|信息|疑问/u,
+          lateInstruction: '澄清、解释、理解、误会、信息或疑问之一，说明选择如何处理理解差异',
+        })
+        break
+      case 'surprise':
+        requirements.push({
+          label: '戏剧力量「意外」',
+          earlyKinds: earlyPressureKinds,
+          earlyPattern: /意外|突然|新条件|变化|时机|失效|反常|打断|转变/u,
+          earlyInstruction: '意外、新条件、变化、时机、反常、打断或失效之一，说明原安排如何被打断',
+          lateKinds: lateChoiceKinds,
+          latePattern: /转变|失效|重新|变化|改变|调整|新条件/u,
+          lateInstruction: '转变、失效、重新、变化、改变、调整或新条件之一，说明选择如何回应变化',
+        })
+        break
+      case 'relationship-tension':
+        requirements.push({
+          label: '戏剧力量「关系拉扯」',
+          earlyKinds: earlyPressureKinds,
+          earlyPattern: /承诺|约定|关系|信任|分歧|边界|姐姐|姐妹|哥哥|弟弟|妹妹|队友|伙伴/u,
+          earlyInstruction: '承诺、关系、信任、分歧、边界或已确认关系对象之一，说明目标受到的牵制',
+          lateKinds: lateChoiceKinds,
+          latePattern: /承诺|约定|关系|信任|回应|分歧|边界|共同|姐姐|姐妹|哥哥|弟弟|妹妹|队友|伙伴/u,
+          lateInstruction: '回应、关系、信任、分歧、边界、共同或已确认关系对象之一，说明选择如何承担关系后果',
+        })
+        break
+    }
+  }
+
+  for (const tone of brief.tones) {
+    switch (tone) {
+      case 'growth':
+        requirements.push({
+          label: '故事感觉「成长」',
+          earlyKinds: ['climax-choice'],
+          earlyPattern: /选择|承担|承认|放下|接受|重新/u,
+          earlyInstruction: '选择、承担、承认、放下、接受或重新之一，说明主角主动怎么决定',
+          lateKinds: ['resolution'],
+          latePattern: /改变|成长|理解|学会|调整|重新/u,
+          lateInstruction: '改变、成长、理解、学会、调整或重新之一，说明选择带来怎样的变化',
+        })
+        break
+      case 'friendship':
+        requirements.push({
+          label: '故事感觉「友情」',
+          earlyKinds: earlyPressureKinds,
+          earlyPattern: /朋友|信任|友情|同行|伙伴|家人|姐姐|姐妹|哥哥|弟弟|妹妹|队友|协作|共同|一起|彼此|并肩|关系/u,
+          earlyInstruction: '朋友、信任、伙伴、家人、队友、共同、彼此或已确认关系对象之一，说明共同目标如何受阻',
+          lateKinds: lateChoiceKinds,
+          latePattern: /朋友|信任|友情|同行|伙伴|家人|姐姐|姐妹|哥哥|弟弟|妹妹|队友|协作|共同|一起|彼此|并肩|关系|回应/u,
+          lateInstruction: '朋友、信任、伙伴、家人、队友、共同、彼此、关系或回应之一，说明选择如何改变共同处境',
+        })
+        break
+      case 'romance':
+        requirements.push({
+          label: '故事感觉「恋爱」',
+          earlyKinds: earlyPressureKinds,
+          earlyPattern: /心意|喜欢|恋爱|告白|关系|回应/u,
+          earlyInstruction: '心意、喜欢、关系或回应之一，说明目标为何牵动关系',
+          lateKinds: lateChoiceKinds,
+          latePattern: /心意|喜欢|恋爱|告白|关系|回应|理解/u,
+          lateInstruction: '心意、喜欢、关系、回应或理解之一，说明选择如何处理心意',
+        })
+        break
+      case 'mystery':
+        requirements.push({
+          label: '故事感觉「悬疑」',
+          earlyKinds: earlyPressureKinds,
+          earlyPattern: /信息|疑问|真相|解释|缺口|不一致/u,
+          earlyInstruction: '信息、疑问、真相、解释、缺口或不一致之一，说明什么尚未确定',
+          lateKinds: lateChoiceKinds,
+          latePattern: /信息|疑问|真相|解释|缺口|澄清|理解/u,
+          lateInstruction: '信息、疑问、真相、解释、缺口、澄清或理解之一，说明选择怎样面对未知',
+        })
+        break
+      case 'comedy':
+        requirements.push({
+          label: '故事感觉「搞笑」',
+          earlyKinds: earlyPressureKinds,
+          earlyPattern: /尴尬|体面|笑|反差/u,
+          earlyInstruction: '尴尬、体面、笑或反差之一，说明目标为何卡住',
+          lateKinds: lateChoiceKinds,
+          latePattern: /尴尬|体面|笑|反差/u,
+          lateInstruction: '尴尬、体面、笑或反差之一，说明选择怎样带来不同后果',
+        })
+        break
+      case 'warm':
+        requirements.push({
+          label: '故事感觉「温暖」',
+          earlyKinds: earlyPressureKinds,
+          earlyPattern: /理解|照顾|温暖|彼此|回应|关系/u,
+          earlyInstruction: '理解、照顾、彼此、回应或关系之一，说明目标为何牵动彼此',
+          lateKinds: lateChoiceKinds,
+          latePattern: /理解|照顾|温暖|彼此|回应|关系/u,
+          lateInstruction: '理解、照顾、彼此、回应或关系之一，说明选择怎样留下关系变化',
+        })
+        break
+      case 'fantasy':
+        requirements.push({
+          label: '故事感觉「奇幻」',
+          earlyKinds: earlyPressureKinds,
+          earlyPattern: /规则|边界|奇幻|魔法|未知/u,
+          earlyInstruction: '规则、边界、奇幻、魔法或未知之一，说明哪项已确认条件发生偏移',
+          lateKinds: lateChoiceKinds,
+          latePattern: /规则|边界|奇幻|魔法|未知|改变/u,
+          lateInstruction: '规则、边界、奇幻、魔法、未知或改变之一，说明选择如何回应偏移',
+        })
+        break
+    }
+  }
+
+  return requirements
+}
+
 function hasStableCreativeDirection(beats: readonly CurveBeat[], brief: CreativeBrief): boolean {
-  const details = beats
-    .filter((beat) => beat.kind !== 'current-state' && beat.status !== 'rejected')
-    .map((beat) => beat.detail)
-  const force = brief.dramaticForces[0]
-  const tone = brief.tones[0]
-  const forcePattern: Record<DramaticForce, RegExp> = {
-    misunderstanding: /误会|理解|澄清|猜测|解释|信息/u,
-    cost: /代价|放弃|牺牲|承担|交换|两全/u,
-    surprise: /意外|突然|新条件|变化|时机|失效/u,
-    contrast: /反而|局限|旧办法|依赖|露出|失效/u,
-    'relationship-tension': /承诺|关系|信任|回应|裂痕|分歧/u,
-  }
-  const tonePattern: Record<CreativeTone, RegExp> = {
-    comedy: /尴尬|体面|笑/u,
-    warm: /理解|照顾|温暖|彼此/u,
-    friendship: /朋友|信任|友情|同行/u,
-    romance: /心意|喜欢|恋爱|告白/u,
-    growth: /改变|成长|习惯|重新|承担/u,
-    mystery: /信息|疑问|真相|解释|缺口/u,
-    fantasy: /规则|边界|奇幻|魔法/u,
-  }
-  const forceHits = force ? details.filter((detail) => forcePattern[force].test(detail)).length : 3
-  const toneHits = tone ? details.filter((detail) => tonePattern[tone].test(detail)).length : 3
-  return forceHits >= 3 && toneHits >= 3
+  return !getCreativeDirectionValidationFailure(beats, brief)
 }
 
 function parseModelCurveFoundation(value: unknown): StoryCurveFoundation | undefined {
@@ -1978,15 +2700,17 @@ function parseSourceFactIds(value: unknown, design: StoryDesignRecord): string[]
   const ids = value.filter((candidate): candidate is string => (
     typeof candidate === 'string' && availableIds.has(candidate)
   ))
-  return ids.length === value.length ? [...new Set(ids)] : undefined
+  if (ids.length !== value.length || new Set(ids).size !== ids.length) return undefined
+  return ids
 }
 
-function parseDependencies(value: unknown): string[] {
-  if (!Array.isArray(value)) return []
+function parseDependencies(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value) || value.length > 3) return undefined
   const allowedIds = new Set(curveBeatKinds.map((kind) => `beat-${kind}`))
-  return value
-    .filter((candidate): candidate is string => typeof candidate === 'string' && allowedIds.has(candidate))
-    .slice(0, 3)
+  const ids = value.filter((candidate): candidate is string => typeof candidate === 'string' && allowedIds.has(candidate))
+  if (ids.length !== value.length || new Set(ids).size !== ids.length) return undefined
+  return ids
 }
 
 function normalizeCurveDependencies(beats: CurveBeat[]): CurveBeat[] {
@@ -2019,7 +2743,13 @@ function parseRegeneratedBeatDetail(
     !detail
     || (!brief.allowSystemNamedCharacters && hasNewNamedCharacter(detail, seed))
     || !isCurveDetailGroundedToContext(detail, seed, curve, target)
-    || !isSystemCurveProposalSafe(kind, detail)
+    || !isSystemCurveProposalSafe(
+      kind,
+      detail,
+      curve.design?.sourceFacts
+        .filter((fact) => fact.disposition !== 'parked')
+        .map((fact) => fact.text) ?? [],
+    )
     || repeatsFullUpstreamDetail(detail, curve, target)
     || hasNestedCurveQuotes(detail)
     || hasUnboundGenericCausalPhrase(detail)
@@ -2105,31 +2835,12 @@ function getGroundingFragments(value: string): string[] {
   return [...fragments]
 }
 
-export function isSystemCurveProposalSafe(kind: CurveBeatKind, detail: string): boolean {
-  if (kind === 'current-state') return true
-
-  const normalized = detail.trim()
-  if (!curveProposalPrefixPattern.test(normalized)) return false
-  if (
-    curveSceneSignalPattern.test(normalized)
-    || curveActionChainPattern.test(normalized)
-    || curveSettledOutcomePattern.test(normalized)
-  ) return false
-
-  switch (kind) {
-    case 'character-tension':
-      return /(?:想|却|不愿|害怕|习惯|容易|总|表面|性格|关系)/u.test(normalized)
-    case 'trigger':
-      return /(?:想|目标|计划|原来的办法|出现|让|迫使|阻碍|停住)/u.test(normalized)
-    case 'escalation':
-      return /(?:继续|若|必须|取舍|代价|原本|升级|两难)/u.test(normalized)
-    case 'midpoint-turn':
-      return /(?:发现|办法|代价|重新|转折|问题|表面)/u.test(normalized)
-    case 'climax-choice':
-      return /(?:必须|选择|承担|放下|决定|代价)/u.test(normalized)
-    case 'resolution':
-      return /(?:结果|变化|得到|失去|理解|成长|离开|落点)/u.test(normalized)
-  }
+export function isSystemCurveProposalSafe(
+  kind: CurveBeatKind,
+  detail: string,
+  authorSourceFacts: readonly string[] = [],
+): boolean {
+  return !getCurveProposalSafetyFailure(kind, detail, authorSourceFacts)
 }
 
 function getCurveBeatTitle(kind: CurveBeatKind): string {
@@ -2149,7 +2860,8 @@ function isCurveGroundedToSeed(beats: readonly CurveBeat[], seed: StorySeed): bo
   const proposalBeats = beats.filter((beat) => beat.kind !== 'current-state')
   const anchors = getCurveAnchorTerms(seed)
   const groundedBeatCount = proposalBeats.filter((beat) => (
-    anchors.some((anchor) => beat.detail.includes(anchor))
+    (beat.sourceFactIds?.length ?? 0) > 0
+      || anchors.some((anchor) => beat.detail.includes(anchor))
   )).length
   return groundedBeatCount >= Math.min(2, proposalBeats.length)
 }
@@ -3004,15 +3716,62 @@ function isModelDisabled(): boolean {
   return /^(?:1|true|yes)$/iu.test(process.env.STORY_DISABLE_MODEL?.trim() ?? '')
 }
 
+function isLocalFallbackAllowed(): boolean {
+  // Production callers need the explicit STORY_DISABLE_MODEL switch before a
+  // deterministic fallback is returned. Regression commands set this switch
+  // in their documented local environment.
+  return isModelDisabled()
+}
+
 const curveGenerationSystemPrompt = `你是故事共创编辑。你的职责是把用户的模糊想法整理成一条可讨论、可编辑的暂定故事曲线，而不是写小说或代替用户决定主线。
 
-只输出 JSON 对象，不要 Markdown。必须给出 5 至 7 个 beats。每个 beat 只能是一个结构假设，不写连续场景、对白、角色回合、既定结果或固定路径事实。必含 kind：current-state、trigger、escalation、climax-choice、resolution；可选 character-tension 与 midpoint-turn。每个 detail 最多 110 个汉字。除 current-state 外，每个 detail 必须以“暂定：”开头。
+只输出 JSON 对象，不要 Markdown。第一次请严格给出恰好 5 个 beats，kind 按 current-state、trigger、escalation、climax-choice、resolution 排列；不要添加 character-tension 或 midpoint-turn。每个 beat 只能是一个结构假设，不写连续场景、对白、角色回合、既定结果或固定路径事实。每个 detail 最多 110 个汉字。除 current-state 外，每个 detail 必须以“暂定：”开头，并且只写一个抽象因果句。
 
-所有不是用户原文的内容都是系统提案：可以提出人物弱点、钩子、阻碍、代价与结局方向，但不要把它们写成已发生事实。若 allowSystemNamedCharacters 为 false，绝不新增任何具名人物，使用“陌生人”“同行者”等匿名指代。不要默认写成悬疑，除非 brief 明确选择 mystery。
+所有不是用户原文的内容都是系统提案：可以提出人物弱点、钩子、阻碍、代价与结局方向，但不要把它们写成已发生事实。除 current-state 外，提案只可引用目标、期限、承诺和关系的抽象因果，不要重复原文中的具体器物或文件名称。提案中绝对不要出现引号、对白、消息、文件、屏幕、便签、设备操作、具体场景动作、连续步骤、精确时间/数量、工作人员或机构流程；不要用这些细节替作者决定因果。foundation 的每个字段控制在 50 个汉字以内，predicament.immediateSituation 控制在 70 个汉字以内，只写设计关系，不写场景道具。若 allowSystemNamedCharacters 为 false，绝不新增任何具名人物，使用“陌生人”“同行者”等匿名指代。不要默认写成悬疑，除非 brief 明确选择 mystery。
 
-输出：{"title":"简短标题","beats":[{"kind":"current-state","title":"节点标题","detail":"节点内容","dependsOn":[],"sourceFactIds":["source-fact-1"],"causalAnchor":"一句短因果承接"}],"foundation":{"conflictCore":{"goal":"保留的目标","obstacle":"具体阻碍如何卡住目标","tradeoff":"主角必须承担的取舍"},"preservedGoal":"保留的目标","predicament":{"title":"具体困境标题","variationAxis":"time|resource|relationship|commitment","immediateSituation":"当前处境","obstacle":"当前阻碍","tradeoff":"取舍","urgency":"为什么现在要处理","choice":"主角要作的选择","plausibleCost":"选择的代价"},"middleDevelopment":{"escalation":"阻碍如何升级","midpoint":"中段如何改变原办法","climaxPressure":"高潮压力"},"storyEnds":{"opening":"故事开端","openingClue":"开端钩子","climax":"高潮选择","resolution":"结局变化","cost":"承担的代价","promise":"故事承诺"},"approach":{"intent":"第一步设计方向","cost":"第一步代价"}}}`
+安全写法示例：trigger 用“暂定：既有归还期限使原计划无法继续”这类抽象阻碍；escalation 用“暂定：继续目标会触碰已确认的承诺”这类取舍；climax-choice 用“暂定：主角必须在保留目标与承担承诺之间选择”。不要把“归还期限”扩写成便签、消息、倒计时或具体时刻。
+
+输出：{"title":"简短标题","beats":[{"kind":"current-state","title":"节点标题","detail":"节点内容","dependsOn":[],"sourceFactIds":["source-fact-1"],"causalAnchor":"一句短因果承接"},{"kind":"trigger","title":"节点标题","detail":"暂定：抽象阻碍","dependsOn":["beat-current-state"],"sourceFactIds":["source-fact-1"],"causalAnchor":"一句短因果承接"},{"kind":"escalation","title":"节点标题","detail":"暂定：抽象升级","dependsOn":["beat-trigger"],"sourceFactIds":["source-fact-1"],"causalAnchor":"一句短因果承接"},{"kind":"climax-choice","title":"节点标题","detail":"暂定：主动选择","dependsOn":["beat-escalation"],"sourceFactIds":["source-fact-1"],"causalAnchor":"一句短因果承接"},{"kind":"resolution","title":"节点标题","detail":"暂定：抽象变化","dependsOn":["beat-climax-choice"],"sourceFactIds":["source-fact-1"],"causalAnchor":"一句短因果承接"}],"foundation":{"conflictCore":{"goal":"保留的目标","obstacle":"具体阻碍如何卡住目标","tradeoff":"主角必须承担的取舍"},"preservedGoal":"保留的目标","predicament":{"title":"具体困境标题","variationAxis":"time|resource|relationship|commitment","immediateSituation":"当前处境","obstacle":"当前阻碍","tradeoff":"取舍","urgency":"为什么现在要处理","choice":"主角要作的选择","plausibleCost":"选择的代价"},"middleDevelopment":{"escalation":"阻碍如何升级","midpoint":"中段如何改变原办法","climaxPressure":"高潮压力"},"storyEnds":{"opening":"故事开端","openingClue":"开端钩子","climax":"高潮选择","resolution":"结局变化","cost":"承担的代价","promise":"故事承诺"},"approach":{"intent":"第一步设计方向","cost":"第一步代价"}}}`
 
 const curveBeatRegenerationSystemPrompt = `你是故事共创编辑。只重写一条暂定故事曲线节点，不写连续剧情。返回 JSON：{"detail":"暂定：一句可编辑的系统提案"}。detail 必须以“暂定：”开头，不得把提案写成既定事实、行动结果或长场景；未允许新增具名人物时不得新增名字。只提取上游节点的核心后果，用新的短语推进下一层；不要复制上游整句，不要出现嵌套引号。`
+
+const curveGenerationRepairSystemPrompt = `你是故事结构校验修复器，不是小说作者。你必须把候选曲线改写成可审阅的抽象因果提案。
+
+只输出 JSON。严格只保留 5 个 beat，kind 必须按 current-state、trigger、escalation、climax-choice、resolution 各出现一次；不要添加其他 kind。current-state 可以逐字保留用户材料；其余 beat 的 detail 必须以“暂定：”开头，只写一个因果关系或取舍，不得出现任何场景动作、对白、引号、消息、文件、屏幕、便签、设备、工作人员、机构流程、具体数字/时间/人数、精确结果或永久后果。不要把“投影仪”“手机”等具体物件换成“设备”来规避规则；直接写“既有期限”“已确认承诺”“作品归属”等抽象关系。foundation 每个字段不超过 50 个汉字，不能写场景物件；sourceFactIds 和 dependsOn 必须使用输入中给出的真实 ID；dependsOn 固定为 current-state→trigger→escalation→climax-choice→resolution 的链条。
+
+合格例子：
+- trigger：暂定：既有归还期限使原计划无法继续。
+- escalation：暂定：继续目标会触碰主角已经确认的承诺。
+- midpoint-turn：暂定：主角意识到旧办法无法同时保留目标和承诺。
+- climax-choice：暂定：主角必须在保留目标与承担承诺之间作出选择。
+- resolution：暂定：这次选择改变主角对目标和承诺关系的理解。
+
+不合格例子：新增“打开/看到/收到/听见/倒计时/导出”等场景操作，或新增某人说、某设备、某文件、12小时、三个人、永久等内容。若“提交”或其他动作词已经逐字出现在作者材料中，可以作为抽象目标条件照抄，但不能扩写成现场操作链。
+
+输出结构必须完整，不能省略 foundation：
+{"title":"简短标题","beats":[{"kind":"current-state|character-tension|trigger|escalation|midpoint-turn|climax-choice|resolution","title":"节点标题","detail":"节点内容","dependsOn":[],"sourceFactIds":["输入中的 source-fact ID"],"causalAnchor":"一句短因果承接"}],"foundation":{"conflictCore":{"goal":"保留目标","obstacle":"阻碍","tradeoff":"取舍"},"preservedGoal":"保留目标","predicament":{"title":"困境标题","variationAxis":"time|resource|relationship|commitment","immediateSituation":"当前处境","obstacle":"阻碍","tradeoff":"取舍","urgency":"紧迫性","choice":"选择","plausibleCost":"代价"},"middleDevelopment":{"escalation":"升级","midpoint":"中段转折","climaxPressure":"高潮压力"},"storyEnds":{"opening":"开端","openingClue":"开场线索","climax":"高潮选择","resolution":"结局变化","cost":"代价","promise":"故事承诺"},"approach":{"intent":"第一步方向","cost":"第一步代价"}}}`
+
+// Qwen follows a small, closed JSON contract much more reliably than a
+// combined beat/foundation schema. The server derives the shared foundation
+// from these validated beats below, so the model never gets a second design
+// map that could drift from the reviewed curve.
+const compactCurveGenerationSystemPrompt = `你是故事共创编辑，只负责提出可审阅的抽象故事结构，不写小说。
+
+只输出一个 JSON 对象，不能有 Markdown、解释或额外键。对象只有 title 和 beats；beats 必须恰好 5 项，顺序固定为 current-state、trigger、escalation、climax-choice、resolution。每项只能有 kind、detail、sourceFactIds 三个键；sourceFactIds 只能使用用户材料中给出的真实 ID，不能创造 ID。服务端会补充节点标题、依赖关系、因果锚点和共享 foundation，不要输出 foundation。
+
+current-state 只能概括用户已写出的当前处境。其余四项必须以“暂定：”开头，各写一个不超过 70 字的抽象因果句：trigger 说明什么使目标停住，escalation 说明继续目标会承担什么取舍，climax-choice 说明主角必须在两端之间作出的主动选择，resolution 说明该选择带来的可辨认变化。只用用户材料中的目标、期限、承诺、关系和对象；不要新增场景动作、对白、未经确认的设备操作、文件流程、人物姓名、精确数字、确定的他人回应或已经发生的结果。作者已明确的物件、期限和关系可以作为条件逐字保留，不能为了抽象而换成“某个安排”后继续声称承接原事实。禁止使用“已经完成、已经解决、最终得到、终于、结果是”等既成结果写法；每一项都必须保持尚待作者确认。
+
+方向要求：严格遵守用户请求中列出的“方向层级硬约束”。每个所选方向都要先改变目标受阻或取舍升级，再改变后续的主动选择或变化；方向词只能作为抽象因果连接，不能代替作者事实，也不能在任意节点机械重复。反差必须在 trigger/escalation 与 climax-choice/resolution 中各至少出现一个“原有安排、旧办法、局限、反而、失效、重新”中的词；成长必须在 climax-choice 出现“选择、承担、承认、放下、接受、重新”之一，并在 resolution 出现“改变、成长、理解、学会、调整、重新”之一。严格按这个最小形状输出：{"title":"暂定主线","beats":[{"kind":"current-state","detail":"用户当前处境","sourceFactIds":["source-fact-1"]},{"kind":"trigger","detail":"暂定：既有期限使目标停住","sourceFactIds":["source-fact-2"]},{"kind":"escalation","detail":"暂定：继续目标会触碰已确认承诺","sourceFactIds":["source-fact-3"]},{"kind":"climax-choice","detail":"暂定：主角必须在目标与承诺之间选择","sourceFactIds":["source-fact-3"]},{"kind":"resolution","detail":"暂定：选择改变主角对目标的理解","sourceFactIds":["source-fact-2"]}]}`
+
+const compactCurveGenerationRepairSystemPrompt = `你是故事结构修复器。只输出一个 JSON 对象，不能有 Markdown、解释或额外键；对象只有 title 和 beats。beats 必须恰好 5 项，顺序固定为 current-state、trigger、escalation、climax-choice、resolution；每项只能有 kind、detail、sourceFactIds 三个键，sourceFactIds 只能复制输入中的真实 ID。不要输出 foundation、title 以外的节点字段或任何场景化内容。current-state 保留用户事实；其余 detail 以“暂定：”开头，每项只写一个抽象因果关系，并分别推进目标受阻、取舍升级、主动选择和选择后的变化。
+
+事实追溯是硬约束：单个 beat 只能列出 detail 中可逐字核对的 sourceFactIds；每个所列 ID 都必须在 detail 中照抄其原文的一个有区分度连续短语，至少三个字。没有写进 detail 的材料不要列 ID；不要为了凑覆盖而把“原有安排”“既有条件”“当前问题”等泛化句挂到一个事实 ID。current-state 可以保留全部作者事实，其他节点只列自己实际使用的事实。
+
+禁止把任何未列在作者材料中的具体名词、人物状态、过往信息、操作步骤、精确量化或既成结果写进曲线。已由作者明确写出的期限、承诺、关系、物件或目标动作可以逐字作为条件保留，但不能扩写成场景或操作。
+
+方向词必须以用户请求中的“方向层级硬约束”为准；只可作为紧贴原文锚点的抽象连接，不能自行套用未选择的反差、成长或其他题材词。反差的早期节点必须写“原有安排、旧办法、局限、反而或失效”之一，后期选择或变化节点也必须写“旧办法、原有安排、局限、反而、失效或重新”之一；成长的选择节点必须写“选择、承担、承认、放下、接受或重新”之一，变化节点必须写“改变、成长、理解、学会、调整或重新”之一。严格遵守上一轮失败原因，整条曲线重新写，不要复制上一版句子。
+
+安全句式是：trigger=“暂定：[原文期限/承诺/关系]使[原文目标]停住”；escalation=“暂定：继续[原文目标]会承担[原文承诺/关系/条件]的取舍”；climax-choice=“暂定：[主体]必须在[原文目标]与[原文承诺/关系]之间选择”；resolution=“暂定：这次选择让[原有安排/旧办法]不再照旧，并重新理解[原文目标或承诺]”。方括号必须替换为输入中的短语，不能新增名词。`
 
 function buildCurveGenerationPrompt(
   idea: string,
@@ -3020,13 +3779,186 @@ function buildCurveGenerationPrompt(
   brief: CreativeBrief,
   design: StoryDesignRecord,
   excludedProposalDetails: readonly string[] = [],
+  repairMessage?: string,
 ): string {
-  return `用户原始想法：\n${idea}\n\n不可丢失的原始材料：\n${JSON.stringify(design.sourceFacts.map((fact) => ({ id: fact.id, text: fact.text })))}\n\n可保留的原始信息：\n${JSON.stringify({ subject: seed.subject, activeSituation: seed.activeSituation, lockedGoal: seed.lockedGoal, lockedFacts: seed.lockedFacts })}\n\n作者创意方向：\n${JSON.stringify({
+  return buildCompactCurveGenerationPrompt(idea, seed, brief, design, excludedProposalDetails, repairMessage)
+  /*
+  return `用户原始想法：\n${idea}\n\n不可丢失的原始材料（只能从这里选择 sourceFactIds，不能改写成新事实）：\n${JSON.stringify(design.sourceFacts.map((fact) => ({ id: fact.id, text: fact.text })))}\n\n可保留的原始信息：\n${JSON.stringify({ subject: seed.subject, activeSituation: seed.activeSituation, lockedGoal: seed.lockedGoal, lockedFacts: seed.lockedFacts })}\n\n作者创意方向：\n${JSON.stringify({
     tones: brief.tones.map((tone) => creativeToneLabels[tone]),
     dramaticForces: brief.dramaticForces.map((force) => dramaticForceLabels[force]),
     allowSystemNamedCharacters: brief.allowSystemNamedCharacters,
     note: brief.note ?? '',
-  })}\n\n戏剧机制必须是：${getDramaticMechanism(brief)}。每条原始材料都必须至少被一个 beat 的 sourceFactIds 引用；无法纳入时不要编造，直接返回空数组让系统向作者说明。${excludedProposalDetails.length ? `以下提案已经被作者拒绝，不能在新版本中重现：${JSON.stringify(excludedProposalDetails)}` : ''}\n请给出一条主张明确、因果递进的暂定曲线。`
+  })}\n\n戏剧机制必须是：${getDramaticMechanism(brief)}。${getCurveBriefQualityInstruction(brief)}每条原始材料都必须至少被一个 beat 的 sourceFactIds 引用；sourceFactIds 必须是上面给出的真实 ID，不能省略、伪造或重复。不要输出 foundation、title 以外的额外字段；服务端会从通过校验的 beats 构造共享 foundation。不要输出 dependsOn、causalAnchor 或节点 title。${excludedProposalDetails.length ? `以下提案已经被作者拒绝，不能在新版本中重现：${JSON.stringify(excludedProposalDetails)}` : ''}${repairMessage ? `\n上一版未通过校验：${repairMessage}。请只重写 title 和 5 个 beats，不要沿用不合格字段；仍然只写抽象结构句，不要写场景动作、对白、设备操作、精确时间、数量、永久后果或“倒数”等词。不要把上一版的具体句子带入新版本。` : ''}\n请给出一条主张明确、因果递进的暂定曲线。`
+  */
+}
+
+function buildCompactCurveGenerationPrompt(
+  idea: string,
+  seed: StorySeed,
+  brief: CreativeBrief,
+  design: StoryDesignRecord,
+  excludedProposalDetails: readonly string[],
+  repairMessage?: string,
+): string {
+  const sourceFacts = design.sourceFacts.map((fact) => ({
+    id: fact.id,
+    text: fact.text,
+    anchor: getModelCurveFactAnchor(fact.text),
+  }))
+  const directionTerms = [
+    ...brief.dramaticForces.map((force) => dramaticForceLabels[force]),
+    ...brief.tones.map((tone) => creativeToneLabels[tone]),
+  ]
+  const directionRequirements = getModelDirectionRequirements(brief)
+  const sourceFactIds = sourceFacts.map((fact) => fact.id)
+  return [
+    '只输出 JSON：对象只能有 title、beats；beats 恰好 5 项，每项只能有 kind、detail、sourceFactIds。',
+    'kind 顺序固定：current-state、trigger、escalation、climax-choice、resolution。不要输出 foundation、dependsOn、causalAnchor、title 或其他键。',
+    'current-state 只保留作者原文；其他四项以“暂定：”开头，每项是一句抽象因果，不写场景、动作、对白、未经确认的道具、数字或既成结果。作者原文已明确的期限、承诺、关系、人物或物件可以作为条件直接保留，不能用泛化词替换后又声称保留了该事实。',
+    `作者选择的方向：${directionTerms.join('、') || '开放方向'}；每个所选方向都必须先影响目标受阻或取舍升级，再影响主动选择或结局变化，并让每项推进不同因果。`,
+    `方向层级硬约束（列出的词是允许的抽象连接，不是新增事实）：${directionRequirements || '保持抽象因果并避免模板重复。'}`,
+    `方向节点最低可审阅形状：${getModelDirectionMarkerInstruction(brief)}`,
+    '安全结构：trigger=目标为什么停住；escalation=继续目标会承担什么取舍；climax-choice=主角在两端之间的主动选择；resolution=选择造成的可辨认变化。',
+    `用户原始想法：${idea}`,
+    `原始材料（sourceFactIds 只能从这里复制；anchor 是可逐字核对的原文短语）：${JSON.stringify(sourceFacts)}`,
+    `事实覆盖清单：整条曲线（current-state 可承接背景）必须覆盖每个 ID：${sourceFactIds.join('、') || '无'}。sourceFactIds 是可审阅的事实声明：单个提案节点只列 detail 中实际出现的事实 ID；每个 ID 都必须在 detail 中保留其 anchor 或原文的另一个有区分度连续短语（至少三个字）。没有写进 detail 的材料不要列 ID；不能把“原有安排”“既有条件”“当前问题”等泛化句挂到任何未出现的事实 ID。`,
+    buildModelCurveFactAnchoringContract(design, seed),
+    `已确认的原始信息：${JSON.stringify({ subject: seed.subject, activeSituation: seed.activeSituation, lockedGoal: seed.lockedGoal, lockedFacts: seed.lockedFacts })}`,
+    `创意方向：${JSON.stringify(brief)}`,
+    ...(excludedProposalDetails.length ? [`已拒绝提案，不能重现：${JSON.stringify(excludedProposalDetails)}`] : []),
+    ...(repairMessage ? [
+      `本轮修复要求：${repairMessage}`,
+      `本轮只允许复用这些作者原文锚点：${JSON.stringify({ goal: seed.lockedGoal, facts: seed.lockedFacts })}。方向层级硬约束中列出的抽象词可以作为连接词，但必须紧贴这些锚点，不能独立变成新事实。请整条重写，只输出上述 5 个 beat；不要从亲属、身份、物件或常识推断额外背景、人物意图、具体场景或结果，也不要沿用上一轮句子。`,
+      buildModelFactRepairMap(design),
+    ] : []),
+    '严格按示例形状输出：{"title":"暂定主线","beats":[{"kind":"current-state","detail":"作者当前处境","sourceFactIds":["source-fact-1"]},{"kind":"trigger","detail":"暂定：既有条件使目标停住","sourceFactIds":["source-fact-2"]},{"kind":"escalation","detail":"暂定：继续目标会承担具体取舍","sourceFactIds":["source-fact-3"]},{"kind":"climax-choice","detail":"暂定：主角必须在两端之间选择","sourceFactIds":["source-fact-3"]},{"kind":"resolution","detail":"暂定：选择带来可辨认的变化","sourceFactIds":["source-fact-2"]}]}',
+  ].join('\n')
+}
+
+function buildModelFactRepairMap(design: StoryDesignRecord): string {
+  return `事实 ID 修复表（只可照抄对应短语）：${JSON.stringify(design.sourceFacts.map((fact) => ({
+    id: fact.id,
+    exactAnchor: getModelCurveFactAnchor(fact.text),
+  })))}。若某个节点没有照抄某一行的 exactAnchor，就不要在该节点列出那个 ID；不要为了覆盖清单把 ID 挂到近义句上。`
+}
+
+function getModelCurveFactAnchor(value: string): string {
+  const candidates = getModelFactAnchors(value)
+  const normalized = normalizeCurveEvidence(value)
+  const selected = candidates.find((candidate) => candidate !== normalized && candidate.length >= 4)
+    ?? value.trim().replace(/^(?:却|但|同时|并且|她|他|我|我们)\s*/u, '')
+  if (selected.length <= 42) return selected
+  return selected.slice(0, 42)
+}
+
+function buildModelCurveFactAnchoringContract(
+  design: StoryDesignRecord,
+  seed: StorySeed,
+): string {
+  const sourceFacts = design.sourceFacts
+  const goalFact = sourceFacts.find((fact) => (
+    Boolean(seed.lockedGoal) && hasModelSourceFactEvidence(seed.lockedGoal!, fact.text)
+  ))
+  // A scene observation belongs in current-state. It can inform the author's
+  // review, but should not become the structure card's causal premise just
+  // because it appears first in the input. Prefer the facts that actually
+  // constrain a decision: deadline, commitment, or an explicit blocking fact.
+  const urgencyFacts = sourceFacts.filter((fact) => (
+    /(?:今晚|明早|周[一二三四五六日天]|归还|截止|期限|倒数|必须在[^，。！？；]{0,24}前|要在[^，。！？；]{0,24}前)/u.test(fact.text)
+  ))
+  const commitmentFacts = sourceFacts.filter((fact) => (
+    /(?:答应|承诺|约定|保证|不再|不要|不得|必须)/u.test(fact.text)
+  ))
+  const blockingFacts = sourceFacts.filter((fact) => (
+    /(?:缺失|卖掉|无法|不能|冲突|分歧|阻碍|失去|取消|拒绝|失败)/u.test(fact.text)
+  ))
+  const relationshipFacts = sourceFacts.filter((fact) => (
+    /(?:姐姐|哥哥|弟弟|妹妹|朋友|队友|家人|同事|伴侣|父亲|母亲)/u.test(fact.text)
+  ))
+  const sceneObservationFacts = new Set(sourceFacts.filter((fact) => (
+    /(?:看到|发现|听见|收到|拿到|在[^，。！？；]{0,28}(?:里|中))/u.test(fact.text)
+  )))
+  const nonSceneFacts = sourceFacts.filter((fact) => !sceneObservationFacts.has(fact))
+  const pickFirst = (...groups: Array<readonly StorySourceFact[]>): StorySourceFact | undefined => (
+    groups.flat().find((fact) => Boolean(fact))
+  )
+  const triggerFact = pickFirst(
+    urgencyFacts,
+    commitmentFacts,
+    blockingFacts,
+    relationshipFacts,
+    nonSceneFacts.filter((fact) => fact.id !== goalFact?.id),
+    nonSceneFacts,
+  )
+  const escalationFact = pickFirst(
+    blockingFacts.filter((fact) => fact.id !== triggerFact?.id),
+    commitmentFacts.filter((fact) => fact.id !== triggerFact?.id),
+    relationshipFacts.filter((fact) => fact.id !== triggerFact?.id),
+    urgencyFacts.filter((fact) => fact.id !== triggerFact?.id),
+    nonSceneFacts.filter((fact) => fact.id !== triggerFact?.id && fact.id !== goalFact?.id),
+    nonSceneFacts.filter((fact) => fact.id !== triggerFact?.id),
+  )
+    ?? triggerFact
+    ?? sourceFacts[0]
+  const goal = goalFact ?? sourceFacts.at(-1) ?? sourceFacts[0]
+
+  if (!triggerFact || !escalationFact || !goal) {
+    return '事实锚点规则：没有可逐字核对的作者材料时，不要编造 sourceFactIds 或补出新事件。'
+  }
+
+  return [
+    '按以下事实锚点写（并按槽位分配），sourceFactIds 必须与槽位中的逐字锚点一一对应，不要只复述 ID：',
+    `- trigger 槽位：只列 ${triggerFact.id}；detail 必须照抄“${getModelCurveFactAnchor(triggerFact.text)}”，再说明它怎样让目标停住。`,
+    `- escalation 槽位：只列 ${escalationFact.id}；detail 必须照抄“${getModelCurveFactAnchor(escalationFact.text)}”，再说明继续目标的具体取舍。`,
+    `- climax-choice 槽位：优先只列 ${goal.id}；detail 必须照抄“${getModelCurveFactAnchor(goal.text)}”，并写出主角在两端之间的主动选择。`,
+    `- resolution 槽位：优先只列 ${goal.id}；detail 必须照抄“${getModelCurveFactAnchor(goal.text)}”，并写出选择后的抽象变化。`,
+    'current-state 可以列出全部 sourceFactIds 以保留完整原始处境；其余节点不要为了覆盖清单而挂上没有写进 detail 的 ID。',
+  ].join('\n')
+}
+
+function getModelDirectionRequirements(brief: CreativeBrief): string {
+  return getCreativeDirectionEvidenceRequirements(brief)
+    .map((requirement) => (
+      `${requirement.label}：${requirement.earlyKinds.join('/')} 要写出${requirement.earlyInstruction}；${requirement.lateKinds.join('/')} 要写出${requirement.lateInstruction}`
+    ))
+    .join('；')
+}
+
+function getModelDirectionMarkerInstruction(brief: CreativeBrief): string {
+  const markers: string[] = []
+  for (const force of brief.dramaticForces) {
+    if (force === 'contrast') {
+      markers.push('反差：trigger 或 escalation 逐字出现“原有安排/旧办法/局限/反而/失效”之一，climax-choice 或 resolution 出现“重新/不再照旧”之一')
+    } else if (force === 'cost') {
+      markers.push('代价：trigger 或 escalation 出现“承担/放弃/失去/保留/取舍”之一，climax-choice 或 resolution 出现“在……与……之间选择/取舍”或明确写出承担、放弃的一端')
+    } else if (force === 'relationship-tension') {
+      markers.push('关系：trigger 或 escalation 写出已确认的承诺/关系/分歧，climax-choice 或 resolution 写出主角如何回应该关系')
+    } else if (force === 'misunderstanding') {
+      markers.push('误会：trigger 或 escalation 写出信息缺口/疑问，climax-choice 或 resolution 写出澄清或理解的选择')
+    } else if (force === 'surprise') {
+      markers.push('意外：trigger 或 escalation 写出已确认条件造成的打断/变化，climax-choice 或 resolution 写出调整或重新选择')
+    }
+  }
+  return markers.join('；') || '每个方向词都必须紧贴作者锚点并推进不同因果。'
+}
+
+function getCurveBriefQualityInstruction(brief: CreativeBrief): string {
+  const forceHints = brief.dramaticForces.map((force) => {
+    if (force === 'relationship-tension') return '关系、承诺、回应或分歧'
+    if (force === 'misunderstanding') return '误会、信息差或澄清'
+    if (force === 'cost') return '代价、放弃或承担'
+    if (force === 'surprise') return '意外、变化或时机'
+    return '反差、旧办法的局限或重新选择'
+  })
+  const toneHints = brief.tones.map((tone) => {
+    if (tone === 'growth') return '改变、重新或承担'
+    if (tone === 'friendship' || tone === 'romance') return '信任、心意或关系'
+    if (tone === 'mystery') return '信息、疑问或解释'
+    if (tone === 'comedy') return '尴尬、体面或反差'
+    if (tone === 'warm') return '理解、照顾或彼此'
+    return '规则、边界或未知'
+  })
+  return `至少三条非 current-state 节点要明确承接戏剧机制（可使用：${[...forceHints, ...toneHints].join('、')}），并让每一条的因果作用不同；不要只重复同一句。请按不同层次推进：character-tension 写关系/承诺如何形成牵制，trigger 写该牵制如何让目标停住，escalation 写继续目标要承担的代价或分歧，midpoint-turn 写旧办法为何失效并需要重新理解，climax-choice 写主角在两端之间的主动选择，resolution 写选择带来的关系或自我改变。至少两条节点各自明确出现戏剧力量词，至少两条各自明确出现故事感觉词；这些词必须服务于不同因果，不要机械重复。`
 }
 
 function buildCurveBeatRegenerationPrompt(

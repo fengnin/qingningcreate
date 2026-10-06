@@ -11,10 +11,69 @@ export class AppError extends Error {
     public readonly conflictCoreContextPrefill?: StoryConflictCoreContextPrefill,
     public readonly systemDraftPrefill?: StoryConflictCoreSystemDraft,
     public readonly retryAfterMs?: number,
+    public readonly modelDiagnostic?: ModelFailureDiagnostic,
   ) {
     super(message)
     this.name = 'AppError'
   }
+}
+
+/**
+ * Safe, server-side-only information about a failed model request.  It is
+ * deliberately limited to shape and transport metadata; prompts, API keys and
+ * raw model text must never be copied into this object.
+ */
+export interface ModelResponseSummary {
+  kind: 'object' | 'array' | 'string' | 'number' | 'boolean' | 'null' | 'undefined'
+  topLevelKeys?: string[]
+  fieldShapes?: Record<string, string>
+  choicesCount?: number
+  firstChoiceKeys?: string[]
+  contentType?: string
+  contentLength?: number
+  errorKeys?: string[]
+}
+
+export interface ModelFailureDiagnostic {
+  stage: string
+  attempt?: number
+  maxAttempts?: number
+  httpStatus?: number
+  responseFormat?: boolean
+  reason?: string
+  response?: ModelResponseSummary
+}
+
+/**
+ * Add a safe validation-stage diagnostic without copying model content into
+ * logs or API errors. Callers use this when JSON is parseable but fails a
+ * domain contract after the transport layer has already succeeded.
+ */
+export function withModelDiagnostic(
+  error: unknown,
+  diagnostic: ModelFailureDiagnostic,
+): AppError {
+  if (error instanceof AppError) {
+    return new AppError(
+      error.message,
+      error.statusCode,
+      error.code,
+      error.conflictCoreContextPrefill,
+      error.systemDraftPrefill,
+      error.retryAfterMs,
+      { ...error.modelDiagnostic, ...diagnostic, response: error.modelDiagnostic?.response ?? diagnostic.response },
+    )
+  }
+
+  return new AppError(
+    '模型返回内容未通过结构校验，请重试。',
+    502,
+    'INVALID_MODEL_OUTPUT',
+    undefined,
+    undefined,
+    undefined,
+    diagnostic,
+  )
 }
 
 const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions'
@@ -51,6 +110,7 @@ interface QwenCompletionOptions {
   userPrompt: string
   temperature?: number
   maxTokens?: number
+  diagnosticStage?: string
 }
 
 export async function requestQwenJson({
@@ -58,6 +118,7 @@ export async function requestQwenJson({
   userPrompt,
   temperature = 0.8,
   maxTokens = 2_500,
+  diagnosticStage = 'qwen-json',
 }: QwenCompletionOptions): Promise<unknown> {
   // Keep local contract and end-to-end checks deterministic without requiring
   // network access. Production behavior is unchanged unless this explicit
@@ -83,7 +144,7 @@ export async function requestQwenJson({
   }
 
   try {
-    return await sendRequestWithRetry(request, apiKey)
+    return await sendRequestWithRetry(request, apiKey, diagnosticStage)
   } catch (error) {
     if (
       error instanceof AppError
@@ -91,27 +152,34 @@ export async function requestQwenJson({
       && /response[_\s-]?format/i.test(error.message)
     ) {
       const { response_format: _responseFormat, ...fallbackRequest } = request
-      return sendRequestWithRetry(fallbackRequest, apiKey)
+      return sendRequestWithRetry(fallbackRequest, apiKey, `${diagnosticStage}:without-response-format`)
     }
 
     throw error
   }
 }
 
-async function sendRequestWithRetry(request: QwenRequest, apiKey: string): Promise<unknown> {
+async function sendRequestWithRetry(request: QwenRequest, apiKey: string, diagnosticStage: string): Promise<unknown> {
   let lastError: unknown
 
   for (let attempt = 0; attempt < MAX_QWEN_REQUEST_ATTEMPTS; attempt += 1) {
     try {
       return await sendRequest(request, apiKey)
     } catch (error) {
-      lastError = error
-      if (!isRetryableQwenRequestError(error) || attempt === MAX_QWEN_REQUEST_ATTEMPTS - 1) {
-        throw error
+      const enrichedError = attachModelDiagnostic(error, {
+        stage: diagnosticStage,
+        attempt: attempt + 1,
+        maxAttempts: MAX_QWEN_REQUEST_ATTEMPTS,
+        responseFormat: Boolean(request.response_format),
+      })
+      lastError = enrichedError
+      logModelFailure(enrichedError)
+      if (!isRetryableQwenRequestError(enrichedError) || attempt === MAX_QWEN_REQUEST_ATTEMPTS - 1) {
+        throw enrichedError
       }
 
-      const retryDelayMs = getQwenRetryDelayMs(error, attempt)
-      if (retryDelayMs === undefined) throw error
+      const retryDelayMs = getQwenRetryDelayMs(enrichedError, attempt)
+      if (retryDelayMs === undefined) throw enrichedError
 
       await waitForRetry(retryDelayMs)
     }
@@ -137,10 +205,16 @@ async function sendRequest(request: QwenRequest, apiKey: string): Promise<unknow
     const responseBody = await readResponseBody(response)
 
     if (!response.ok) {
-      throw createQwenError(response.status, responseBody, getRetryAfterMs(response.headers.get('retry-after')))
+      throw createQwenError(
+        response.status,
+        responseBody,
+        getRetryAfterMs(response.headers.get('retry-after')),
+        summarizeModelResponse(responseBody),
+      )
     }
 
-    return parseModelJson(getMessageContent(responseBody))
+    const responseSummary = summarizeModelResponse(responseBody)
+    return parseModelJson(getMessageContent(responseBody), responseSummary)
   } catch (error) {
     if (error instanceof AppError) throw error
 
@@ -164,9 +238,18 @@ async function readResponseBody(response: Response): Promise<unknown> {
   }
 }
 
-function createQwenError(statusCode: number, responseBody: unknown, retryAfterMs?: number): AppError {
+function createQwenError(
+  statusCode: number,
+  responseBody: unknown,
+  retryAfterMs?: number,
+  response?: ModelResponseSummary,
+): AppError {
   if (statusCode === 401 || statusCode === 403) {
-    return new AppError('Qwen API Key 无效或没有调用权限。', 502, 'QWEN_AUTH_ERROR')
+    return new AppError('Qwen API Key 无效或没有调用权限。', 502, 'QWEN_AUTH_ERROR', undefined, undefined, undefined, {
+      stage: 'qwen-upstream',
+      httpStatus: statusCode,
+      response,
+    })
   }
 
   if (statusCode === 429) {
@@ -177,6 +260,7 @@ function createQwenError(statusCode: number, responseBody: unknown, retryAfterMs
       undefined,
       undefined,
       retryAfterMs,
+      { stage: 'qwen-upstream', httpStatus: statusCode, response },
     )
   }
 
@@ -189,6 +273,7 @@ function createQwenError(statusCode: number, responseBody: unknown, retryAfterMs
       undefined,
       undefined,
       retryAfterMs,
+      { stage: 'qwen-upstream', httpStatus: statusCode, response },
     )
   }
 
@@ -196,6 +281,10 @@ function createQwenError(statusCode: number, responseBody: unknown, retryAfterMs
     upstreamMessage || 'Qwen 拒绝了本次请求，请检查模型和服务配置。',
     502,
     'QWEN_REQUEST_ERROR',
+    undefined,
+    undefined,
+    undefined,
+    { stage: 'qwen-upstream', httpStatus: statusCode, response },
   )
 }
 
@@ -229,12 +318,18 @@ function waitForRetry(delayMs: number): Promise<void> {
 
 function getMessageContent(responseBody: unknown): string {
   if (!isRecord(responseBody)) {
-    throw new AppError('Qwen 返回了无法读取的内容，请重试。', 502, 'QWEN_INVALID_RESPONSE')
+    throw new AppError('Qwen 返回了无法读取的内容，请重试。', 502, 'QWEN_INVALID_RESPONSE', undefined, undefined, undefined, {
+      stage: 'qwen-response-shape',
+      response: summarizeModelResponse(responseBody),
+    })
   }
 
   const choices = responseBody.choices
   if (!Array.isArray(choices) || !isRecord(choices[0]) || !isRecord(choices[0].message)) {
-    throw new AppError('Qwen 没有返回可用内容，请重试。', 502, 'QWEN_EMPTY_RESPONSE')
+    throw new AppError('Qwen 没有返回可用内容，请重试。', 502, 'QWEN_EMPTY_RESPONSE', undefined, undefined, undefined, {
+      stage: 'qwen-response-shape',
+      response: summarizeModelResponse(responseBody),
+    })
   }
 
   const content = choices[0].message.content
@@ -250,10 +345,13 @@ function getMessageContent(responseBody: unknown): string {
     if (joinedContent) return joinedContent
   }
 
-  throw new AppError('Qwen 没有返回可用内容，请重试。', 502, 'QWEN_EMPTY_RESPONSE')
+  throw new AppError('Qwen 没有返回可用内容，请重试。', 502, 'QWEN_EMPTY_RESPONSE', undefined, undefined, undefined, {
+    stage: 'qwen-response-content',
+    response: summarizeModelResponse(responseBody),
+  })
 }
 
-function parseModelJson(content: string): unknown {
+function parseModelJson(content: string, response?: ModelResponseSummary): unknown {
   const cleanedContent = content
     .trim()
     .replace(/^```(?:json)?\s*/i, '')
@@ -273,8 +371,80 @@ function parseModelJson(content: string): unknown {
       }
     }
 
-    throw new AppError('Qwen 返回的格式不完整，请重试生成。', 502, 'QWEN_INVALID_JSON')
+    throw new AppError('Qwen 返回的格式不完整，请重试生成。', 502, 'QWEN_INVALID_JSON', undefined, undefined, undefined, {
+      stage: 'qwen-json-parse',
+      response: {
+        ...response,
+        kind: 'string',
+        contentType: 'string',
+        contentLength: content.length,
+      },
+    })
   }
+}
+
+export function summarizeModelResponse(value: unknown): ModelResponseSummary {
+  if (value === null) return { kind: 'null' }
+  if (value === undefined) return { kind: 'undefined' }
+  if (typeof value === 'string') return { kind: 'string', contentLength: value.length }
+  if (typeof value === 'number') return { kind: 'number' }
+  if (typeof value === 'boolean') return { kind: 'boolean' }
+  if (Array.isArray(value)) return { kind: 'array' }
+
+  const record = value as Record<string, unknown>
+  const summary: ModelResponseSummary = {
+    kind: 'object',
+    topLevelKeys: Object.keys(record).slice(0, 24),
+    fieldShapes: Object.fromEntries(
+      Object.entries(record)
+        .slice(0, 24)
+        .map(([key, field]) => [key, describeResponseFieldShape(field)]),
+    ),
+  }
+  if (Array.isArray(record.choices)) {
+    summary.choicesCount = record.choices.length
+    const firstChoice = record.choices[0]
+    if (isRecord(firstChoice)) {
+      summary.firstChoiceKeys = Object.keys(firstChoice).slice(0, 24)
+      if (isRecord(firstChoice.message)) {
+        const content = firstChoice.message.content
+        summary.contentType = Array.isArray(content) ? 'array' : typeof content
+        summary.contentLength = typeof content === 'string'
+          ? content.length
+          : Array.isArray(content)
+            ? content.reduce((length, part) => length + (isRecord(part) && typeof part.text === 'string' ? part.text.length : 0), 0)
+            : undefined
+      }
+    }
+  }
+  if (isRecord(record.error)) summary.errorKeys = Object.keys(record.error).slice(0, 12)
+  return summary
+}
+
+function describeResponseFieldShape(value: unknown): string {
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return `array(${value.length})`
+  if (typeof value === 'string') return `string(${value.length})`
+  if (typeof value === 'object') return 'object'
+  return typeof value
+}
+
+function attachModelDiagnostic(error: unknown, diagnostic: ModelFailureDiagnostic): AppError {
+  return withModelDiagnostic(
+    error instanceof AppError
+      ? error
+      : new AppError('Qwen 请求失败，请稍后重试。', 502, 'QWEN_UPSTREAM_ERROR'),
+    diagnostic,
+  )
+}
+
+function logModelFailure(error: AppError): void {
+  if (!error.modelDiagnostic) return
+  const diagnostic = {
+    ...error.modelDiagnostic,
+    code: error.code,
+  }
+  console.warn(`[qwen] model request failed ${JSON.stringify(diagnostic)}`)
 }
 
 function getErrorMessage(responseBody: unknown): string | undefined {

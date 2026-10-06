@@ -1,4 +1,4 @@
-import { AppError, requestQwenJson } from './qwen.js'
+import { AppError, requestQwenJson, summarizeModelResponse, withModelDiagnostic } from './qwen.js'
 import { createNarrativeStateMachine, type StoryValidationContext } from './storyState.js'
 import { formatStoryRealityContractContext, storyRealityContractInstruction } from './storyRealityContract.js'
 import {
@@ -286,6 +286,7 @@ const systemDraftCreativeHookUnsupportedDetailRules: readonly UnsupportedDetailR
   { label: '未经建立的外部结果', pattern: /(?:(?:交给|交由|转交)[^，。！？；\n]{0,16}(?:他人|别人|某人|其他(?:团队|部门|人))|(?:导致|造成|意味着)[^，。！？；\n]{1,18}(?:失去|错过|破裂|恶化|拒绝|受伤|泄露|暴露|转交|带走))/gu },
 ]
 
+
 // The second layer may establish a small current scene, but anything that
 // becomes a durable fact, route prerequisite, or stated consequence needs a
 // source. These patterns cover common ways a model turns an ordinary scene
@@ -349,6 +350,35 @@ const confirmedCurveContinuationUnsupportedDetailRules: readonly UnsupportedDeta
   {
     label: '未经确认的特权、捷径或使用记录',
     pattern: /(?:VIP|预约|快速通行(?:券|卡)?|通道卡|代排|走后门|特权(?:通道|待遇)?|使用过(?:\d+|[零〇一二两三四五六七八九十百千万亿半]+)次)/giu,
+  },
+]
+
+// The opening turn is the strictest boundary in a co-creation session. A
+// confirmed foundation permits the model to phrase the reviewed mechanism,
+// but it does not permit it to invent the concrete prop, timestamp, history,
+// or permanent outcome used to dramatise that mechanism. Literal source
+// matches remain allowed through findUnsupportedGeneratedDetailFromRules.
+const confirmedCurveFirstTurnUnsupportedDetailRules: readonly UnsupportedDetailRule[] = [
+  ...confirmedCurveContinuationUnsupportedDetailRules,
+  {
+    label: '未经确认的具体物件',
+    pattern: /(?:钥匙|纸条|信件|信封|背包|行李|雨伞|门锁|车票|相机|录音笔|耳机|银行卡|手环|礼物|药瓶|照片|镜子|绳子|刀具|现金)/gu,
+  },
+  {
+    label: '未经确认的相对时间',
+    pattern: /(?:今晚|明天|后天|今天|明早|明晚|凌晨|清晨|中午|下午|傍晚|夜里|几分钟|几小时|片刻后|不久后|截止|截至)/gu,
+  },
+  {
+    label: '未经确认的过去经历',
+    pattern: /(?:曾经|以前|过去|从前|童年|多年(?:前|来)|上一次|再次|重来)/gu,
+  },
+  {
+    label: '未经确认的永久后果',
+    pattern: /(?:从此|再也|永久|永远|不可逆|无法挽回|彻底失去|一劳永逸)/gu,
+  },
+  {
+    label: '未经确认的他人状态',
+    pattern: /(?:对方|朋友|他人|前队友|队友|陌生人|某人|她|他)[^，。！？；\n]{0,12}(?:已经|已|曾|决定|答应|拒绝|离开|到达|等待|知道|收到|同意|不愿|愿意|生气|沉默|失联)/gu,
   },
 ]
 
@@ -2343,6 +2373,17 @@ function extractGoalAnchorTerms(sourceTexts: string[]): string[] {
 }
 
 export async function generateDirections(request: StoryDirectionsRequest): Promise<StoryDirectionsResponse> {
+  // The legacy direction endpoint remains available for older clients, but a
+  // real-model request must obey the same author-detail gate as the default
+  // co-creation entry. Otherwise a sparse premise could bypass the curve
+  // workflow and receive concrete tickets, devices, or other invented hooks.
+  if (!isExplicitLocalModelMode() && !request.context) {
+    const preliminarySeed = createOriginalIdeaFallbackSeed(request.idea, undefined)
+    if (needsAuthorDetailBeforeCurve(request.idea, preliminarySeed)) {
+      throw createAuthorDetailRequiredError()
+    }
+  }
+
   if (request.storyId) {
     const session = getStorySession(request.storyId, request.revision)
     if (session.workflow === 'co-creation') {
@@ -2444,6 +2485,13 @@ async function startStoryCoCreationInternal(
   const seed: StorySeed = {
     ...seedWithoutSystemDraft,
     creativeBrief: request.brief,
+  }
+  // The deterministic local mode is reserved for regression/contract checks;
+  // it keeps the historical fixture workflow available. Real model mode must
+  // stop at an explicit clarification question instead of manufacturing a
+  // seven-beat generic curve from a bare premise.
+  if (!isExplicitLocalModelMode() && needsAuthorDetailBeforeCurve(request.idea, seed)) {
+    throw createAuthorDetailRequiredError()
   }
   const excludedProposalDetails = existingSession
     ? getRejectedCurveProposalDetails(existingSession)
@@ -2973,7 +3021,7 @@ export function looksLikeAuthorInstruction(text: string): boolean {
   return /(?:改成|改为|删掉|删除|移除|重写|调整(?:主线|结局|主题|人物|曲线)|不要(?:这个人物|悬疑|结局)|主题|故事方向|改故事|改主线|修改主线|作者指令|change\s+(?:the\s+)?(?:story|plot|main\s*line|ending|theme)|rewrite\s+(?:the\s+)?(?:story|plot|ending)|(?:remove|delete)\s+(?:the\s+)?(?:story|plot|relationship|conflict|character)|(?:change|remove|delete|rewrite)\s+.*\b(?:story|plot|main\s*line|ending|theme|conflict)\b)/u.test(normalized)
 }
 
-function createDirectCoCreationSeed(idea: string): StorySeed | undefined {
+export function createDirectCoCreationSeed(idea: string): StorySeed | undefined {
   const inferredAction = extractOriginalIdeaAction(idea)
   // This narrow path avoids asking a model to interpret an already explicit
   // one-line premise. Longer prose continues through normal seed extraction.
@@ -2985,6 +3033,26 @@ function createDirectCoCreationSeed(idea: string): StorySeed | undefined {
     lockedGoal: inferredAction.goal,
     expansionScope: 'keep-scale',
   }
+}
+
+function needsAuthorDetailBeforeCurve(idea: string, seed: Pick<StorySeed, 'lockedGoal'>): boolean {
+  const normalized = idea.trim()
+  if (!seed.lockedGoal?.trim()) return true
+  if (normalized.length < 12) return true
+
+  // A curve can expand a premise, but it cannot invent the first conflict for
+  // a bare noun or a goal-only sentence. Require at least one author-provided
+  // signal for an obstacle, deadline, commitment, choice, or relationship.
+  const hasConflictSignal = /(?:但|却|可是|然而|因为|所以|无法|不能|不得|必须|阻碍|冲突|期限|截止|之前|今晚|明天|答应|承诺|约定|不再|朋友|队友|家人|同事|前任|关系|是否|要不要|决定|选择|归还|提交|删除|公开|隐瞒)/u.test(normalized)
+  return !hasConflictSignal
+}
+
+function createAuthorDetailRequiredError(): AppError {
+  return new AppError(
+    '这个想法还缺少可以共同设计的具体阻碍、选择和代价。请先补充：主角现在要完成什么？什么会让它停住？需要在何时、对谁作出什么承诺？',
+    422,
+    'STORY_IDEA_NEEDS_AUTHOR_DETAIL',
+  )
 }
 
 function requireDraftCurve(session: StorySessionRecord, curveId: string): ProvisionalCurve {
@@ -3052,7 +3120,10 @@ async function resolveStorySeed(request: StoryDirectionsRequest): Promise<Resolv
       if (!isRetryableStorySeedExtractionError(error)) throw error
 
       repairMessage = getStorySeedExtractionRepairMessage(error)
-      console.warn(`Story seed extraction rejected (attempt ${attempt + 1}): ${getErrorIdentifier(error)}`)
+      console.warn(`Story seed extraction rejected (attempt ${attempt + 1}): ${JSON.stringify({
+        code: getErrorIdentifier(error),
+        diagnostic: error instanceof AppError ? error.modelDiagnostic : undefined,
+      })}`)
     }
   }
 
@@ -3085,6 +3156,16 @@ function isExplicitLocalModelMode(): boolean {
 
 function getStorySeedExtractionRepairMessage(error: unknown): string {
   if (error instanceof AppError && error.code === 'INVALID_MODEL_OUTPUT') {
+    const reason = error.modelDiagnostic?.reason ?? error.message
+    if (/worldMode/u.test(reason)) {
+      return 'worldMode 只能逐字填写 realistic-default 或 user-specified，不能使用中文标签。'
+    }
+    if (/lockedGoal|原文连续短语|逐字/u.test(reason)) {
+      return 'lockedGoal 和 lockedFacts 必须从原始念头连续逐字摘取；如果无法找到完整短语，lockedGoal 填 null。'
+    }
+    if (/lockedFacts/u.test(reason)) {
+      return 'lockedFacts 必须是 1 至 3 条非空、互不重复的原文连续短语。'
+    }
     return '上一版缺少必填字段，或没有逐字保留原始念头中的锁定信息。'
   }
 
@@ -3097,16 +3178,15 @@ export function createOriginalIdeaFallbackSeed(
 ): StorySeedDraft {
   const inferredAction = context?.goal ? undefined : extractOriginalIdeaAction(idea)
   const lockedGoal = context?.goal ?? inferredAction?.goal ?? null
-  // Keep the complete idea in activeSituation for traceability, but do not
-  // copy the whole paragraph into every later curve node.  The fallback seed
-  // needs a small set of independent anchors so the fact ledger can assign
-  // each one to a different causal beat.
+  // Keep the complete thought in activeSituation for auditability, while the
+  // locked facts retain the independent original clauses that the curve needs
+  // to trace. Putting the full paragraph first made every shorter clause look
+  // like a duplicate, so a failed seed extraction silently lost deadlines,
+  // promises and relationship facts before the curve validator could see them.
+  const atomicFacts = splitFallbackIdeaFacts(idea)
   const lockedFacts = dedupeFallbackFacts([
-    // Preserve the exact original thought as a traceable seed anchor. The
-    // story-design ledger performs the finer atomic dedupe before it reaches
-    // curve prose, so this does not reintroduce paragraph duplication there.
-    idea,
-    ...splitFallbackIdeaFacts(idea),
+    ...atomicFacts,
+    ...(atomicFacts.length <= 1 ? [idea] : []),
     ...[context?.stake, context?.constraint].filter((value): value is string => Boolean(value)),
   ]).slice(0, 5)
   const unknowns = [
@@ -3168,7 +3248,7 @@ function extractOriginalIdeaAction(idea: string): { subject: string; goal: strin
   // “青柠要在展出前送到学校；朋友要求不要署名；……” must keep the
   // later facts available to the ledger instead of promoting the whole
   // paragraph to one repeated goal.
-  const actionMatch = normalized.match(/^([\u4e00-\u9fff]{1,12}?)(想要|想|要|准备|打算|决定|去|看|向|提交|参加|寻找|归还|离开)([^，。！？；\r\n]+?)(?=[，。！？；\r\n]|$)/u)
+  const actionMatch = normalized.match(/^([\u4e00-\u9fff]{1,12}?)(想要|想|要|准备|打算|决定|答应|承诺|必须|需要|计划|安排|负责|去|看|向|提交|参加|寻找|归还|离开)([^，。！？；\r\n]+?)(?=[，。！？；\r\n]|$)/u)
   if (actionMatch) {
     const [, subject, verb, remainder] = actionMatch
     return createOriginalIdeaAction(subject, verb, remainder)
@@ -3235,11 +3315,26 @@ async function extractStorySeed(
     userPrompt: buildStorySeedPrompt(idea, repairMessage),
     temperature: attempt === 0 ? 0.1 : 0.05,
     maxTokens: 680,
+    diagnosticStage: 'story-seed-extraction',
   }, '模型没有识别出原始念头中的锁定信息，请重试。')
 
   // json_object models occasionally omit the schema's seed wrapper.
   const seedRecord = isPlainRecord(record.seed) ? record.seed : record
-  const seed = parseStorySeedDraft(seedRecord, invalidModelOutputContext)
+  let seed: StorySeedDraft
+  try {
+    seed = parseStorySeedDraft(seedRecord, invalidModelOutputContext)
+  } catch (error) {
+    const diagnostic = {
+      stage: 'story-seed-extraction:validation',
+      attempt: attempt + 1,
+      maxAttempts: maxStorySeedExtractionAttempts,
+      reason: error instanceof AppError ? error.message : '种子字段没有通过校验。',
+      response: summarizeModelResponse(seedRecord),
+    }
+    const enriched = withModelDiagnostic(error, diagnostic)
+    console.warn(`[story] model seed rejected ${JSON.stringify({ ...diagnostic, code: enriched.code })}`)
+    throw enriched
+  }
   return {
     seed,
     contextPrefill: parseStorySeedContextPrefill(seedRecord.contextPrefill, seed),
@@ -3255,7 +3350,14 @@ function assertStorySeedUsesOriginalText(idea: string, seed: StorySeedDraft) {
   ]
   const hasUnquotedValue = quotedValues.some((value) => !hasOriginalTextPhrase(idea, value))
   if (hasUnquotedValue) {
-    throw new AppError('模型没有逐字保留原始念头中的锁定事实或目标，请重试。', 502, 'INVALID_MODEL_OUTPUT')
+    throw withModelDiagnostic(
+      new AppError('模型没有逐字保留原始念头中的锁定事实或目标，请重试。', 502, 'INVALID_MODEL_OUTPUT'),
+      {
+        stage: 'story-seed-extraction:source-trace',
+        reason: 'subject、activeSituation、lockedGoal 或 lockedFacts 中至少一项不是原文连续短语。',
+        response: summarizeModelResponse(seed),
+      },
+    )
   }
 }
 
@@ -3661,10 +3763,14 @@ export function createSystemDraftCandidatePreservingFallback(
 
   const repairedDraft: StoryConflictCoreSystemDraft = {
     ...fallback,
-    origin: keptModelDirection ? 'model' : 'deterministic-fallback',
-    ...(keptModelDirection
-      ? { fallbackReason: '已保留可展开的创意方向，并替换超出第一层范围的分支。' }
-      : {}),
+    // This function is reached only after the complete model draft failed a
+    // contract check. Even when some individual branches survive collection,
+    // the resulting mixed set is a deterministic recovery and must never be
+    // reported as a fully validated model result.
+    origin: 'deterministic-fallback',
+    fallbackReason: keptModelDirection
+      ? '模型方向未整体通过校验，已保留可用材料并明确标为本地结构草案。'
+      : fallback.fallbackReason,
     directions: collector.directions,
   }
 
@@ -3969,6 +4075,7 @@ function getSystemDraftDirectionScopeIssue(
     if (unsupportedDetail) {
       return `${field.label}加入了不适合作为系统暂定钩子的${unsupportedDetail.label}“${unsupportedDetail.value}”`
     }
+
   }
 
   if (enforceCreativeShape && requireCreativeHook) {
@@ -4384,21 +4491,25 @@ export async function generateStory(request: StoryGenerationRequest): Promise<Ge
 
 export async function generateStoryTurn(request: StoryTurnRequest): Promise<StoryTurn> {
   let repairMessage: string | undefined
+  let lastFailure: AppError | undefined
   const state = createNarrativeStateForRequest(request)
   const maximumAttempts = usesSelectedSystemDraftDirection(request.seed)
     ? 1
     : maxStoryTurnGenerationAttempts
 
   for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+    let parsedTurn: StoryTurn | undefined
     try {
-      const outputFormat = getStoryTurnOutputFormat(attempt)
+      const outputFormat = getStoryTurnOutputFormat(request, attempt)
       const record = await requestModelRecord({
         systemPrompt: storyTurnSystemPrompt,
         userPrompt: buildStoryTurnPrompt(request, state, repairMessage, outputFormat),
         temperature: getStoryTurnTemperature(request.mode, attempt),
         maxTokens: storyTurnMaxTokens,
+        diagnosticStage: 'story-turn',
       }, '模型没有返回下一段可继续发展的故事情境，请重试。')
       const turn = parseModelStoryTurn(record, request, state, outputFormat)
+      parsedTurn = turn
       validateSystemDraftStoryTurnContinuation(request, turn)
       validateConfirmedCurveStoryTurnContinuation(request, turn)
       if (shouldReviewStoryTurnGrounding) {
@@ -4408,9 +4519,16 @@ export async function generateStoryTurn(request: StoryTurnRequest): Promise<Stor
     } catch (error) {
       if (!isRetryableStoryTurnError(error)) throw error
 
-      repairMessage = describeStoryTurnValidationFailure(error)
+      lastFailure = withModelDiagnostic(error, {
+        stage: 'story-turn-validation',
+        attempt: attempt + 1,
+        maxAttempts: maximumAttempts,
+        reason: error instanceof AppError ? error.message : '回合没有通过结构或事实边界校验。',
+        ...(parsedTurn ? { response: summarizeModelResponse(parsedTurn) } : {}),
+      })
+      repairMessage = describeStoryTurnValidationFailure(lastFailure)
       console.warn(
-        `Story turn rejected (mode=${request.mode}, confirmedTurns=${request.history.length}, format=${getStoryTurnOutputFormat(attempt)}, attempt=${attempt + 1}): ${repairMessage}`,
+        `Story turn rejected (mode=${request.mode}, confirmedTurns=${request.history.length}, format=${getStoryTurnOutputFormat(request, attempt)}, attempt=${attempt + 1}): ${repairMessage}`,
       )
     }
   }
@@ -4436,6 +4554,10 @@ export async function generateStoryTurn(request: StoryTurnRequest): Promise<Stor
     `模型连续 ${maximumAttempts} 次没有返回可用的下一情境（${repairMessage ?? '回合结构不完整'}），请再试一次。`,
     502,
     'STORY_TURN_RETRY_EXHAUSTED',
+    undefined,
+    undefined,
+    undefined,
+    lastFailure?.modelDiagnostic,
   )
 }
 
@@ -4472,10 +4594,13 @@ async function generateStoryTurnOptionRefinement(
   )
 }
 
-function getStoryTurnOutputFormat(attempt: number): StoryTurnOutputFormat {
-  // The detailed format gives the model explicit state references on the first
-  // attempt. A compact retry keeps the reader-facing turn while letting the
-  // server create the internal transition metadata.
+function getStoryTurnOutputFormat(request: Pick<StoryTurnRequest, 'confirmedCurve' | 'mode' | 'history'>, attempt: number): StoryTurnOutputFormat {
+  // The opening of a confirmed co-creation curve must not ask the model to
+  // invent state transitions before the author has selected an action. The
+  // compact contract keeps the model on reader-facing prose; the server owns
+  // the implicit, no-new-fact action records. Legacy turns still get the
+  // detailed contract on their first attempt.
+  if (request.confirmedCurve && request.mode === 'start' && request.history.length === 0) return 'compact'
   return attempt === 0 ? 'detailed' : 'compact'
 }
 
@@ -5218,6 +5343,7 @@ export function validateConfirmedCurveStoryTurnContinuation(
     request,
     getStoryTurnContinuationFields(turn, '当前回合'),
     '逐步发展',
+    turn,
   )
 }
 
@@ -5229,6 +5355,7 @@ function validateConfirmedCurveStoryTurnOptionContinuation(
     request,
     getStoryTurnOptionContinuationFields(option, '修改后的选择'),
     '逐步发展',
+    request.currentTurn,
   )
 }
 
@@ -5236,20 +5363,70 @@ function validateConfirmedCurveContinuationFields(
   request: SystemDraftContinuationRequest,
   fields: readonly GeneratedTextField[],
   stage: string,
+  turn?: StoryTurn,
 ) {
   if (!request.confirmedCurve) return
 
+  const sourceTexts = getConfirmedCurveContinuationSourceTexts(request)
+  const rules = isInitialConfirmedCurveTurn(request, turn)
+    ? confirmedCurveFirstTurnUnsupportedDetailRules
+    : confirmedCurveContinuationUnsupportedDetailRules
   const issue = findFirstUnsupportedGeneratedField(
-    getConfirmedCurveContinuationSourceTexts(request),
-    createFieldGroundingChecks(fields, confirmedCurveContinuationUnsupportedDetailRules),
+    sourceTexts,
+    createFieldGroundingChecks(fields, rules),
   )
-  if (!issue?.detail) return
+  if (issue?.detail) {
+    throw new AppError(
+      `已确认曲线后的${stage}${issue.field.label}加入了未确认的${issue.detail.label}“${issue.detail.value}”，请重试。`,
+      invalidModelOutputContext.statusCode,
+      'INVALID_MODEL_OUTPUT',
+    )
+  }
 
-  throw new AppError(
-    `已确认曲线后的${stage}${issue.field.label}加入了未确认的${issue.detail.label}“${issue.detail.value}”，请重试。`,
-    invalidModelOutputContext.statusCode,
-    'INVALID_MODEL_OUTPUT',
+  const namedCharacter = fields
+    .map((field) => findUnconfirmedNamedCharacter(field.value, sourceTexts, request.seed))
+    .find((candidate): candidate is string => Boolean(candidate))
+  if (namedCharacter) {
+    throw new AppError(
+      `已确认曲线后的${stage}引入了未确认的具名人物“${namedCharacter}”，请重试。`,
+      invalidModelOutputContext.statusCode,
+      'INVALID_MODEL_OUTPUT',
+    )
+  }
+
+  if (!isInitialConfirmedCurveTurn(request, turn)) return
+
+  const introducedFact = getFirstIntroducedConfirmedCurveTurnFact(turn)
+  if (introducedFact) {
+    throw new AppError(
+      `已确认曲线后的首回合不能把“${introducedFact}”写成未经作者选择的新事实，请只提供基于已确认材料的可选行动。`,
+      invalidModelOutputContext.statusCode,
+      'INVALID_MODEL_OUTPUT',
+    )
+  }
+}
+
+function isInitialConfirmedCurveTurn(
+  request: SystemDraftContinuationRequest,
+  turn: StoryTurn | undefined,
+): boolean {
+  return Boolean(
+    turn
+    && !turn.isConclusion
+    && turn.id === 'turn-1'
+    && (request.history?.length ?? 0) === 0,
   )
+}
+
+function getFirstIntroducedConfirmedCurveTurnFact(turn: StoryTurn | undefined): string | undefined {
+  if (!turn) return undefined
+  const transitions = turn.options.map((option) => option.transition)
+  if (turn.transition) transitions.push(turn.transition)
+  for (const transition of transitions) {
+    const fact = transition.introducedFacts.find((candidate) => candidate.statement.trim())
+    if (fact) return fact.statement.trim()
+  }
+  return undefined
 }
 
 function validateSystemDraftContinuationFields(
@@ -6160,6 +6337,7 @@ interface ModelRequestOptions {
   userPrompt: string
   temperature: number
   maxTokens: number
+  diagnosticStage?: string
 }
 
 async function requestModelRecord(
@@ -6167,7 +6345,21 @@ async function requestModelRecord(
   missingOutputMessage: string,
 ): Promise<Record<string, unknown>> {
   const modelOutput = await requestQwenJson(options)
-  return expectRecord(modelOutput, missingOutputMessage, invalidModelOutputContext)
+  try {
+    return expectRecord(modelOutput, missingOutputMessage, invalidModelOutputContext)
+  } catch (error) {
+    const diagnostic = {
+      stage: `${options.diagnosticStage ?? 'story-stage'}:response-schema`,
+      reason: error instanceof AppError ? error.message : '返回内容不是对象。',
+      response: summarizeModelResponse(modelOutput),
+    }
+    const enriched = withModelDiagnostic(error, diagnostic)
+    console.warn(`[story] model response rejected ${JSON.stringify({
+      ...diagnostic,
+      code: enriched.code,
+    })}`)
+    throw enriched
+  }
 }
 
 function getErrorIdentifier(error: unknown): string {
@@ -6769,7 +6961,7 @@ function buildSystemConflictCoreDraftPrompt(
   const goalInstruction = seed.lockedGoal
     ? `用户已确认目标“${seed.lockedGoal}”。服务端会直接保留它；请只生成 stake 和 constraint，不要返回 goal。`
     : '用户尚未确认具体行动目标。请生成 goal，并逐字保留原始念头中的主体、对象或关键事件。'
-  const creativeDirectionInstruction = `\n\n优先规则：第一层必须给出能让人继续读下去的创意钩子，而不是“条件尚未确认”“当前限制”“时间受限”一类可套用任何题材的分类。先从目标本身判断题材和可见载体，再为三条方向选择不同的戏剧杠杆：可以是与目标紧密相关的反常痕迹、身份或角色的错认、可见且不可轻易收回的代价、突然改变原有取舍的一次意外，或让普通目标变得尴尬/危险的反差。不要机械地让每个题材都出现“陌生字迹、一个陌生人、划掉名字”；去某处、交一份内容、见一个人、离开一地时，载体、反差和代价都应随行动而变化。每条都要让读者一眼看见一个反常画面，并能看出继续目标会碰到什么真正的取舍，但只保留这一项钩子。第三条不能只写“失去一件重要东西”这类没有形状的代价。每条 premise 都以“暂定：”开头，只引入一个当前物件、反常痕迹、错认、代价或有限意外；门票、手机、工作人员等普通词可以作为单一钩子的载体，但不能补出购买、支付、核验、通讯或机构流程，也不能扩成连续动作、被带去某处或既定路线。label 要给这个钩子命名，tradeoff 必须写成“……还是……”的实际取舍。此规则优先于后文任何抽象示例。${getSystemDraftPreferenceInstruction(preference)}`
+  const creativeDirectionInstruction = `\n\n优先规则：第一层必须给出能让人继续读下去的创意钩子，而不是“条件尚未确认”“当前限制”“时间受限”一类可套用任何题材的分类。先从目标本身判断题材和可见载体，再为三条方向选择不同的戏剧杠杆：可以是与目标紧密相关的反常痕迹、身份或角色的错认、可见且不可轻易收回的代价、突然改变原有取舍的一次意外，或让普通目标变得尴尬/危险的反差。不要机械地让每个题材都出现“陌生字迹、一个陌生人、划掉名字”；去某处、交一份内容、见一个人、离开一地时，载体、反差和代价都应随行动而变化。每条都要让读者一眼看见一个反常画面，并能看出继续目标会碰到什么真正的取舍，但只保留这一项钩子。第三条不能只写“失去一件重要东西”这类没有形状的代价。每条 premise 都以“暂定：”开头，只引入一个当前物件、反常痕迹、错认、代价或有限意外；门票、手机、工作人员等普通词可以作为单一钩子的载体，但不能补出购买、支付、核验、通讯或机构流程，也不能扩成连续动作、被带去某处或既定路线。label 要给这个钩子命名，tradeoff 必须写成“……还是……”的实际取舍。此规则优先于后文任何抽象示例。${getSystemDraftSeedScopeInstruction(seed)}${getSystemDraftPreferenceInstruction(preference)}`
   const repair = repairMessage
     ? `${creativeDirectionInstruction}\n上一版未通过结构检查：${repairMessage}。请完整重写三条方向，仍然不要补写背景或结果。`
     : creativeDirectionInstruction
@@ -6784,6 +6976,14 @@ ${formatStorySeed(seed)}
 
 系统正在为这个念头主动提出第一层创作方向。请提出一个共同故事起点，并在其中规划恰好三条彼此独立的创作分支。不要把系统暂定内容写成用户已经说过的事实；保留所有原始信息。${goalInstruction} stake 和 constraint 共同构成三条分支共享的起点；directions 中每一条 premise 和 tradeoff 只属于自己的分支，是用户可选择的系统暂定前提。三条 mechanismType 必须不同，且每条都要能单独支撑一条冲突核心。${repair}\n\n粒度必须保持最小：stake、constraint、每条 premise、每条 tradeoff 各只写一句，且只表达一个条件或一个取舍。共同 stake 和 constraint 不得凭原始信息新增资源、操作状态或解法。每条 premise 可以建立一个有限的当前前提，例如“暂定：目标相关的旧物上多出一句来历不明的话”；它只建立这一项钩子，不能补成完整场景、地点或连续动作。可补入与目标直接相关的当前物件、现场限制或匿名人物；普通物件和职业称谓可以作为一个钩子的载体，但不要补入姓名、长期关系、过去经历、心理状态、许可、资源权限、他人的确定回应或结局。不能借“暂定”写出某人当面承诺、物品归属、未经许可、具体交付方式或既定后果。除非原始念头明确给出，否则不要写精确数字、钟点、日期或倒计时，账号密码、设备故障或接口、网络电量、文书条款、机构流程、他人的既定状态或过去事件；也不要把主角自己的承诺改写成他人已经拒绝或禁止联系的边界，不要把内容未知改写成他人的偏好、意愿或期待，更不要写“先做什么再做什么”的操作流程。\n\n每条 directions 都必须保留共同目标，只提出一项最小、可编辑的分支前提，明确目标为什么会因此受阻以及继续时要接受什么取舍；不要把另外两条分支的前提混进来，也不要把三条分支写成同一故事中同时成立的事实。严格使用以下 JSON：
 ${getSystemConflictCoreDraftResponseSchema(seed)}`
+}
+
+function getSystemDraftSeedScopeInstruction(
+  seed: Pick<StorySeed, 'lockedGoal' | 'lockedFacts'>,
+): string {
+  if (hasSparseSystemDraftSeed(seed)) return ''
+
+  return '\n\n这是信息较完整的作者材料：不要新增便签、字迹、贴纸、信封、设备状态、工作人员、匿名人物或其他现场物件，也不要把方向写成一个小场景。三条方向必须分别从原文已有的目标、对象、期限、承诺或关系事实推导不同的因果机制；每条 premise 和 tradeoff 至少保留一个原文锚点，新增内容只能是抽象的阻碍、代价或取舍。'
 }
 
 function buildSystemDraftDirectionRecoveryPrompt(
@@ -7263,12 +7463,107 @@ function getSystemDraftContinuationSourceTexts(request: SystemDraftContinuationR
 }
 
 function getConfirmedCurveContinuationSourceTexts(request: SystemDraftContinuationRequest): string[] {
-  return [
-    ...getSystemDraftContinuationSourceTexts(request),
-    ...(request.confirmedCurve?.beats
-      .filter((beat) => beat.status !== 'rejected')
-      .map((beat) => beat.detail) ?? []),
+  const confirmedCurve = request.confirmedCurve
+  const foundation = confirmedCurve?.foundation ?? confirmedCurve?.design?.foundation
+  const sourceFacts = confirmedCurve?.design?.sourceFacts
+    .filter((fact) => fact.disposition === 'integrated')
+    .map((fact) => fact.text) ?? []
+  const confirmedBeatTexts = confirmedCurve?.beats
+    // A stale or rejected node is not an accepted story commitment. Only the
+    // frozen confirmed copy may authorize details in the next model turn.
+    .filter((beat) => beat.status === 'confirmed')
+    .flatMap((beat) => [beat.detail, beat.causalAnchor ?? '']) ?? []
+  const foundationTexts = foundation ? getConfirmedCurveFoundationSourceTexts(foundation) : []
+  const confirmedPathTexts = [
+    ...(request.history ?? []).flatMap((item, index) => (
+      getStoryTurnHistoryContinuationFields(item, index).map((field) => field.value)
+    )),
+    ...(request.currentTurn
+      ? getStoryTurnContinuationFields(request.currentTurn, '当前已展示回合').map((field) => field.value)
+      : []),
   ]
+
+  // Do not use predicament proposal fields here. They are convenient display
+  // prose, but they may contain a model's unconfirmed scene-level elaboration.
+  // The frozen foundation, integrated source ledger and confirmed beats are
+  // the only pre-story commitments that can ground the next model response.
+  return uniqueNonEmptySourceTexts([
+    request.idea,
+    request.seed.activeSituation,
+    request.seed.lockedGoal ?? '',
+    ...request.seed.lockedFacts,
+    ...sourceFacts,
+    ...foundationTexts,
+    ...confirmedBeatTexts,
+    ...request.predicament.facts
+      .filter((fact) => fact.mutability !== 'unknown')
+      .map((fact) => fact.statement),
+    request.approach.intent,
+    request.approach.cost,
+    ...(request.headTail ? getHeadTailContinuationFields(request.headTail, 0).map((field) => field.value) : []),
+    ...confirmedPathTexts,
+  ])
+}
+
+function uniqueNonEmptySourceTexts(values: readonly string[]): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const value of values) {
+    const normalized = value.trim()
+    if (!normalized || seen.has(normalized)) continue
+    seen.add(normalized)
+    result.push(normalized)
+  }
+  return result
+}
+
+function getConfirmedCurveFoundationSourceTexts(
+  foundation: NonNullable<ConfirmedCurve['foundation']>,
+): string[] {
+  return [
+    foundation.conflictCore.goal,
+    foundation.conflictCore.obstacle,
+    foundation.conflictCore.tradeoff,
+    foundation.preservedGoal,
+    foundation.predicament.title,
+    foundation.predicament.immediateSituation,
+    foundation.predicament.obstacle,
+    foundation.predicament.tradeoff,
+    foundation.predicament.urgency,
+    foundation.predicament.choice,
+    foundation.predicament.plausibleCost,
+    foundation.middleDevelopment.escalation,
+    foundation.middleDevelopment.midpoint,
+    foundation.middleDevelopment.climaxPressure,
+    foundation.storyEnds.opening,
+    foundation.storyEnds.openingClue,
+    foundation.storyEnds.climax,
+    foundation.storyEnds.resolution,
+    foundation.storyEnds.cost,
+    foundation.storyEnds.promise,
+    foundation.approach.intent,
+    foundation.approach.cost,
+  ]
+}
+
+function findUnconfirmedNamedCharacter(
+  value: string,
+  sourceTexts: readonly string[],
+  seed: Pick<StorySeed, 'subject'>,
+): string | undefined {
+  const establishedText = sourceTexts.join(' ')
+  const knownText = `${seed.subject} ${establishedText}`
+  const patterns = [
+    /(?:名叫|名字叫|名为|叫)[“「]?([\u4e00-\u9fff]{2,4})[”」]?/gu,
+    /(?:^|[\s，。；：、！？“”‘’「」『』（）()])([赵钱孙李周吴郑王冯陈褚卫蒋沈韩杨朱秦许何吕施张孔曹严华金魏陶姜戚谢邹喻范彭郎鲁韦昌马苗方俞任袁柳鲍史唐费廉薛雷贺倪汤滕殷罗毕郝邬安常乐于傅皮卞齐康伍余顾孟平黄穆萧尹姚邵汪祁毛狄米贝明成戴谈宋茅庞熊纪舒屈项祝董梁杜阮蓝闵席季贾路江童颜郭梅盛林刁钟徐邱骆高夏蔡田樊胡凌霍虞莫房裘解应宗丁宣邓洪包左石吉龚程邢裴陆荣翁荀惠甄曲封段武符刘景詹龙叶黎白][\u4e00-\u9fff]{1,2})(?=$|[\s，。；：、！？“”‘’「」『』（）()])/gu,
+  ]
+  for (const pattern of patterns) {
+    for (const match of value.matchAll(pattern)) {
+      const candidate = match[1]
+      if (candidate && !knownText.includes(candidate)) return candidate
+    }
+  }
+  return undefined
 }
 
 function getExpansionScopeInstruction(scope: StoryExpansionScope): string {
@@ -7345,11 +7640,15 @@ optionId 必须照抄输入，恰好审查全部三条。严格使用以下 JSON
 }
 
 function buildStoryTurnPrompt(
-  { idea, seed, predicament, approach, headTail, history, mode, confirmedCurve }: StoryTurnRequest,
+  request: StoryTurnRequest,
   state: StoryNarrativeState,
   repairMessage?: string,
   outputFormat: StoryTurnOutputFormat = 'detailed',
 ): string {
+  const { idea, seed, predicament, approach, headTail, history, mode, confirmedCurve } = request
+  if (confirmedCurve && mode === 'start' && history.length === 0 && outputFormat === 'compact') {
+    return buildConfirmedCurveFirstTurnPrompt(request, repairMessage)
+  }
   const modeInstruction = getStoryTurnModeInstruction(mode, history.length)
   const responseSchema = getStoryTurnResponseSchema(mode, outputFormat)
   const responseChecklist = getStoryTurnResponseChecklist(mode, outputFormat)
@@ -7366,9 +7665,10 @@ ${formatStoryTurnHistory(history)}
 ${JSON.stringify(state)}
 
 本次任务：${modeInstruction}
-${getSystemDraftTurnDirectionInstruction(seed, predicament, approach)}
-${getConfirmedCurveTurnConstraintInstruction(confirmedCurve)}
-${getStoryTurnRepairInstruction(repairMessage, outputFormat)}
+  ${getSystemDraftTurnDirectionInstruction(seed, predicament, approach)}
+  ${getConfirmedCurveTurnConstraintInstruction(confirmedCurve)}
+  ${getConfirmedCurveFirstTurnInstruction(request, outputFormat)}
+  ${getStoryTurnRepairInstruction(repairMessage, outputFormat)}
 
 请只生成这一次推进的结果，不要补写未来大纲。node.event 必须是一个可视、可行动的当前局面；node.purpose 要准确说明它如何由前一步的选择而来，以及它将怎样把故事推向预定高潮语义和结尾。conflict.action 描述主角此刻面临的行动方向，但不要代替用户从 options 中作选择。故事两端中的 climaxActionId 只说明最初方案的状态依据，不是收束回合必须复用的动作 ID。
 
@@ -7377,13 +7677,75 @@ ${getStoryTurnStateProtocolInstruction(outputFormat)}
 输出前只核对以下结构：${responseChecklist}
 
 严格使用以下 JSON 结构：
-${responseSchema}`
+  ${responseSchema}`
+}
+
+function buildConfirmedCurveFirstTurnPrompt(
+  request: Pick<StoryTurnRequest, 'idea' | 'seed' | 'confirmedCurve'>,
+  repairMessage?: string,
+): string {
+  const confirmedCurve = request.confirmedCurve
+  const foundation = confirmedCurve?.foundation ?? confirmedCurve?.design?.foundation
+  const confirmedBeats = confirmedCurve?.beats
+    .filter((beat) => beat.status === 'confirmed')
+    .map((beat) => ({ kind: beat.kind, detail: beat.detail })) ?? []
+  const sourceFacts = confirmedCurve?.design?.sourceFacts
+    .filter((fact) => fact.disposition === 'integrated')
+    .map((fact) => fact.text) ?? []
+  const foundationSummary = foundation
+    ? {
+      goal: foundation.conflictCore.goal,
+      obstacle: foundation.conflictCore.obstacle,
+      tradeoff: foundation.conflictCore.tradeoff,
+    }
+    : undefined
+  const repair = repairMessage
+    ? `\n上一次首回合被事实闸门拒绝：${repairMessage}。删除触发问题的具体词及其同类细节，只能回到下面的已确认短语和抽象模板。`
+    : ''
+
+  return `你是中文互动故事的开场编辑。现在只生成确认主线后的第一个可选择情境；不得写场景小说，不得补背景。
+
+原始想法（只用于核对，不得扩写）：${request.idea}
+已确认 seed：${JSON.stringify({
+    subject: request.seed.subject,
+    lockedGoal: request.seed.lockedGoal,
+    lockedFacts: request.seed.lockedFacts,
+  })}
+已确认曲线节点（只能从这些短语承接）：${JSON.stringify(confirmedBeats)}
+已确认原始事实：${JSON.stringify(sourceFacts)}
+已确认 foundation 核心：${JSON.stringify(foundationSummary)}
+
+硬性边界：除了上面列出的主体、目标、事实、节点和 foundation 短语，不得出现任何新的名词、人物回应、物件、设备、通讯、票券、机构流程、过去经历、日期、时刻、数量或永久结果。不要把“抽象阻碍”变成手机、柜台、门票、清晨、三步等具体细节；若缺少条件，就保留为“尚待决定”的取舍。不得把任何未来提案写成已经发生。
+请严格复制下方安全模板的语义，只替换方括号中的已确认短语；标题必须是“确认的阻碍”。三个选项只能是不同的判断方式，不能引入新的行动对象或事实：
+- 当前事件：［已确认阻碍］仍未解决，［主体］需要决定如何继续［已确认目标］。
+- 当前目的：承接已确认阻碍，暂不写出解决结果。
+- 当前冲突：［已确认阻碍］仍然存在。
+- 行动焦点：在［已确认取舍］两端判断。
+- 后果：原有安排仍然停住。
+- 问题：在不新增事实的情况下，现在先怎么决定？
+- 选项一：先承认阻碍；选项二：先保留目标；选项三：先明确取舍。每项的 action、immediateConsequence、laterEffect 都只能用上述短语和“承认、保留、明确、尚待决定、继续、停住”等抽象词。
+${repair}
+
+只输出 JSON，不要 Markdown、解释或额外字段：
+${storyTurnOngoingCompactResponseSchema}`
 }
 
 function getConfirmedCurveTurnConstraintInstruction(confirmedCurve: ConfirmedCurve | undefined): string {
   if (!confirmedCurve) return ''
 
   return '\n曲线约束：本回合建立在作者已确认的故事曲线上。曲线节点是唯一可用的结构前提；不要把抽象阻碍擅自具体化为未提出过的票券、会员或特权、预约、账号、设备、工作人员流程、使用记录、过去经历或他人决定。若缺少原因或条件，保留为尚待处理的未知，而不是为了制造戏剧性补设事实。'
+}
+
+function getConfirmedCurveFirstTurnInstruction(
+  request: Pick<StoryTurnRequest, 'confirmedCurve' | 'mode' | 'history'>,
+  outputFormat: StoryTurnOutputFormat,
+): string {
+  if (!request.confirmedCurve || request.mode !== 'start' || request.history.length > 0) return ''
+
+  const formatInstruction = outputFormat === 'compact'
+    ? '本次只输出紧凑叙事字段；服务端会为三个选项建立不改变事实的隐式行动。'
+    : '本次若使用详细结构，所有 effects 与 introducedFacts 必须为空；不得修改任何 fixed 事实。'
+  return `\n首回合事实闸门：这是确认主线后的第一个情境。${formatInstruction}只允许复述当前已确认 foundation、已确认 source facts、已确认曲线节点和作者已接受的方向；不要把未来的高潮、结局或提案写成已经发生。除这些材料外，不得新增人物、人物回应、物件、设备或通讯渠道、票券/凭证、机构流程、过去经历、精确或相对时间、永久后果。若某个因果条件尚未确认，就把它写成“尚待决定”的问题或取舍，不要用新事实填空。\n首回合采用抽象取舍写法：node.title、node.event、node.purpose、conflict、question、每个 option 的 label/action/immediateConsequence/laterEffect 只能使用主角、已锁定目标、已确认阻碍/承诺/取舍的原句或其不增加事实的抽象连接词；不要为了让情境更像现场而添加任何新的名词、时间词、数量词或动作对象。尤其不要写“手机、电话、柜台、门票、清晨、几步/几分钟”等未在已确认材料中出现的词。可以直接写“先承认阻碍”“暂不改变安排”“在两端之间选择”这类不改变事实的取舍。三个选项只应体现不同的当下判断，不得把任何选项写成已经发生的结果。`
 }
 
 function buildStoryTurnOptionRefinementPrompt(
@@ -7457,7 +7819,7 @@ function getStoryTurnRepairInstruction(
 ): string {
   if (!repairMessage) return ''
   if (outputFormat === 'compact') {
-    return '\n上一轮的详细内部结构没有通过检查；本次已改为紧凑叙事结构。请完整重写读者可见的当前情境和选项，不要输出或修复 narrativeAction、transition 等内部字段。'
+    return `\n上一轮紧凑回合没有通过事实闸门：${repairMessage}。请完整重写读者可见的当前情境和选项；删除触发该问题的词及其同类具体细节，改用已确认目标、阻碍和取舍的抽象表述。不要输出或修复 narrativeAction、transition 等内部字段。`
   }
 
   return `\n上一轮没有通过结构检查：${repairMessage}。请完整重做这一回合，不要沿用不合格字段。`
@@ -7916,13 +8278,14 @@ function parseStorySeedFields(
   message: string,
   maximumLockedFacts = maximumStorySeedLockedFacts,
 ): StorySeedDraft {
+  const fieldMessage = (field: string) => `${message}（字段 ${field} 不合法）`
   return {
-    subject: readText(record, 'subject', message, 160, context),
-    activeSituation: readText(record, 'activeSituation', message, 200, context),
-    lockedGoal: readNullableText(record, 'lockedGoal', message, 180, context),
-    lockedFacts: readRequiredTextList(record, 'lockedFacts', 1, maximumLockedFacts, maximumStorySeedLockedFactLength, message, context),
-    worldMode: readStoryWorldMode(record.worldMode, message, context),
-    unknowns: readRequiredTextList(record, 'unknowns', 1, 6, 48, message, context),
+    subject: readText(record, 'subject', fieldMessage('subject'), 160, context),
+    activeSituation: readText(record, 'activeSituation', fieldMessage('activeSituation'), 200, context),
+    lockedGoal: readNullableText(record, 'lockedGoal', fieldMessage('lockedGoal'), 180, context),
+    lockedFacts: readRequiredTextList(record, 'lockedFacts', 1, maximumLockedFacts, maximumStorySeedLockedFactLength, fieldMessage('lockedFacts'), context),
+    worldMode: readStoryWorldMode(record.worldMode, fieldMessage('worldMode'), context),
+    unknowns: readRequiredTextList(record, 'unknowns', 1, 6, 48, fieldMessage('unknowns'), context),
   }
 }
 
