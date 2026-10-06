@@ -102,6 +102,43 @@ const curveUnsupportedDetailRules: readonly { label: string; pattern: RegExp }[]
   { label: '未经确认的过去经历或人物意图', pattern: /(?:遗愿|遗嘱|生前|临终|童年|过去经历|历史背景|曾经|当年|旧日心愿|未说出口的愿望)/gu },
   { label: '未经确认的具体人数或永久后果', pattern: /(?:[零〇一二两三四五六七八九十百千万亿]+人|永久|永远|彻底|无法挽回|不可逆)/gu },
 ]
+// A visible source-fact anchor does not authorize a model to attach a new
+// value judgement, permission claim, relationship conclusion, or repair action
+// to that fact. Keep these patterns deliberately narrow: ordinary causal words
+// such as "改变"、"理解"、"关系" and "承担" remain available when they are
+// attached to the author's own wording. A matched phrase is allowed only when
+// that exact phrase already occurs in the author's material.
+const curveUnsupportedSemanticRules: readonly {
+  label: string
+  pattern: RegExp
+  allowEstablishedSubphrase?: boolean
+}[] = [
+  {
+    label: '未经确认的价值、意义或归属结论',
+    pattern: /(?:完整性|完整权|自我表达|共作意义|共作的意义|作品归属|归属|署名意义|手稿意义)/u,
+  },
+  {
+    label: '未经确认的权限或自主结论',
+    pattern: /(?:自主权|决定权|决策权|选择权|控制权|话语权)/u,
+  },
+  {
+    label: '未经确认的关系、承诺或责任结论',
+    pattern: /(?:信任边界|承诺边界|承诺的边界|关系边界|共同责任|共同记忆|共同承诺|伙伴关系|合作署名|共同署名|协作方|创作边界|关系裂痕|关系损耗|关系后果|失信于|单方延续)/u,
+  },
+  {
+    label: '未经确认的条件、标准或流程结论',
+    pattern: /(?:提交条件|交稿条件|判断标准|资格条件|出版社要求|具体要求|责任边界)/u,
+  },
+  {
+    label: '未经确认的复合意义或关系判断',
+    pattern: /(?:改变|重新理解|重新判断|重构|确认|定义|承认)[^，。！？；\n]{0,10}(?:意义|归属|完整性|边界|责任)/u,
+    allowEstablishedSubphrase: true,
+  },
+  {
+    label: '未经确认的补写、修复或完成操作',
+    pattern: /(?:补全|补写|修复|恢复|重建|填补|完善)(?:[^，。！？；\n]{0,10})(?:页|手稿|作品|短片|名字|署名|提交|交稿)/u,
+  },
+]
 const curveFallbackModelErrorCodes = new Set([
   'INVALID_MODEL_OUTPUT',
   'STORY_CURVE_MODEL_VALIDATION_FAILED',
@@ -379,6 +416,9 @@ function buildCurveModelRepairInstruction(error: AppError): string {
   }
   if (/英文|模板短语/u.test(reason)) {
     return '只使用简体中文，并且每一句都以作者原文中的目标、期限、承诺、关系或对象作为可核对的中心。'
+  }
+  if (/价值、意义或归属|权限或自主|关系、承诺或责任|条件、标准或流程|复合意义或关系|补写、修复或完成/u.test(reason)) {
+    return '删除附着在事实锚点上的新价值、归属、权限、关系、责任或修复结论；只保留作者原文逐字出现的条件和抽象的受阻、取舍、选择、变化。'
   }
   if (/dependsOn|beats|kind|JSON|结构/u.test(reason)) {
     return '只输出规定的五个节点和所要求的 JSON 字段，按固定顺序组织，不增加额外字段。'
@@ -1966,6 +2006,13 @@ function parseModelCurve(
       if (unsupported) {
         throwCurveModelValidationFailure(`beat ${item.kind} 引入了未建立的${unsupported.label}“${unsupported.value}”`, value)
       }
+      const unsupportedSemantic = findUnsupportedCurveSemanticLanguage(detail, seed, design)
+      if (unsupportedSemantic) {
+        throwCurveModelValidationFailure(
+          `beat ${item.kind} 写入了未由作者原文支持的${unsupportedSemantic.label}“${unsupportedSemantic.value}”`,
+          value,
+        )
+      }
       const languageLeak = findUnestablishedCurveLatinPhrase(detail, seed, design)
       if (languageLeak) {
         throwCurveModelValidationFailure(`beat ${item.kind} 包含未由作者材料支持的英文或模板短语“${languageLeak}”`, value)
@@ -2058,6 +2105,15 @@ function parseModelCurve(
       .find((issue): issue is { label: string; value: string } => Boolean(issue))
     if (foundationIssue) {
       throwCurveModelValidationFailure(`foundation 引入了未建立的${foundationIssue.label}“${foundationIssue.value}”`, value)
+    }
+    const foundationSemanticIssue = flattenFoundationTexts(suppliedFoundation)
+      .map((text) => findUnsupportedCurveSemanticLanguage(text, seed, design))
+      .find((issue): issue is { label: string; value: string } => Boolean(issue))
+    if (foundationSemanticIssue) {
+      throwCurveModelValidationFailure(
+        `foundation 写入了未由作者原文支持的${foundationSemanticIssue.label}“${foundationSemanticIssue.value}”`,
+        value,
+      )
     }
   }
   const plannedFoundation = buildStoryCurveFoundation(orderedBeats, brief, seed)
@@ -2257,6 +2313,35 @@ function findUnsupportedCurveDetail(
     if (match) return { label: rule.label, value: match }
   }
   return undefined
+}
+
+function findUnsupportedCurveSemanticLanguage(
+  value: string,
+  seed: StorySeed,
+  design: StoryDesignRecord,
+): { label: string; value: string } | undefined {
+  const established = normalizeCurveEvidence([
+    seed.activeSituation,
+    seed.lockedGoal ?? '',
+    ...seed.lockedFacts,
+    ...design.sourceFacts.map((fact) => fact.text),
+  ].join('\n'))
+
+  for (const rule of curveUnsupportedSemanticRules) {
+    const match = rule.pattern.exec(value)?.[0]
+    if (!match) continue
+    // The author may explicitly name a value or relationship concept. In that
+    // case it is part of the reviewed material rather than a model conclusion.
+    if (established.includes(normalizeCurveEvidence(match))) continue
+    if (rule.allowEstablishedSubphrase && hasEstablishedCurveSemanticSubphrase(match, established)) continue
+    return { label: rule.label, value: match }
+  }
+  return undefined
+}
+
+function hasEstablishedCurveSemanticSubphrase(value: string, normalizedEstablished: string): boolean {
+  const anchors = Array.from(value.matchAll(/(?:意义|归属|完整性|边界|责任)/gu)).map((match) => match[0])
+  return anchors.length > 0 && anchors.every((anchor) => normalizedEstablished.includes(normalizeCurveEvidence(anchor)))
 }
 
 function findUnestablishedCurveLatinPhrase(
@@ -3759,7 +3844,7 @@ const compactCurveGenerationSystemPrompt = `你是故事共创编辑，只负责
 
 只输出一个 JSON 对象，不能有 Markdown、解释或额外键。对象只有 title 和 beats；beats 必须恰好 5 项，顺序固定为 current-state、trigger、escalation、climax-choice、resolution。每项只能有 kind、detail、sourceFactIds 三个键；sourceFactIds 只能使用用户材料中给出的真实 ID，不能创造 ID。服务端会补充节点标题、依赖关系、因果锚点和共享 foundation，不要输出 foundation。
 
-current-state 只能概括用户已写出的当前处境。其余四项必须以“暂定：”开头，各写一个不超过 90 字、可被作者逐字审阅的抽象因果句：trigger 只说明一个已确认条件怎样使目标停住；escalation 使用不同的已确认条件，说明继续目标要承担什么取舍；climax-choice 写出主体在两端之间的主动选择；resolution 写出选择后哪一项安排、理解或关系会改变。只用用户材料中的目标、期限、承诺、关系和对象；不要新增场景动作、对白、未经确认的设备操作、文件流程、人物姓名、精确数字、确定的他人回应或已经发生的结果。作者已明确的物件、期限和关系可以作为条件逐字保留，不能为了抽象而换成“某个安排”后继续声称承接原事实。禁止使用“已经完成、已经解决、最终得到、终于、结果是”等既成结果写法；每一项都必须保持尚待作者确认。
+current-state 只能概括用户已写出的当前处境。其余四项必须以“暂定：”开头，各写一个不超过 90 字、可被作者逐字审阅的抽象因果句：trigger 只说明一个已确认条件怎样使目标停住；escalation 使用不同的已确认条件，说明继续目标要承担什么取舍；climax-choice 写出主体在两端之间的主动选择；resolution 写出选择后哪一项安排、理解或关系会改变。只用用户材料中的目标、期限、承诺、关系和对象；不要新增场景动作、对白、未经确认的设备操作、文件流程、人物姓名、精确数字、确定的他人回应或已经发生的结果。作者已明确的物件、期限和关系可以作为条件逐字保留，不能为了抽象而换成“某个安排”后继续声称承接原事实。事实锚点后不得附加作者未写出的价值、意义、归属、权限、关系边界、责任或修复结论，除非该概念逐字出现在作者材料中。禁止使用“已经完成、已经解决、最终得到、终于、结果是”等既成结果写法；每一项都必须保持尚待作者确认。
 
 避免模板化：不要把同一整句目标复制到四个节点。每个节点都要有不同的因果动词和不同的事实锚点；resolution 不能只把“选择”换成“重新理解”，必须明确说出哪一项已确认安排会改变。不要写“使提交目标停住”“承担某事实的取舍”这种脱离主体和两端的空壳句；把作者原文中的主体、对象或承诺放回句子中。
 
@@ -3767,7 +3852,7 @@ current-state 只能概括用户已写出的当前处境。其余四项必须以
 
 const compactCurveGenerationRepairSystemPrompt = `你是故事结构修复器。只输出一个 JSON 对象，不能有 Markdown、解释或额外键；对象只有 title 和 beats。beats 必须恰好 5 项，顺序固定为 current-state、trigger、escalation、climax-choice、resolution；每项只能有 kind、detail、sourceFactIds 三个键，sourceFactIds 只能复制输入中的真实 ID。不要输出 foundation、title 以外的节点字段或任何场景化内容。current-state 保留用户事实；其余 detail 以“暂定：”开头，每项只写一个抽象因果关系，并分别推进目标受阻、取舍升级、主动选择和选择后的变化。
 
-事实追溯是硬约束：单个 beat 只能列出 detail 中可逐字核对的 sourceFactIds；每个所列 ID 都必须在 detail 中照抄其原文的一个有区分度连续短语，至少三个字。没有写进 detail 的材料不要列 ID；不要为了凑覆盖而把“原有安排”“既有条件”“当前问题”等泛化句挂到一个事实 ID。current-state 可以保留全部作者事实，其他节点只列自己实际使用的事实。
+事实追溯是硬约束：单个 beat 只能列出 detail 中可逐字核对的 sourceFactIds；每个所列 ID 都必须在 detail 中照抄其原文的一个有区分度连续短语，至少三个字。没有写进 detail 的材料不要列 ID；不要为了凑覆盖而把“原有安排”“既有条件”“当前问题”等泛化句挂到一个事实 ID。事实锚点后不得附加作者未写出的价值、意义、归属、权限、关系边界、责任或修复结论，除非该概念逐字出现在对应作者材料中。current-state 可以保留全部作者事实，其他节点只列自己实际使用的事实。
 
 禁止把任何未列在作者材料中的具体名词、人物状态、过往信息、操作步骤、精确量化或既成结果写进曲线。已由作者明确写出的期限、承诺、关系、物件或目标动作可以逐字作为条件保留，但不能扩写成场景或操作。
 

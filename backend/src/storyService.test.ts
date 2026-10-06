@@ -349,7 +349,7 @@ test('repairs a deadline curve that invents a relative\'s wish without mislabeli
   const repairedBeats = [
     { kind: 'current-state', detail: idea, sourceFactIds: ['source-fact-1', 'source-fact-2', 'source-fact-3'] },
     { kind: 'trigger', detail: '暂定：周五前交稿的期限使按承诺提交的目标停住', sourceFactIds: ['source-fact-1'] },
-    { kind: 'escalation', detail: '暂定：继续按承诺提交会承担最后一页缺失带来的完整性代价', sourceFactIds: ['source-fact-2'] },
+    { kind: 'escalation', detail: '暂定：继续按承诺提交会承担最后一页缺失带来的代价', sourceFactIds: ['source-fact-2'] },
     { kind: 'climax-choice', detail: '暂定：林澈必须在按承诺提交祖母的手稿并承担最后一页缺失的代价，与暂缓之间选择', sourceFactIds: ['source-fact-1', 'source-fact-2', 'source-fact-3'] },
     { kind: 'resolution', detail: '暂定：这次选择改变他对按承诺提交、承担最后一页缺失代价的理解', sourceFactIds: ['source-fact-2', 'source-fact-3'] },
   ]
@@ -564,6 +564,109 @@ test('rejects a model source-fact claim when the proposal has no visible author 
         && /sourceFactIds.*原文锚点/u.test(error.message),
     )
     assert.equal(calls, 3, 'a bad traceability claim receives only the bounded repair attempts')
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+    if (previousApiKey === undefined) delete process.env.DASHSCOPE_API_KEY
+    else process.env.DASHSCOPE_API_KEY = previousApiKey
+    if (previousBaseUrl === undefined) delete process.env.DASHSCOPE_BASE_URL
+    else process.env.DASHSCOPE_BASE_URL = previousBaseUrl
+  }
+})
+
+test('rejects curve semantics that add value or relationship conclusions to valid fact anchors', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  const previousApiKey = process.env.DASHSCOPE_API_KEY
+  const previousBaseUrl = process.env.DASHSCOPE_BASE_URL
+  const previousFetch = globalThis.fetch
+  const cases = [
+    {
+      idea: '林澈答应在周五前把祖母的手稿交给出版社，但他发现最后一页缺失，不知道是否该按承诺提交。',
+      brief: { tones: ['growth'], dramaticForces: ['cost'], allowSystemNamedCharacters: false } as CreativeBrief,
+      beats: [
+        { kind: 'current-state', detail: '林澈答应在周五前把祖母的手稿交给出版社，但他发现最后一页缺失，不知道是否该按承诺提交。', sourceFactIds: ['source-fact-1', 'source-fact-2', 'source-fact-3'] },
+        { kind: 'trigger', detail: '暂定：周五前把祖母的手稿交给出版社让提交目标停住', sourceFactIds: ['source-fact-1'] },
+        { kind: 'escalation', detail: '暂定：继续按承诺提交会承担最后一页缺失带来的完整性代价', sourceFactIds: ['source-fact-2'] },
+        { kind: 'climax-choice', detail: '暂定：林澈必须在按承诺提交与暂缓之间选择', sourceFactIds: ['source-fact-3'] },
+        { kind: 'resolution', detail: '暂定：这次选择改变他是否按承诺提交的判断', sourceFactIds: ['source-fact-3'] },
+      ],
+      expected: /价值、意义或归属/u,
+    },
+    {
+      idea: relationshipCurveIdea,
+      brief: { tones: ['friendship'], dramaticForces: ['relationship-tension'], allowSystemNamedCharacters: false } as CreativeBrief,
+      beats: [
+        { kind: 'current-state', detail: relationshipCurveIdea, sourceFactIds: ['source-fact-1', 'source-fact-2', 'source-fact-3'] },
+        { kind: 'trigger', detail: '暂定：答应过不再替姐姐做决定使和姐姐一起保住父亲留下的书店停住', sourceFactIds: ['source-fact-2'] },
+        { kind: 'escalation', detail: '暂定：姐姐准备把店卖掉让共同责任成为取舍', sourceFactIds: ['source-fact-3'] },
+        { kind: 'climax-choice', detail: '暂定：周岚必须在和姐姐一起保住父亲留下的书店与不再替姐姐做决定之间选择', sourceFactIds: ['source-fact-1', 'source-fact-2'] },
+        { kind: 'resolution', detail: '暂定：这次选择改变她对信任边界的理解', sourceFactIds: ['source-fact-2'] },
+      ],
+      expected: /关系、承诺或责任/u,
+    },
+  ]
+
+  process.env.STORY_DISABLE_MODEL = 'false'
+  process.env.DASHSCOPE_API_KEY = 'test-only-key'
+  process.env.DASHSCOPE_BASE_URL = 'https://model.test.invalid'
+  try {
+    for (const testCase of cases) {
+      let calls = 0
+      globalThis.fetch = async () => {
+        calls += 1
+        return createCurveModelResponse({ title: '越界语义', beats: testCase.beats })
+      }
+
+      await assert.rejects(
+        () => generateProvisionalCurve(testCase.idea, createDirectCoCreationSeed(testCase.idea)!, testCase.brief),
+        (error: unknown) => error instanceof AppError
+          && error.code === 'STORY_CURVE_MODEL_GENERATION_FAILED'
+          && testCase.expected.test(error.message)
+          && error.modelDiagnostic?.stage === 'curve-validation'
+          && error.modelDiagnostic?.attempt === 3
+          && typeof error.modelDiagnostic?.response === 'object'
+          && !JSON.stringify(error.modelDiagnostic?.response).includes('完整性'),
+      )
+      assert.equal(calls, 3, 'semantic boundary failures receive only bounded repair attempts')
+    }
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+    if (previousApiKey === undefined) delete process.env.DASHSCOPE_API_KEY
+    else process.env.DASHSCOPE_API_KEY = previousApiKey
+    if (previousBaseUrl === undefined) delete process.env.DASHSCOPE_BASE_URL
+    else process.env.DASHSCOPE_BASE_URL = previousBaseUrl
+  }
+})
+
+test('allows a semantic phrase when the author explicitly wrote that phrase', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  const previousApiKey = process.env.DASHSCOPE_API_KEY
+  const previousBaseUrl = process.env.DASHSCOPE_BASE_URL
+  const previousFetch = globalThis.fetch
+  const idea = '林澈答应在周五前把祖母的手稿交给出版社，但他发现最后一页缺失，并写明手稿完整性必须保留，不知道是否该按承诺提交。'
+  const seed = createDirectCoCreationSeed(idea)
+  assert.ok(seed)
+  const design = createStoryDesignRecord(idea, seed)
+  const factId = (phrase: string): string => design.sourceFacts.find((fact) => fact.text.includes(phrase))?.id ?? design.sourceFacts[0]!.id
+  const beats = [
+    { kind: 'current-state', detail: idea, sourceFactIds: design.sourceFacts.map((fact) => fact.id) },
+    { kind: 'trigger', detail: '暂定：周五前把祖母的手稿交给出版社让提交目标停住', sourceFactIds: [factId('周五前把祖母的手稿交给出版社')] },
+    { kind: 'escalation', detail: '暂定：继续按承诺提交会承担手稿完整性必须保留的取舍', sourceFactIds: [factId('手稿完整性必须保留')] },
+    { kind: 'climax-choice', detail: '暂定：林澈必须在按承诺提交与保留手稿完整性之间选择', sourceFactIds: [factId('手稿完整性必须保留')] },
+    { kind: 'resolution', detail: '暂定：这次选择改变他对手稿完整性的理解', sourceFactIds: [factId('手稿完整性必须保留')] },
+  ]
+
+  process.env.STORY_DISABLE_MODEL = 'false'
+  process.env.DASHSCOPE_API_KEY = 'test-only-key'
+  process.env.DASHSCOPE_BASE_URL = 'https://model.test.invalid'
+  try {
+    globalThis.fetch = async () => createCurveModelResponse({ title: '作者明确的完整性', beats })
+    const curve = await generateProvisionalCurve(idea, seed, { tones: ['growth'], dramaticForces: ['cost'], allowSystemNamedCharacters: false })
+    assert.equal(curve.generation?.origin, 'model')
+    assert.match(curve.beats.map((beat) => beat.detail).join('\n'), /完整性/u)
   } finally {
     globalThis.fetch = previousFetch
     if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
