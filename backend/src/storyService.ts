@@ -3895,6 +3895,7 @@ function createSystemDraftDirectionCollector(
         requireCreativeHook,
       )) return false
       if (enforceDetailedGrounding && findUnestablishedSystemDraftConcreteHook(direction, establishedSourceTexts)) return false
+      if (enforceDetailedGrounding && findRichSystemDraftUngroundedLanguage(direction, establishedSourceTexts)) return false
 
       const texts = [direction.label, direction.premise, direction.tradeoff].map(normalizeGoalText)
       if (texts.some((text) => directionTexts.has(text))) return false
@@ -3950,9 +3951,16 @@ function isRetryableSystemDraftGenerationError(error: unknown): boolean {
 }
 
 function describeSystemDraftGenerationFailure(error: unknown): string {
-  return error instanceof AppError
-    ? error.message
-    : '上一版不是完整的 JSON 对象。'
+  if (!(error instanceof AppError)) return '上一版不是完整的 JSON 对象。'
+
+  // Do not feed a rejected value judgement back to the model verbatim: JSON
+  // models tend to copy negative examples. Give it a closed, source-first
+  // repair shape instead.
+  if (/没有保留可核对的作者事实锚点|未由作者原文支持的价值、权限或关系结论/u.test(error.message)) {
+    return '信息丰富输入的每条名称、前提和取舍都要各自照抄一个作者原文连续短语；前提只写“暂定：[原文短语]”，取舍只写“[原文短语]还是[另一原文短语或暂缓]”。'
+  }
+
+  return error.message
 }
 
 function parseSystemConflictCoreDraft(
@@ -4155,16 +4163,22 @@ function collectSystemDraftMinimalAssumptionIssues(
 
       const premiseAnchor = findRichSystemDraftAuthorAnchor(direction.premise, richDirectionAnchors)
       const tradeoffAnchor = findRichSystemDraftAuthorAnchor(direction.tradeoff, richDirectionAnchors)
-      // A direction is a premise plus a tradeoff.  Requiring the same source
-      // wording in both fields turns a meaningful causal paraphrase into a
-      // forced duplicate.  Require an author handle in the pair instead,
-      // while the cross-direction evidence below still prevents three generic
-      // cards from all leaning on one vague goal.
-      if (!premiseAnchor && !tradeoffAnchor) {
-        issues.push(`第 ${index + 1} 条分支没有保留可核对的作者事实锚点`)
-      }
+      // The label is a compact UI name and may legitimately summarize a
+      // source phrase (for example, "归还期限").  The premise and tradeoff
+      // carry the auditable material; requiring anchors in both prevents a
+      // single quoted phrase from hiding an invented choice.
+      if (!premiseAnchor) issues.push(`第 ${index + 1} 条分支前提没有保留可核对的作者事实锚点`)
+      if (!tradeoffAnchor) issues.push(`第 ${index + 1} 条分支取舍没有保留可核对的作者事实锚点`)
       if (premiseAnchor) richDirectionEvidence.add(premiseAnchor)
       if (tradeoffAnchor) richDirectionEvidence.add(tradeoffAnchor)
+
+      const ungroundedLanguage = findRichSystemDraftUngroundedLanguage(
+        direction,
+        establishedSourceTexts,
+      )
+      if (ungroundedLanguage) {
+        issues.push(`第 ${index + 1} 条分支${ungroundedLanguage}`)
+      }
     }
   }
 
@@ -4207,6 +4221,39 @@ const richSystemDraftNonDistinctFragments = new Set([
   '关系', '安排', '原有', '作者', '系统', '暂定', '还是', '以及', '不能', '必须',
 ])
 
+// These are not ordinary causal connectors.  They are model-created value,
+// authority, intention, or relationship conclusions that commonly appeared
+// in rich-input outputs.  A literal author phrase still passes; otherwise the
+// branch is rejected and the model keeps its true failed origin.
+const richSystemDraftUnsupportedSemanticPatterns: readonly RegExp[] = [
+  /(?:未竟意志|遗愿|遗嘱|完整权|自我表达|共作意义|共作的意义|单方延续|决定权|决策权)/u,
+  /(?:信任与边界|信任关系|尊重[^，。！？；\n]{0,8}(?:关系|决定|边界))/u,
+  /(?:承认|改变|重新理解)[^，。！？；\n]{0,8}(?:共作|自我表达|未竟意志|完整性之外的意义)/u,
+  /(?:突破|打破)[^，。！？；\n]{0,8}(?:约定|承诺)/u,
+]
+
+function findRichSystemDraftUngroundedLanguage(
+  direction: SystemDraftDirection,
+  sourceTexts: readonly string[],
+): string | undefined {
+  const establishedText = sourceTexts.join('\n')
+  for (const field of [
+    { label: '名称', value: direction.label },
+    { label: '前提', value: direction.premise },
+    { label: '取舍', value: direction.tradeoff },
+  ]) {
+    const unsupported = richSystemDraftUnsupportedSemanticPatterns
+      .map((pattern) => pattern.exec(field.value)?.[0])
+      .filter((match): match is string => Boolean(match))
+      .find((match) => !hasOriginalTextPhrase(establishedText, match))
+    if (unsupported) {
+      return `${field.label}写入了未由作者原文支持的价值、权限或关系结论“${unsupported}”`
+    }
+  }
+
+  return undefined
+}
+
 /**
  * Rich-input directions are proposals about which author-provided pressure to
  * foreground.  They must preserve visible source handles so a reader can tell
@@ -4217,7 +4264,7 @@ function getRichSystemDraftAuthorAnchors(sourceTexts: readonly string[]): string
   for (const sourceText of sourceTexts) {
     const normalized = normalizeGoalText(sourceText)
     const maximumLength = Math.min(12, normalized.length)
-    for (let length = maximumLength; length >= 4; length -= 1) {
+    for (let length = maximumLength; length >= 2; length -= 1) {
       for (let start = 0; start + length <= normalized.length; start += 1) {
         const fragment = normalized.slice(start, start + length)
         if (!richSystemDraftNonDistinctFragments.has(fragment)) anchors.add(fragment)
@@ -4537,18 +4584,31 @@ function isSupportedDeadlineSummary(
   match: string,
 ): boolean {
   if (!/^(?:截止|截至)$/u.test(match)) return false
-  if (!/(?:今晚|明天|后天|今天|明早|明晚|周[一二三四五六日天]|月底|之前|以后|期限|展出前|仪式前|布置前|交接前)/u.test(establishedText)) {
+  const deadlinePattern = /(?:今晚|明天|后天|今天|明早|明晚|周[一二三四五六日天](?:前|后|之前|之后)?|月底(?:前|后)?|展出前|仪式前|布置前|交接前|(?:\d+|[零〇一二两三四五六七八九十百千万亿半]+)(?:秒|分钟|小时|天|周|月|年|点(?:钟)?|时|分))/gu
+  const establishedDeadlines = Array.from(establishedText.matchAll(deadlinePattern))
+    .map((candidate) => candidate[0])
+  if (!establishedDeadlines.length) {
     return false
   }
 
   // A summary like "截止压力" is allowed only when it does not inject a
-  // different date, countdown, or irreversible deadline. It is a label for
-  // an already explicit deadline, not a new temporal fact.
+  // different date, countdown, or irreversible deadline.  Compare complete
+  // time expressions instead of treating the numeral in an existing "周五"
+  // as a new quantity.
   const matchIndex = candidateText.indexOf(match)
   const localText = matchIndex >= 0
     ? candidateText.slice(Math.max(0, matchIndex - 14), matchIndex + 18)
     : candidateText
-  return !/(?:\d|零|〇|一|二|两|三|四|五|六|七|八|九|十|小时|分钟|倒数|明天|后天|明早|明晚|清晨|凌晨)/u.test(localText)
+  const localDeadlines = Array.from(localText.matchAll(deadlinePattern))
+    .map((candidate) => candidate[0])
+  if (localDeadlines.some((deadline) => !establishedDeadlines.some((established) => (
+    hasOriginalTextPhrase(established, deadline)
+      || hasOriginalTextPhrase(deadline, established)
+  )))) {
+    return false
+  }
+
+  return !/(?:倒数|清晨|凌晨|中午|下午|傍晚|夜里|片刻后|不久后)/u.test(localText)
 }
 
 function isSupportedKnownPersonStatement(
@@ -7567,13 +7627,13 @@ function buildSystemConflictCoreDraftPrompt(
     : '用户尚未确认具体行动目标。请生成 goal，并逐字保留原始念头中的主体、对象或关键事件。'
   const creativeDirectionInstruction = hasSparseSystemDraftSeed(seed)
     ? `\n\n优先规则：第一层必须给出能让人继续读下去的创意钩子，而不是“条件尚未确认”“当前限制”“时间受限”一类可套用任何题材的分类。先从目标本身判断题材和可见载体，再为三条方向选择不同的戏剧杠杆：可以是与目标紧密相关的反常痕迹、身份或角色的错认、可见且不可轻易收回的代价、突然改变原有取舍的一次意外，或让普通目标变得尴尬/危险的反差。不要机械地让每个题材都出现“陌生字迹、一个陌生人、划掉名字”；去某处、交一份内容、见一个人、离开一地时，载体、反差和代价都应随行动而变化。每条都要让读者一眼看见一个反常画面，并能看出继续目标会碰到什么真正的取舍，但只保留这一项钩子。第三条不能只写“失去一件重要东西”这类没有形状的代价。每条 premise 都以“暂定：”开头，只引入一个当前物件、反常痕迹、错认、代价或有限意外；门票、手机、工作人员等普通词可以作为单一钩子的载体，但不能补出购买、支付、核验、通讯或机构流程，也不能扩成连续动作、被带去某处或既定路线。label 要给这个钩子命名，tradeoff 必须写成“……还是……”的实际取舍。此规则优先于后文任何抽象示例。${getSystemDraftSeedScopeInstruction(seed)}${getSystemDraftPreferenceInstruction(preference)}`
-    : `\n\n信息丰富时，第一层不得新增场景钩子。三条方向只能把作者已经写出的目标、期限、承诺、关系和对象重新组合成三种不同的因果机制：一条突出期限或当前条件如何让目标停住，一条突出承诺/关系怎样制造取舍，一条突出目标本身的意义或归属怎样改变选择。每条 premise 必须以“暂定：”开头，并逐字保留至少一个作者原文中的连续事实短语；tradeoff 必须包含“还是”，且两端都只能使用作者事实或不增加事实的抽象词（继续、暂缓、保留、重新判断、承担）。禁止新增任何物件、人物、消息、字迹、地点、流程、场景动作、他人回应、精确时间或结果；不要写“陌生、浮现、夹着、递来、发来、贴出、掉出”等事件词。三条方向要分别改变目标受阻、取舍升级和选择含义，不能只是同一句目标换同义词。${getSystemDraftSeedScopeInstruction(seed)}${getSystemDraftPreferenceInstruction(preference)}`
+    : `\n\n信息丰富时，第一层不得新增场景钩子。三条方向只能把作者已经写出的目标、期限、承诺、关系和对象重新组合成三种不同的因果机制：一条突出期限或当前条件如何让目标停住，一条突出承诺/关系怎样制造取舍，一条突出对象或目标动作怎样形成另一项可比较取舍。每条 premise 必须以“暂定：”开头，并逐字保留至少一个作者原文中的连续事实短语；tradeoff 必须包含“还是”，且两端都只能使用作者事实或不增加事实的抽象词（继续、暂缓、保留、重新判断、承担）。禁止新增任何物件、人物、消息、字迹、地点、流程、场景动作、他人回应、精确时间或结果；不要写“陌生、浮现、夹着、递来、发来、贴出、掉出”等事件词。三条方向要分别改变目标受阻、取舍升级和选择条件，不能只是同一句目标换同义词。${getRichSystemDraftClosedLanguageInstruction()}${getSystemDraftSeedScopeInstruction(seed)}${getSystemDraftPreferenceInstruction(preference)}`
   const repair = repairMessage
     ? `${creativeDirectionInstruction}\n上一版未通过结构检查：${repairMessage}。请完整重写三条方向，仍然不要补写背景或结果。`
     : creativeDirectionInstruction
   const firstLayerScope = hasSparseSystemDraftSeed(seed)
     ? '\n\n粒度必须保持最小：stake、constraint、每条 premise、每条 tradeoff 各只写一句，且只表达一个条件或一个取舍。共同 stake 和 constraint 不得凭原始信息新增资源、操作状态或解法。每条 premise 可以建立一个有限的当前前提，例如“暂定：目标相关的旧物上多出一句来历不明的话”；它只建立这一项钩子，不能补成完整场景、地点或连续动作。可补入与目标直接相关的当前物件、现场限制或匿名人物；普通物件和职业称谓可以作为一个钩子的载体，但不要补入姓名、长期关系、过去经历、心理状态、许可、资源权限、他人的确定回应或结局。不能借“暂定”写出某人当面承诺、物品归属、未经许可、具体交付方式或既定后果。除非原始念头明确给出，否则不要写精确数字、钟点、日期或倒计时，账号密码、设备故障或接口、网络电量、文书条款、机构流程、他人的既定状态或过去事件；也不要把主角自己的承诺改写成他人已经拒绝或禁止联系的边界，不要把内容未知改写成他人的偏好、意愿或期待，更不要写“先做什么再做什么”的操作流程。\n\n每条 directions 都必须保留共同目标，只提出一项最小、可编辑的分支前提，明确目标为什么会因此受阻以及继续时要接受什么取舍；不要把另外两条分支的前提混进来，也不要把三条分支写成同一故事中同时成立的事实。'
-    : '\n\n富输入硬规则：stake、constraint、每条 premise 和每条 tradeoff 各只写一句、一个条件或一个取舍；只能抽象概括作者已经写出的压力。每条 premise 必须以“暂定：”开头并逐字保留一个作者连续事实短语；tradeoff 必须含“还是”，两端只能引用作者事实或“继续、暂缓、保留、重新判断、承担取舍”等抽象词。三条方向必须合计覆盖至少两项不同作者事实，并分别突出期限/当前条件、承诺/关系、对象/意义中的不同机制。禁止新增物件、人物、消息、字迹、地点、流程、场景动作、他人回应、精确时间、数字、资源、权限、过去经历或结果；不要写手机、便签、钢笔、门票、陌生字句、陌生人、浮现、写着、发来、贴出等词。'
+    : `\n\n富输入硬规则：stake、constraint、每条 premise 和每条 tradeoff 各只写一句、一个条件或一个取舍；只能抽象概括作者已经写出的压力。每条 premise 必须以“暂定：”开头并逐字保留一个作者连续事实短语；tradeoff 必须含“还是”，两端只能引用作者事实或“继续、暂缓、保留、重新判断、承担取舍”等抽象词。三条方向必须合计覆盖至少两项不同作者事实，并分别突出期限/当前条件、承诺/关系、对象/目标动作中的不同机制。禁止新增物件、人物、消息、字迹、地点、流程、场景动作、他人回应、精确时间、数字、资源、权限、过去经历或结果；不要写手机、便签、钢笔、门票、陌生字句、陌生人、浮现、写着、发来、贴出等词。${getRichSystemDraftClosedLanguageInstruction()}`
 
   return `用户的原始念头：
 ---
@@ -7592,7 +7652,11 @@ function getSystemDraftSeedScopeInstruction(
 ): string {
   if (hasSparseSystemDraftSeed(seed)) return ''
 
-  return '\n\n这是信息较完整的作者材料：不要新增便签、字迹、贴纸、信封、设备状态、工作人员、匿名人物或其他现场物件，也不要把方向写成一个小场景。三条方向必须分别从原文已有的目标、对象、期限、承诺或关系事实推导不同的因果机制；每条 premise 和 tradeoff 至少保留一个原文锚点，新增内容只能是抽象的阻碍、代价或取舍。'
+  return `\n\n这是信息较完整的作者材料：不要新增便签、字迹、贴纸、信封、设备状态、工作人员、匿名人物或其他现场物件，也不要把方向写成一个小场景。三条方向必须分别从原文已有的目标、对象、期限、承诺或关系事实推导不同的因果机制；每条 premise 和 tradeoff 至少保留一个原文锚点，新增内容只能是抽象的阻碍、代价或取舍。${getRichSystemDraftClosedLanguageInstruction()}`
+}
+
+function getRichSystemDraftClosedLanguageInstruction(): string {
+  return ' 富输入采用封闭句式：每条 label、premise、tradeoff 都必须各自照抄一个两字以上的作者连续短语；premise 写成“暂定：[原文短语]”，tradeoff 写成“[原文短语]还是[另一原文短语或暂缓/保留]”。除“让、使、继续、暂缓、保留、重新判断、承担、取舍、选择、改变、期限、承诺”等连接语外，不写任何原文没有的意图、权利、评价、归属或关系结论。'
 }
 
 function buildSystemDraftDirectionRecoveryPrompt(
@@ -7606,10 +7670,10 @@ function buildSystemDraftDirectionRecoveryPrompt(
   const requestedMechanisms = requestedMechanismTypes.map((mechanismType) => `「${mechanismType}」`).join('、')
   const scopeInstruction = hasSparseSystemDraftSeed(seed)
     ? '每条 premise 必须以“暂定：”开头，只建立一个当前钩子。tradeoff 必须包含“还是”，并且只回应这个钩子。可以有一个物件、一个反常痕迹、一次错认或一个代价；不能展开成连续动作、追逐、带路、既定路线、机构流程、支付、证件、通讯、精确时间、过去关系、他人的已确定态度或结局。'
-    : '这是信息丰富的作者材料。只能重组原始念头中已经出现的目标、期限、承诺、关系和对象；每条 premise 必须以“暂定：”开头，并逐字保留一个作者连续事实短语；tradeoff 必须包含“还是”，只能使用作者事实和“继续、暂缓、保留、重新判断、承担取舍”等抽象词。严禁新增物件、设备、通讯、字迹、消息、工作人员、匿名人物、地点、流程、场景事件、过去经历、他人回应、资源、权限、精确时间、数字或结果。'
+    : `这是信息丰富的作者材料。只能重组原始念头中已经出现的目标、期限、承诺、关系和对象；每条 premise 必须以“暂定：”开头，并逐字保留一个作者连续事实短语；tradeoff 必须包含“还是”，只能使用作者事实和“继续、暂缓、保留、重新判断、承担取舍”等抽象词。严禁新增物件、设备、通讯、字迹、消息、工作人员、匿名人物、地点、流程、场景事件、过去经历、他人回应、资源、权限、精确时间、数字或结果。${getRichSystemDraftClosedLanguageInstruction()}`
   const directionGuidance = hasSparseSystemDraftSeed(seed)
     ? '每条都要与保留方向拥有不同的戏剧杠杆，并从目标行动的题材、对象或场合中找一个有限载体；不要把不同题材都改写成同一套“陌生字迹、叫错名字、划掉名字”。不要只写“重要的东西”“当前限制”“时间受限”这类没有画面的概念。'
-    : '每条都必须从作者原文中不同的期限、承诺、关系或对象事实形成可核对的因果差异；不要寻找新的场景载体、物件、人物或事件，也不要把方向改写成同一目标的抽象同义句。'
+    : `每条都必须从作者原文中不同的期限、承诺、关系或对象事实形成可核对的因果差异；不要寻找新的场景载体、物件、人物或事件，也不要把方向改写成同一目标的抽象同义句。${getRichSystemDraftClosedLanguageInstruction()}`
 
   return `用户的原始念头：
 ---
@@ -7637,10 +7701,10 @@ function buildSystemConflictCoreDraftRepairPrompt(
     : 'goal 必须保留原始念头中的主体、对象或关键事件。'
   const repairGuidance = hasSparseSystemDraftSeed(seed)
     ? '优先规则：重写时必须把三条方向写成各自可选择的创意钩子。先从目标的对象、动作和场合挑出不同的戏剧杠杆：反常痕迹、角色错位、有限意外、可见交换或不可轻易收回的代价都可使用；不要让所有题材只换词复用“陌生字迹、一个陌生人、划掉名字”。每条只保留一个让读者能看见的反常画面，不要只写“一件重要东西”之类没有形状的代价。premise 以“暂定：”开头，只引入一个当前物件、反常痕迹、错认、代价或有限机会。门票、手机、工作人员等普通词可以作为单一钩子的载体，但不能写购买、支付、核验、通讯或机构流程，也不能扩成连续动作、被带去某处或既定路线。label 命名钩子，tradeoff 写成“……还是……”。不要返回“条件缺口”“当前限制”“时间受限”或同义的抽象分类。'
-    : '最高优先级规则：这是信息丰富输入，不能再发明任何创意钩子。重写时只能使用作者原文中已经出现的目标、期限、承诺、人物关系和对象；每条 premise 与 tradeoff 至少逐字保留一个作者连续事实短语，三条合计覆盖至少两项不同事实。只允许“继续、暂缓、保留、重新判断、承担取舍”等抽象连接词。严禁新增物件、设备、通讯、字迹、消息、工作人员、匿名人物、地点、机构流程、现场事件、过去经历、他人回应、资源、权限、精确时间、数字或永久结果；不要写手机、便签、钢笔、门票、黑屏、陌生字句、浮现、写着、发来、贴出等词。每个 tradeoff 必须是恰好两个短语组成的“甲还是乙”，不要在两端之后追加“必须、只能、不得、都要、以便、从而”或第二个条件。若作者事实中有期限，直接保留期限短语即可，不要把它改写成新的处理时限。'
+    : `最高优先级规则：这是信息丰富输入，不能再发明任何创意钩子。重写时只能使用作者原文中已经出现的目标、期限、承诺、人物关系和对象；每条 premise 与 tradeoff 至少逐字保留一个作者连续事实短语，三条合计覆盖至少两项不同事实。只允许“继续、暂缓、保留、重新判断、承担取舍”等抽象连接词。严禁新增物件、设备、通讯、字迹、消息、工作人员、匿名人物、地点、机构流程、现场事件、过去经历、他人回应、资源、权限、精确时间、数字或永久结果；不要写手机、便签、钢笔、门票、黑屏、陌生字句、浮现、写着、发来、贴出等词。每个 tradeoff 必须是恰好两个短语组成的“甲还是乙”，不要在两端之后追加“必须、只能、不得、都要、以便、从而”或第二个条件。若作者事实中有期限，直接保留期限短语即可，不要把它改写成新的处理时限。${getRichSystemDraftClosedLanguageInstruction()}`
   const repairScope = hasSparseSystemDraftSeed(seed)
     ? '每条 premise 可以保留一个有限的当前创意钩子，但不能新增人物经历、物品归属、他人许可、交付方式、确定回应或结果；即使加了“暂定”也不能把这些未建立内容写成用户事实。'
-    : '信息丰富输入只能重组作者原文事实；每条 premise 与 tradeoff 至少保留一个连续原文锚点，禁止任何新物件、人物、事件、地点、流程、他人状态、资源、权限、精确时限或结果。不要使用稀疏输入的创意钩子示例，也不要用“暂定”包装新增场景。'
+    : `信息丰富输入只能重组作者原文事实；每条 premise 与 tradeoff 至少保留一个连续原文锚点，禁止任何新物件、人物、事件、地点、流程、他人状态、资源、权限、精确时限或结果。不要使用稀疏输入的创意钩子示例，也不要用“暂定”包装新增场景。${getRichSystemDraftClosedLanguageInstruction()}`
   repairMessage = `${repairMessage}${getSystemDraftPreferenceInstruction(preference)}\n${repairGuidance}`
   const prompt = `用户的原始念头：
 ---

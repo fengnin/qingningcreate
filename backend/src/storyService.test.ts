@@ -1098,6 +1098,82 @@ test('rejects an unconfirmed first-turn timestamp even when the curve is confirm
   )
 })
 
+test('allows a confirmed deadline to be summarized as cutoff pressure without adding time', () => {
+  const idea = '林澈答应在周五前把祖母的手稿交给出版社，但他发现最后一页缺失，不知道是否该按承诺提交。'
+  const seed = createDirectCoCreationSeed(idea)
+  assert.ok(seed)
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['cost'],
+    allowSystemNamedCharacters: false,
+  }
+  const confirmed = confirmProvisionalCurve(createProvisionalCurveFallback(idea, seed, brief)).confirmedCurve
+  const foundation = materializeConfirmedCurve(seed, confirmed)
+  const turn = createConfirmedOpeningTurn('林澈答应在周五前把祖母的手稿交给出版社，截止压力下仍要决定是否按承诺提交。')
+  const createOption = (
+    id: string,
+    label: string,
+    action: string,
+    immediateConsequence: string,
+    laterEffect: string,
+  ): StoryTurn['options'][number] => {
+    const narrativeAction: StoryAction = {
+      id: `${id}-action`,
+      intent: action,
+      preconditions: [],
+      effects: [],
+      source: 'generated',
+    }
+    return {
+      id,
+      label,
+      action,
+      immediateConsequence,
+      laterEffect,
+      narrativeAction,
+      transition: {
+        actionId: narrativeAction.id,
+        consumedFacts: [],
+        changedFacts: [],
+        introducedFacts: [],
+      },
+    }
+  }
+  turn.options = [
+    createOption(
+      'turn-1-option-1',
+      '面对周五前',
+      '先确认在周五前把祖母的手稿交给出版社这一已确认条件。',
+      '周五前的截止压力不再被略过。',
+      '之后仍要决定是否按承诺提交。',
+    ),
+    createOption(
+      'turn-1-option-2',
+      '面对最后一页',
+      '先面对“但他发现最后一页缺失”这项当前事实。',
+      '但他发现最后一页缺失不再被略过。',
+      '之后仍要决定是否按承诺提交。',
+    ),
+    createOption(
+      'turn-1-option-3',
+      '判断承诺提交',
+      '先判断“林澈答应在周五前把祖母的手稿交给出版社”是否仍要按承诺提交。',
+      '林澈答应在周五前把祖母的手稿交给出版社，是否按承诺提交成为当前判断的一端。',
+      '之后仍要面对周五前把祖母的手稿交给出版社。',
+    ),
+  ]
+
+  assert.doesNotThrow(() => validateConfirmedCurveStoryTurnContinuation({
+    idea,
+    seed: foundation.seed,
+    predicament: foundation.predicament,
+    approach: foundation.approach,
+    headTail: foundation.headTail,
+    history: [],
+    confirmedCurve: confirmed,
+  }, turn))
+})
+
 test('rejects introduced facts from a confirmed first-turn option', () => {
   const brief: CreativeBrief = {
     tones: ['growth'],
@@ -2298,6 +2374,89 @@ test('rich model directions keep visible author facts and reject new scene hooks
   assert.throws(
     () => validateSystemConflictCoreDraft(richCurveIdea, seed, inventedHook),
     /具体场景钩子/u,
+  )
+})
+
+test('rejects rich model directions that hide new value or authority conclusions behind source facts', () => {
+  const deadlineIdea = '林澈答应在周五前把祖母的手稿交给出版社，但他发现最后一页缺失，不知道是否该按承诺提交。'
+  const deadlineSeed = createDirectCoCreationSeed(deadlineIdea)
+  assert.ok(deadlineSeed)
+  const deadlineDraft: StoryConflictCoreSystemDraft = {
+    goal: deadlineSeed.lockedGoal ?? '在周五前把祖母的手稿交给出版社',
+    stake: '按承诺提交与最后一页缺失之间存在取舍',
+    constraint: '林澈答应在周五前把祖母的手稿交给出版社',
+    origin: 'model',
+    directions: [
+      {
+        label: '周五交稿',
+        mechanismType: 'window-pressure',
+        premise: '暂定：林澈答应在周五前把祖母的手稿交给出版社',
+        tradeoff: '在周五前把祖母的手稿交给出版社，还是暂缓提交',
+      },
+      {
+        label: '最后一页缺失',
+        mechanismType: 'information-gap',
+        premise: '暂定：但他发现最后一页缺失',
+        tradeoff: '保留最后一页缺失，还是按承诺提交',
+      },
+      {
+        label: '按承诺提交',
+        mechanismType: 'commitment-conflict',
+        premise: '暂定：不知道是否该按承诺提交',
+        tradeoff: '按承诺提交，还是暂缓交给出版社',
+      },
+    ],
+  }
+  assert.doesNotThrow(() => validateSystemConflictCoreDraft(deadlineIdea, deadlineSeed, deadlineDraft))
+
+  const inventedMeaning = structuredClone(deadlineDraft)
+  inventedMeaning.directions![2] = {
+    ...inventedMeaning.directions![2]!,
+    tradeoff: '将祖母的手稿视为祖母未竟意志，还是保留完整权',
+  }
+  assert.throws(
+    () => validateSystemConflictCoreDraft(deadlineIdea, deadlineSeed, inventedMeaning),
+    /未由作者原文支持的价值、权限或关系结论/u,
+  )
+
+  const relationshipSeed = createDirectCoCreationSeed(relationshipCurveIdea)
+  assert.ok(relationshipSeed)
+  const relationshipDraft: StoryConflictCoreSystemDraft = {
+    goal: relationshipSeed.lockedGoal ?? '和姐姐一起保住父亲留下的书店',
+    stake: '和姐姐一起保住父亲留下的书店与不再替姐姐做决定之间存在取舍',
+    constraint: '姐姐准备把店卖掉',
+    origin: 'model',
+    directions: [
+      {
+        label: '保住书店',
+        mechanismType: 'window-pressure',
+        premise: '暂定：姐姐准备把店卖掉',
+        tradeoff: '和姐姐一起保住父亲留下的书店，还是不再替姐姐做决定',
+      },
+      {
+        label: '不替姐姐决定',
+        mechanismType: 'commitment-conflict',
+        premise: '暂定：却答应过不再替姐姐做决定',
+        tradeoff: '不再替姐姐做决定，还是和姐姐一起保住父亲留下的书店',
+      },
+      {
+        label: '卖掉书店',
+        mechanismType: 'meaning-commitment',
+        premise: '暂定：周岚想和姐姐一起保住父亲留下的书店',
+        tradeoff: '姐姐准备把店卖掉，还是和姐姐一起保住父亲留下的书店',
+      },
+    ],
+  }
+  assert.doesNotThrow(() => validateSystemConflictCoreDraft(relationshipCurveIdea, relationshipSeed, relationshipDraft))
+
+  const inventedAuthority = structuredClone(relationshipDraft)
+  inventedAuthority.directions![2] = {
+    ...inventedAuthority.directions![2]!,
+    tradeoff: '和姐姐一起保住父亲留下的书店，还是由姐姐单方延续',
+  }
+  assert.throws(
+    () => validateSystemConflictCoreDraft(relationshipCurveIdea, relationshipSeed, inventedAuthority),
+    /未由作者原文支持的价值、权限或关系结论/u,
   )
 })
 
