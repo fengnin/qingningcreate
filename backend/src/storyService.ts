@@ -378,7 +378,19 @@ const confirmedCurveFirstTurnUnsupportedDetailRules: readonly UnsupportedDetailR
   },
   {
     label: '未经确认的他人状态',
-    pattern: /(?:对方|朋友|他人|前队友|队友|陌生人|某人|她|他)[^，。！？；\n]{0,12}(?:已经|已|曾|决定|答应|拒绝|离开|到达|等待|知道|收到|同意|不愿|愿意|生气|沉默|失联)/gu,
+    pattern: /(?:对方|朋友|他人|前队友|队友|陌生人|某人|她|他)[^，。！？；\n]{0,12}(?:已经|已|曾|答应|拒绝|离开|到达|等待|知道|收到|同意|不愿|愿意|生气|沉默|失联)/gu,
+  },
+  {
+    label: '未经确认的场景设施或普通物件',
+    pattern: /(?:柜台|收银台|店员|书架|门口|入口|走廊|展厅|窗口|柜门|台阶|桌面|房间|座位|灯光|钥匙|纸袋|文件夹|屏幕|麦克风|相册)/gu,
+  },
+  {
+    label: '未经确认的流程、方案或关系判断',
+    pattern: /(?:出售流程|流程|进程|决策环节|替代方案|干预建议|原计划|共同记忆|共同责任|决定权|决策权|共议(?:出路|方案)?|出路|回放条件|检视条件|影像依据|短片文件|纸笔|署名部分)/gu,
+  },
+  {
+    label: '未经确认的他人回应或后续状态',
+    pattern: /(?:姐姐|朋友|前队友|队友|他人|对方|某人)[^，。！？；\n]{0,16}(?:可能|会|将|暂停|重申|质疑|被唤起|同意|拒绝|接受|继续按|不参与)/gu,
   },
 ]
 
@@ -2403,7 +2415,10 @@ export async function generateDirections(request: StoryDirectionsRequest): Promi
     return createConflictCoreResponse(session, result.seed, result.conflictCores)
   }
 
-  const { seed, conflictCores } = await generateConflictCoreSet(request)
+  const directSeed = createDirectCoCreationSeed(request.idea)
+  const { seed, conflictCores } = directSeed
+    ? await generateConflictCoreSet(request, directSeed)
+    : await generateConflictCoreSet(request)
   const session = createStorySession(request.idea, seed, conflictCores)
   storySessions.set(session.id, session)
   persistStorySessions()
@@ -3455,11 +3470,12 @@ async function generateSystemConflictCoreDraft(
   let candidate: StoryConflictCoreSystemDraft | undefined
   let modelUnavailable = false
   let lastFailure: AppError | undefined
+  const systemPrompt = getSystemConflictCoreDraftSystemPrompt(seed)
 
   for (let attempt = 0; attempt < maxSystemDraftGenerationAttempts; attempt += 1) {
     try {
       const record = await requestModelRecord({
-        systemPrompt: `${systemConflictCoreDraftSystemPrompt}\n\n${systemDraftFirstLayerScopeSupplement}`,
+        systemPrompt,
         userPrompt: candidate
           ? buildSystemConflictCoreDraftRepairPrompt(idea, seed, candidate, repairMessage ?? '上一版没有通过最小事实检查。', preference)
           : buildSystemConflictCoreDraftPrompt(idea, seed, repairMessage, preference),
@@ -3763,7 +3779,7 @@ async function recoverMissingSystemDraftDirections(
 
   try {
     const record = await requestModelRecord({
-      systemPrompt: `${systemConflictCoreDraftSystemPrompt}\n\n${systemDraftFirstLayerScopeSupplement}`,
+      systemPrompt: getSystemConflictCoreDraftSystemPrompt(seed),
       userPrompt: buildSystemDraftDirectionRecoveryPrompt(
         idea,
         seed,
@@ -3795,12 +3811,19 @@ async function recoverMissingSystemDraftDirections(
       fallbackReason: '已保留可展开的创意方向，并定向补齐缺失机制。',
       directions: collector.directions,
     }
+    // The retained directions were validated individually, and the recovery
+    // call only supplied the missing mechanism. Validate the assembled model
+    // result once more before it can keep origin=model.
     validateSystemConflictCoreDraft(idea, seed, recoveredDraft)
     return recoveredDraft
   } catch (error) {
     if (!(error instanceof AppError)) throw error
     if (shouldLogConflictCoreDiagnostics) {
-      console.warn(`System draft direction recovery rejected: ${getErrorIdentifier(error)}`)
+      console.warn(`System draft direction recovery rejected: ${JSON.stringify({
+        code: error.code,
+        reason: error.message,
+        diagnostic: error.modelDiagnostic,
+      })}`)
     }
     return undefined
   }
@@ -3854,7 +3877,8 @@ function createSystemDraftDirectionCollector(
   seed: Pick<StorySeed, 'activeSituation' | 'lockedGoal' | 'lockedFacts'>,
 ): SystemDraftDirectionCollector {
   const establishedSourceTexts = [idea, ...getUserConfirmedSeedSourceTexts(seed)]
-  const enforceDetailedGrounding = !hasSparseSystemDraftSeed(seed)
+  const requireCreativeHook = hasSparseSystemDraftSeed(seed)
+  const enforceDetailedGrounding = !requireCreativeHook
   const directions: SystemDraftDirection[] = []
   const mechanismTypes = new Set<ConflictCoreMechanismType>()
   const directionTexts = new Set<string>()
@@ -3864,7 +3888,12 @@ function createSystemDraftDirectionCollector(
     mechanismTypes,
     add: (direction) => {
       if (mechanismTypes.has(direction.mechanismType)) return false
-      if (getSystemDraftDirectionScopeIssue(direction, establishedSourceTexts, true, true)) return false
+      if (getSystemDraftDirectionScopeIssue(
+        direction,
+        establishedSourceTexts,
+        requireCreativeHook,
+        requireCreativeHook,
+      )) return false
       if (enforceDetailedGrounding && findUnestablishedSystemDraftConcreteHook(direction, establishedSourceTexts)) return false
 
       const texts = [direction.label, direction.premise, direction.tradeoff].map(normalizeGoalText)
@@ -4008,13 +4037,46 @@ export function validateSystemConflictCoreDraft(
     throw new AppError('系统暂定设定的三条冲突方向不能使用同一种机制，请重试。', 502, 'INVALID_MODEL_OUTPUT')
   }
 
-  const directionTexts = directions.flatMap((direction) => [direction.label, direction.premise, direction.tradeoff])
-    .map(normalizeGoalText)
-  if (new Set(directionTexts).size !== directionTexts.length) {
-    throw new AppError('系统暂定设定的三条冲突方向不能互相重复，请重试。', 502, 'INVALID_MODEL_OUTPUT')
+  const directionDistinctnessIssue = getSystemDraftDirectionDistinctnessIssue(idea, seed, directions, draft.origin)
+  if (directionDistinctnessIssue) {
+    throw new AppError(`系统暂定设定的三条冲突方向${directionDistinctnessIssue}，请重试。`, 502, 'INVALID_MODEL_OUTPUT')
   }
 
   assertSystemDraftUsesMinimalAssumptions(idea, seed, draft)
+}
+
+function getSystemDraftDirectionDistinctnessIssue(
+  idea: string,
+  seed: Pick<StorySeed, 'activeSituation' | 'lockedGoal' | 'lockedFacts'>,
+  directions: readonly SystemDraftDirection[],
+  origin: StoryConflictCoreSystemDraft['origin'],
+): string | undefined {
+  const sourceText = [idea, ...getUserConfirmedSeedSourceTexts(seed)].join('\n')
+  const sparse = origin === 'deterministic-fallback' || hasSparseSystemDraftSeed(seed)
+  const labels = directions.map((direction) => normalizeGoalText(direction.label))
+  const tradeoffs = directions.map((direction) => normalizeGoalText(direction.tradeoff))
+  if (new Set(labels).size !== labels.length) return '的标题不能互相重复'
+  if (new Set(tradeoffs).size !== tradeoffs.length) return '的取舍不能互相重复'
+
+  for (let leftIndex = 0; leftIndex < directions.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < directions.length; rightIndex += 1) {
+      const left = directions[leftIndex]!
+      const right = directions[rightIndex]!
+      const samePremise = normalizeGoalText(left.premise) === normalizeGoalText(right.premise)
+      if (!samePremise) continue
+      // Rich inputs may legitimately foreground the same author fact through
+      // two mechanisms. The choices still have to differ, and the repeated
+      // premise must be a literal author phrase rather than model prose.
+      if (sparse || !hasOriginalTextPhrase(sourceText, left.premise.replace(/^暂定[：:]/u, '').trim())) {
+        return '的前提不能互相重复'
+      }
+    }
+  }
+
+  const fullTexts = directions.map((direction) => [direction.label, direction.premise, direction.tradeoff]
+    .map(normalizeGoalText)
+    .join('|'))
+  return new Set(fullTexts).size === fullTexts.length ? undefined : '的完整内容不能互相重复'
 }
 
 function assertSystemDraftUsesMinimalAssumptions(
@@ -4420,6 +4482,14 @@ function isGeneratedDetailSupported(
 
   if (hasOriginalTextPhrase(establishedText, match)) return true
 
+  if (label === '未经确认的相对时间' && isSupportedDeadlineSummary(establishedText, candidateText, match)) {
+    return true
+  }
+
+  if (label === '未经确认的他人状态' && isSupportedKnownPersonStatement(establishedText, candidateText, match)) {
+    return true
+  }
+
   // A direct commitment can be summarized with a close synonym, but the
   // committed action itself must still overlap the user's wording. This lets
   // "答应过不再打扰" become "不再打扰的承诺" while rejecting additions such
@@ -4459,6 +4529,48 @@ function isGeneratedDetailSupported(
   return label === '未经建立的外部结果'
     && match === '违背'
     && hasSupportedCommitmentAction(establishedText, candidateText)
+}
+
+function isSupportedDeadlineSummary(
+  establishedText: string,
+  candidateText: string,
+  match: string,
+): boolean {
+  if (!/^(?:截止|截至)$/u.test(match)) return false
+  if (!/(?:今晚|明天|后天|今天|明早|明晚|周[一二三四五六日天]|月底|之前|以后|期限|展出前|仪式前|布置前|交接前)/u.test(establishedText)) {
+    return false
+  }
+
+  // A summary like "截止压力" is allowed only when it does not inject a
+  // different date, countdown, or irreversible deadline. It is a label for
+  // an already explicit deadline, not a new temporal fact.
+  const matchIndex = candidateText.indexOf(match)
+  const localText = matchIndex >= 0
+    ? candidateText.slice(Math.max(0, matchIndex - 14), matchIndex + 18)
+    : candidateText
+  return !/(?:\d|零|〇|一|二|两|三|四|五|六|七|八|九|十|小时|分钟|倒数|明天|后天|明早|明晚|清晨|凌晨)/u.test(localText)
+}
+
+function isSupportedKnownPersonStatement(
+  establishedText: string,
+  candidateText: string,
+  match: string,
+): boolean {
+  const subject = /^(她|他)/u.exec(match)?.[1]
+  if (!subject) return false
+
+  // "她/他答应" may preserve the protagonist's own author-supplied promise;
+  // it is not evidence that an unnamed other person has taken a new stance.
+  // Require a literal compatible phrase to avoid allowing an invented promise
+  // or a new relationship state merely because the story has a protagonist.
+  if (/(?:她|他)[^，。！？；\n]{0,10}答应/u.test(match)) {
+    return new RegExp(`${subject}[^，。！？；\\n]{0,10}答应`).test(establishedText)
+      || hasEstablishedCommitment(establishedText)
+  }
+
+  // Other matched person states stay strict. In particular, "前队友是否
+  // 知情/同意" is not supported by merely naming a former teammate.
+  return false
 }
 
 function hasSupportedCommitmentAction(establishedText: string, candidateText: string): boolean {
@@ -4662,20 +4774,23 @@ export async function generateStoryTurn(request: StoryTurnRequest): Promise<Stor
 
   for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
     let parsedTurn: StoryTurn | undefined
+    let modelRecord: Record<string, unknown> | undefined
     try {
       const outputFormat = getStoryTurnOutputFormat(request, attempt)
-      const record = await requestModelRecord({
-        systemPrompt: storyTurnSystemPrompt,
+      modelRecord = await requestModelRecord({
+        systemPrompt: isConfirmedCurveFirstTurnRequest(request)
+          ? getConfirmedCurveFirstTurnSystemPrompt()
+          : storyTurnSystemPrompt,
         userPrompt: buildStoryTurnPrompt(request, state, repairMessage, outputFormat),
         temperature: getStoryTurnTemperature(
           request.mode,
           attempt,
           Boolean(request.confirmedCurve && request.mode === 'start' && request.history.length === 0),
         ),
-        maxTokens: storyTurnMaxTokens,
+        maxTokens: getStoryTurnMaxTokens(request, outputFormat),
         diagnosticStage: 'story-turn',
       }, '模型没有返回下一段可继续发展的故事情境，请重试。')
-      const turn = parseModelStoryTurn(record, request, state, outputFormat)
+      const turn = parseModelStoryTurn(modelRecord, request, state, outputFormat)
       parsedTurn = turn
       validateSystemDraftStoryTurnContinuation(request, turn)
       validateConfirmedCurveStoryTurnContinuation(request, turn)
@@ -4691,7 +4806,11 @@ export async function generateStoryTurn(request: StoryTurnRequest): Promise<Stor
         attempt: attempt + 1,
         maxAttempts: maximumAttempts,
         reason: error instanceof AppError ? error.message : '回合没有通过结构或事实边界校验。',
-        ...(parsedTurn ? { response: summarizeModelResponse(parsedTurn) } : {}),
+        ...(modelRecord
+          ? { response: summarizeModelResponse(modelRecord) }
+          : parsedTurn
+            ? { response: summarizeModelResponse(parsedTurn) }
+            : {}),
       })
       repairMessage = describeStoryTurnValidationFailure(lastFailure)
       console.warn(
@@ -4721,8 +4840,23 @@ export async function generateStoryTurn(request: StoryTurnRequest): Promise<Stor
     return fallback
   }
 
+  const openingFailureMessage = isConfirmedCurveFirstTurnRequest(request)
+    ? `模型连续 ${maximumAttempts} 次仍无法只使用已确认材料生成第一回合（${repairMessage ?? '回合结构不完整'}）。主线和已确认事实没有改变；请补充当下的对象、期限或关系边界后再试，或稍后重新生成。`
+    : `模型连续 ${maximumAttempts} 次没有返回可用的下一情境（${repairMessage ?? '回合结构不完整'}），请再试一次。`
+  const authorDetailMessage = getConfirmedCurveFirstTurnAuthorDetailMessage(request)
+  if (authorDetailMessage) {
+    throw new AppError(
+      authorDetailMessage,
+      422,
+      'STORY_TURN_NEEDS_AUTHOR_DETAIL',
+      undefined,
+      undefined,
+      undefined,
+      lastFailure?.modelDiagnostic,
+    )
+  }
   throw new AppError(
-    `模型连续 ${maximumAttempts} 次没有返回可用的下一情境（${repairMessage ?? '回合结构不完整'}），请再试一次。`,
+    openingFailureMessage,
     502,
     'STORY_TURN_RETRY_EXHAUSTED',
     undefined,
@@ -4775,10 +4909,43 @@ function getStoryTurnOutputFormat(request: Pick<StoryTurnRequest, 'confirmedCurv
   return attempt === 0 ? 'detailed' : 'compact'
 }
 
+function isConfirmedCurveFirstTurnRequest(
+  request: Pick<StoryTurnRequest, 'confirmedCurve' | 'mode' | 'history'>,
+): boolean {
+  return Boolean(request.confirmedCurve && request.mode === 'start' && request.history.length === 0)
+}
+
+/**
+ * Some relationship-only premises establish a real conflict but no present
+ * boundary from which the protagonist can safely act.  After the model has
+ * exhausted its bounded repair attempts, return an author-facing question
+ * instead of inviting a fourth attempt to invent a meeting, deadline, or
+ * response from the other person.
+ */
+function getConfirmedCurveFirstTurnAuthorDetailMessage(request: StoryTurnRequest): string | undefined {
+  if (!isConfirmedCurveFirstTurnRequest(request)) return undefined
+
+  const authorText = getConfirmedCurveOpeningAuthorSourceTexts(request).join('；')
+  const hasRelationshipPressure = /(?:姐姐|哥哥|朋友|队友|家人|同事|前任|关系|答应|承诺|约定|不再)/u.test(authorText)
+  const hasPresentActionBoundary = /(?:今晚|明天|后天|今天|周[一二三四五六日天]|月底|展出前|布置前|交接前|期限|截止|正在|此刻|当下|刚刚|已经约|约好|见面|当面|通话|联系|收到|发现|交给|提交|归还|拿着|站在)/u.test(authorText)
+  if (!hasRelationshipPressure || hasPresentActionBoundary) return undefined
+
+  const subject = request.seed.subject?.trim() || '主角'
+  return `已确认主线中的关系和承诺足以形成取舍，但还没有作者给出的当下可执行边界。为了不替${subject}假定他人如何回应，请先补充一项可核对的当前条件：两人此刻能否交谈、卖店前的明确期限，或${subject}可以自行完成的动作。主线和已确认事实没有改变。`
+}
+
 function getStoryTurnTemperature(mode: StoryTurnMode, attempt: number, strictOpening = false): number {
-  if (strictOpening) return attempt === 0 ? 0.32 : 0.12
+  if (strictOpening) return attempt === 0 ? 0.08 : 0.01
   if (attempt === 0) return mode === 'conclude' ? 0.52 : 0.6
   return mode === 'conclude' ? 0.34 : 0.42
+}
+
+function getStoryTurnMaxTokens(
+  request: Pick<StoryTurnRequest, 'confirmedCurve' | 'mode' | 'history'>,
+  outputFormat: StoryTurnOutputFormat,
+): number {
+  if (outputFormat === 'compact' && isConfirmedCurveFirstTurnRequest(request)) return 1_500
+  return storyTurnMaxTokens
 }
 
 async function reportStoryTurnGroundingWarning(
@@ -5598,7 +5765,7 @@ const genericOpeningOptionLabels = new Set([
   '先面对承诺',
 ])
 
-const opaqueConfirmedOpeningTextPattern = /(?:暂定[：:]|先回应前项|先看另一端|先明确影响|前项|另一端|上一项|确认后的(?:卡点|起点|阻碍)|当前边界|尚待决定的影响)/u
+const opaqueConfirmedOpeningTextPattern = /(?:暂定[：:]|先回应前项|先看另一端|先明确影响|前项|另一端|上一项|确认后的(?:卡点|起点|阻碍)|当前边界|尚待决定的影响|当前处境|触发取舍|曲线节点|作者(?:事实|原文)?|系统(?:提案|节点|曲线)?)/u
 
 function getConfirmedCurveFirstTurnQualityIssue(
   request: SystemDraftContinuationRequest,
@@ -5656,6 +5823,17 @@ function getConfirmedCurveFirstTurnQualityIssue(
     return '三个选择没有形成不同事实之间的当下判断'
   }
 
+  const plannedAnchors = getConfirmedCurveOpeningAnchorPlan(request)
+  if (plannedAnchors.length >= generatedOptionCount) {
+    const coveredPlannedAnchors = plannedAnchors.filter((anchor) => (
+      turn.options.some((option) => [option.action, option.immediateConsequence, option.laterEffect]
+        .some((text) => openingTextContainsAnchor(text, anchor)))
+    ))
+    if (coveredPlannedAnchors.length < generatedOptionCount) {
+      return '三个选择没有分别覆盖期限、承诺/关系和对象等作者事实锚点'
+    }
+  }
+
   const optionSignatures = turn.options.map((option) => normalizeOpeningText(
     `${option.label}${option.action}${option.immediateConsequence}${option.laterEffect}`,
   ))
@@ -5666,7 +5844,9 @@ function getConfirmedCurveFirstTurnQualityIssue(
   return undefined
 }
 
-function getConfirmedCurveOpeningAuthorSourceTexts(request: SystemDraftContinuationRequest): string[] {
+function getConfirmedCurveOpeningAuthorSourceTexts(
+  request: Pick<StoryTurnRequest, 'seed' | 'confirmedCurve'>,
+): string[] {
   const confirmedCurve = request.confirmedCurve
   const integratedSourceFacts = confirmedCurve?.design?.sourceFacts
     .filter((fact) => fact.disposition === 'integrated')
@@ -5684,6 +5864,48 @@ function getConfirmedCurveOpeningAuthorSourceTexts(request: SystemDraftContinuat
     ...integratedSourceFacts,
     ...authorEditedBeats,
   ])
+}
+
+/**
+ * Pick a small, readable set of author phrases for the opening contract.
+ * Feeding every substring of the ledger back to the model makes it easy for
+ * the model to satisfy grounding with a vague fragment while inventing the
+ * actual scene around it. Prefer one deadline, one commitment/relationship,
+ * and one object/goal phrase, then fill any missing slot from the source.
+ */
+function getConfirmedCurveOpeningAnchorPlan(
+  request: Pick<StoryTurnRequest, 'seed' | 'confirmedCurve'>,
+): string[] {
+  const sources = getConfirmedCurveOpeningAuthorSourceTexts(request)
+  const candidates = [...new Set(sources.flatMap(getOpeningAnchorCandidates))]
+    .filter((candidate) => candidate.length >= 4)
+  const chosen: string[] = []
+  const pick = (...patterns: RegExp[]) => {
+    const candidate = candidates.find((value) => (
+      patterns.some((pattern) => pattern.test(value))
+      && !chosen.some((item) => normalizeOpeningText(item) === normalizeOpeningText(value))
+    ))
+    if (candidate) chosen.push(candidate)
+  }
+
+  // Prefer a concrete pressure before a generic deadline hidden in the goal.
+  pick(/(?:归还|缺失|卖掉|准备|无法|不能|必须|阻碍)/u)
+  pick(/(?:今晚|明天|后天|今天|明早|明晚|周[一二三四五六日天]|月底|展出前|布置前|交接前|期限|截止|之前)/u)
+  // A direct author promise is stronger evidence than merely naming a
+  // relationship such as a former teammate or sibling.
+  pick(/(?:答应|承诺|约定|保证|不再)/u)
+  pick(/(?:姐姐|朋友|队友|家人|同事|前任|关系)/u)
+  const goal = request.seed.lockedGoal?.trim()
+  if (goal && goal.length >= 4 && !chosen.some((item) => normalizeOpeningText(item) === normalizeOpeningText(goal))) {
+    chosen.push(goal)
+  }
+  pick(/(?:投影仪|短片|作品|名字|书店|手稿|最后一页|出版社|耳环|礼服|报告)/u)
+  for (const candidate of candidates) {
+    if (chosen.length >= generatedOptionCount) break
+    if (!chosen.some((item) => normalizeOpeningText(item) === normalizeOpeningText(candidate))) chosen.push(candidate)
+  }
+
+  return chosen.slice(0, generatedOptionCount)
 }
 
 function findConfirmedCurveProposalEcho(
@@ -6696,6 +6918,9 @@ function describeStoryTurnValidationFailure(error: unknown): string {
   if (/时间|日期|精确|倒数/iu.test(error.message)) {
     return '上一版加入了未经确认的时间或数量；请删除具体时限，只保留已确认条件。'
   }
+  if (/流程|方案|他人回应|后续状态|关系判断/iu.test(error.message)) {
+    return '上一版把未经确认的流程、方案或他人回应写成了剧情；请只写主角此刻可选的判断和未改变的作者事实。'
+  }
   if (/人物|关系|过去经历|他人状态/iu.test(error.message)) {
     return '上一版加入了未经确认的人物、关系或经历；请回到已确认主体和事实。'
   }
@@ -6912,6 +7137,24 @@ const systemConflictCoreDraftSystemPrompt = `你是一位擅长把普通念头�
 
 const systemDraftFirstLayerScopeSupplement = `第一层只提出可选择的创意方向，不能写具体小剧情。每条 premise 必须以“暂定：”开头，并只留下一个会让目标停住的钩子；tradeoff 必须写成“……还是……”的两难。允许一个当前物件、一个反常痕迹、一个匿名人物、一个代价或一个有限机会；门票、手机、工作人员等普通词可以作为钩子的载体，但不能把它延展为购买、支付、核验、通讯或机构流程。不能写完整场景、过去关系、行动链、精确时限或既定结果；也不要写寻找、移动、等待、到达、解除绑定、改用其他方式等具体执行步骤。凡是把一个创意钩子扩展成资源操作状态、流程或既定后果的内容都必须删除。`
 
+const richSystemConflictCoreDraftSystemPrompt = `你是一位严谨的中文故事编辑。用户已经提供了足够具体的故事事实；你的任务是把这些事实重新组织成三条可比较的“系统暂定”创作方向，不得再发明场景。
+
+必须严格返回 JSON 对象，不要 Markdown、解释或代码块，使用简体中文。若输入有 lockedGoal，goal 必须保持服务端提供的目标，不要改写；只返回 stake、constraint 和 directions。directions 必须恰好三条，三条 mechanismType 必须互不相同，并且每条只突出一种已经由作者写出的因果机制。每条 premise 必须以“暂定：”开头，tradeoff 必须是清楚的“……还是……”二选一。
+
+这是信息丰富输入：作者事实是唯一可用的事实源。每条 premise 和 tradeoff 至少逐字保留一个作者原文中的连续短语；三条方向合计至少使用两项不同作者事实。允许使用“继续、暂缓、保留、重新判断、承担取舍”等抽象连接词，但不得新增任何普通物件、设备、通讯、字迹、消息、工作人员、匿名人物、地点、机构流程、现场事件、过去经历、他人回应、资源、权限、精确时间、数字或永久结果。尤其不要写手机、快递单、钢笔、便签、门票、陌生字句、陌生人、浮现、写着、发来、贴出等新载体或事件。
+
+三条方向应分别突出：作者已有期限/当前条件如何卡住目标；作者已有承诺或关系如何制造取舍；作者已有对象/事件如何改变选择的意义或归属。不要把三条方向写成同一句目标的同义复述，也不要把多个作者事实塞进同一条 premise。stake 和 constraint 也只能抽象概括作者已给出的压力，不能新增资源状态或解法。`
+
+function getSystemConflictCoreDraftSystemPrompt(
+  seed: Pick<StorySeed, 'lockedGoal' | 'lockedFacts'>,
+): string {
+  if (hasSparseSystemDraftSeed(seed)) {
+    return `${systemConflictCoreDraftSystemPrompt}\n\n${systemDraftFirstLayerScopeSupplement}`
+  }
+
+  return richSystemConflictCoreDraftSystemPrompt
+}
+
 const headTailSystemPrompt = `你是一位擅长短篇故事结构的中文编辑。根据已经确认的故事基础，提出能驱动后续创作的开场、关键行动与结尾组合。
 
 必须严格返回 JSON 对象，不要 Markdown，不要解释，不要代码块。输出内容使用简体中文。输入会包含用户已选的应对方向，三个方案都必须从这条方向实际开始，而不是改用另一条未选方向。开场是迫使故事开始的激励事件；高潮是主角必须亲自完成的关键行动；结尾是该行动带来的可验证结果，必须明确已确认主线目标如何完成、延后、主动放弃或重新确认，并回应开场线索。结尾不能只重复高潮行动，也不能只写“事情解决了”之类空泛判断。三个方案要在事件切入、关键行动、结局结果或代价上明显不同，但不得改变故事种子中的锁定事实和目标。
@@ -6954,6 +7197,20 @@ const storyTurnSystemPrompt = `你是一位擅长互动短篇故事的中文编�
 当任务是 conclude 时，用户刚确认的选择只表示“从这条已发生的路径开始收束”，它不必等于预定高潮行动。你要生成一个不再需要用户选择的收束情境，并在其中写出主角实际完成的结尾行动，使其自然兑现预定高潮的语义、预定结尾结果与开场线索。结尾可以补足不承担关键因果的自然过渡，例如饭已端上桌时写主角坐下、拿起筷子再吃饭；这种桥接不是新的分支、资源、许可或重大事件。不得用桥接动作凭空消除既有限制，或补写新的关键关系、能力、权限、信息、资源、外部决定。收束情境不应再提供选项；详细状态结构才需要返回实际结尾行动的 narrativeAction 和 transition。phase、isConclusion、canConclude 和 node.goalState 均由服务端计算，不要在输出中添加这些字段。
 
 生成顺序提示：先写 node 和 conflict，再写 question；非收束时逐个完成每个 option。若本次要求详细状态结构，再补齐每个 option 中的 narrativeAction 和 transition，收束时补齐顶层 narrativeAction 和 transition；若本次要求紧凑叙事结构，则绝不输出这些内部字段。详细状态结构中 transition.introducedFacts 即使为空也必须保留为空数组 []。`
+
+function getConfirmedCurveFirstTurnSystemPrompt(): string {
+  return `你是中文互动故事的开场编辑。现在只生成作者已经确认主线后的第一个可选择情境，必须严格返回 JSON，不要 Markdown、解释或额外字段。
+
+只使用请求中列出的作者原始事实、已确认 foundation、已确认曲线节点和作者已接受的方向。不要写小说段落、未来大纲、高潮、结局或系统审阅说明。不要把任何尚未确认的内容写成当前事实。
+
+首回合禁止新增：手机、消息、纸条、门票、快递、钢笔、设备状态、通讯渠道、工作人员、机构流程、地点、柜台、店员、书架、入口、窗口、匿名人物、人物回应或内部状态、过去经历、精确或相对时间、数量、资源、权限、经历和永久后果。也不要使用“暂定：”“前项”“另一端”“已确认条件”等占位或递归提案词。作者事实中已经出现的对象、期限、承诺和关系可以逐字保留，但不得扩写成新的事件。
+
+这是一个锚点拼装合同，不是自由场景写作：每个 node/conflict/option 字段只能使用请求中列出的主体、目标和作者事实锚点，再加“继续、暂缓、保留、重新判断、承担、面对、决定、是否、还是、尚待处理”等抽象连接词。用户提示里的“三项选择句式”是可直接照抄的输出格式，不要为了避免重复而改写成场景、行动计划或关系推断。任何不在锚点中的具体名词都视为未确认事实，即使它在现实场景中很常见也不能写入。若缺少细节，宁可重复一个较短的作者锚点并说明取舍，也不要补出场所、设施、道具、流程、方案或他人行动。尤其不要把已知人物可能如何回应、计划如何推进、共同记忆或关系结论写进 immediateConsequence 或 laterEffect；这些都还没有被作者确认。
+
+node.event 必须用一至两句写出具体当前卡点，包含主体和至少一个作者事实；node.purpose 说明它如何承接曲线并把作者带到尚未决定的取舍。conflict 必须具体写出阻碍、两端和未解决压力。恰好三个 option 必须是不同的主动判断，标题直接说出对象、期限、承诺或关系；每项 action、immediateConsequence、laterEffect 只能使用已确认材料，laterEffect 只能写尚待处理的牵引，不能写已经发生的新事实。紧凑首回合不输出 narrativeAction 或 transition。
+
+只输出以下结构。options 数组已经展示三项，必须保留恰好三项；不要删掉或合并任何一项：${storyTurnOngoingCompactResponseSchema}`
+}
 
 const storyTurnOptionRefinementSystemPrompt = `你是一位擅长互动短篇故事的中文编辑。你只修改当前情境中的一个备选行动，绝不改写已经确认的故事路径、当前情境、另外两条选择或预定的故事两端。`
 
@@ -7079,10 +7336,22 @@ const storyTurnOngoingCompactResponseSchema = `{
     "question": "主角此刻必须回答的问题",
     "options": [
       {
-        "label": "不超过 12 个字的选择名",
-        "action": "主角具体怎么做，不超过 90 字",
-        "immediateConsequence": "立即后果，不超过 90 字",
-        "laterEffect": "尚未发生的风险、线索或代价；不能预告具体行动或既定结果，不超过 90 字"
+        "label": "第一种不同的选择名",
+        "action": "第一种选择：主角具体怎么做，不超过 90 字",
+        "immediateConsequence": "第一种选择的立即后果，不超过 90 字",
+        "laterEffect": "第一种选择尚未发生的后续牵引，不超过 90 字"
+      },
+      {
+        "label": "第二种不同的选择名",
+        "action": "第二种选择：主角具体怎么做，不超过 90 字",
+        "immediateConsequence": "第二种选择的立即后果，不超过 90 字",
+        "laterEffect": "第二种选择尚未发生的后续牵引，不超过 90 字"
+      },
+      {
+        "label": "第三种不同的选择名",
+        "action": "第三种选择：主角具体怎么做，不超过 90 字",
+        "immediateConsequence": "第三种选择的立即后果，不超过 90 字",
+        "laterEffect": "第三种选择尚未发生的后续牵引，不超过 90 字"
       }
     ]
   }
@@ -7302,6 +7571,9 @@ function buildSystemConflictCoreDraftPrompt(
   const repair = repairMessage
     ? `${creativeDirectionInstruction}\n上一版未通过结构检查：${repairMessage}。请完整重写三条方向，仍然不要补写背景或结果。`
     : creativeDirectionInstruction
+  const firstLayerScope = hasSparseSystemDraftSeed(seed)
+    ? '\n\n粒度必须保持最小：stake、constraint、每条 premise、每条 tradeoff 各只写一句，且只表达一个条件或一个取舍。共同 stake 和 constraint 不得凭原始信息新增资源、操作状态或解法。每条 premise 可以建立一个有限的当前前提，例如“暂定：目标相关的旧物上多出一句来历不明的话”；它只建立这一项钩子，不能补成完整场景、地点或连续动作。可补入与目标直接相关的当前物件、现场限制或匿名人物；普通物件和职业称谓可以作为一个钩子的载体，但不要补入姓名、长期关系、过去经历、心理状态、许可、资源权限、他人的确定回应或结局。不能借“暂定”写出某人当面承诺、物品归属、未经许可、具体交付方式或既定后果。除非原始念头明确给出，否则不要写精确数字、钟点、日期或倒计时，账号密码、设备故障或接口、网络电量、文书条款、机构流程、他人的既定状态或过去事件；也不要把主角自己的承诺改写成他人已经拒绝或禁止联系的边界，不要把内容未知改写成他人的偏好、意愿或期待，更不要写“先做什么再做什么”的操作流程。\n\n每条 directions 都必须保留共同目标，只提出一项最小、可编辑的分支前提，明确目标为什么会因此受阻以及继续时要接受什么取舍；不要把另外两条分支的前提混进来，也不要把三条分支写成同一故事中同时成立的事实。'
+    : '\n\n富输入硬规则：stake、constraint、每条 premise 和每条 tradeoff 各只写一句、一个条件或一个取舍；只能抽象概括作者已经写出的压力。每条 premise 必须以“暂定：”开头并逐字保留一个作者连续事实短语；tradeoff 必须含“还是”，两端只能引用作者事实或“继续、暂缓、保留、重新判断、承担取舍”等抽象词。三条方向必须合计覆盖至少两项不同作者事实，并分别突出期限/当前条件、承诺/关系、对象/意义中的不同机制。禁止新增物件、人物、消息、字迹、地点、流程、场景动作、他人回应、精确时间、数字、资源、权限、过去经历或结果；不要写手机、便签、钢笔、门票、陌生字句、陌生人、浮现、写着、发来、贴出等词。'
 
   return `用户的原始念头：
 ---
@@ -7311,7 +7583,7 @@ ${idea}
 已从原文提取的故事种子：
 ${formatStorySeed(seed)}
 
-系统正在为这个念头主动提出第一层创作方向。请提出一个共同故事起点，并在其中规划恰好三条彼此独立的创作分支。不要把系统暂定内容写成用户已经说过的事实；保留所有原始信息。${goalInstruction} stake 和 constraint 共同构成三条分支共享的起点；directions 中每一条 premise 和 tradeoff 只属于自己的分支，是用户可选择的系统暂定前提。三条 mechanismType 必须不同，且每条都要能单独支撑一条冲突核心。${repair}\n\n粒度必须保持最小：stake、constraint、每条 premise、每条 tradeoff 各只写一句，且只表达一个条件或一个取舍。共同 stake 和 constraint 不得凭原始信息新增资源、操作状态或解法。每条 premise 可以建立一个有限的当前前提，例如“暂定：目标相关的旧物上多出一句来历不明的话”；它只建立这一项钩子，不能补成完整场景、地点或连续动作。可补入与目标直接相关的当前物件、现场限制或匿名人物；普通物件和职业称谓可以作为一个钩子的载体，但不要补入姓名、长期关系、过去经历、心理状态、许可、资源权限、他人的确定回应或结局。不能借“暂定”写出某人当面承诺、物品归属、未经许可、具体交付方式或既定后果。除非原始念头明确给出，否则不要写精确数字、钟点、日期或倒计时，账号密码、设备故障或接口、网络电量、文书条款、机构流程、他人的既定状态或过去事件；也不要把主角自己的承诺改写成他人已经拒绝或禁止联系的边界，不要把内容未知改写成他人的偏好、意愿或期待，更不要写“先做什么再做什么”的操作流程。\n\n每条 directions 都必须保留共同目标，只提出一项最小、可编辑的分支前提，明确目标为什么会因此受阻以及继续时要接受什么取舍；不要把另外两条分支的前提混进来，也不要把三条分支写成同一故事中同时成立的事实。严格使用以下 JSON：
+系统正在为这个念头主动提出第一层创作方向。请提出一个共同故事起点，并在其中规划恰好三条彼此独立的创作分支。不要把系统暂定内容写成用户已经说过的事实；保留所有原始信息。${goalInstruction} stake 和 constraint 共同构成三条分支共享的起点；directions 中每一条 premise 和 tradeoff 只属于自己的分支，是用户可选择的系统暂定前提。三条 mechanismType 必须不同，且每条都要能单独支撑一条冲突核心。${repair}${firstLayerScope}\n严格使用以下 JSON：
 ${getSystemConflictCoreDraftResponseSchema(seed)}`
 }
 
@@ -7332,18 +7604,24 @@ function buildSystemDraftDirectionRecoveryPrompt(
 ): string {
   const goal = seed.lockedGoal ?? seed.activeSituation
   const requestedMechanisms = requestedMechanismTypes.map((mechanismType) => `「${mechanismType}」`).join('、')
+  const scopeInstruction = hasSparseSystemDraftSeed(seed)
+    ? '每条 premise 必须以“暂定：”开头，只建立一个当前钩子。tradeoff 必须包含“还是”，并且只回应这个钩子。可以有一个物件、一个反常痕迹、一次错认或一个代价；不能展开成连续动作、追逐、带路、既定路线、机构流程、支付、证件、通讯、精确时间、过去关系、他人的已确定态度或结局。'
+    : '这是信息丰富的作者材料。只能重组原始念头中已经出现的目标、期限、承诺、关系和对象；每条 premise 必须以“暂定：”开头，并逐字保留一个作者连续事实短语；tradeoff 必须包含“还是”，只能使用作者事实和“继续、暂缓、保留、重新判断、承担取舍”等抽象词。严禁新增物件、设备、通讯、字迹、消息、工作人员、匿名人物、地点、流程、场景事件、过去经历、他人回应、资源、权限、精确时间、数字或结果。'
+  const directionGuidance = hasSparseSystemDraftSeed(seed)
+    ? '每条都要与保留方向拥有不同的戏剧杠杆，并从目标行动的题材、对象或场合中找一个有限载体；不要把不同题材都改写成同一套“陌生字迹、叫错名字、划掉名字”。不要只写“重要的东西”“当前限制”“时间受限”这类没有画面的概念。'
+    : '每条都必须从作者原文中不同的期限、承诺、关系或对象事实形成可核对的因果差异；不要寻找新的场景载体、物件、人物或事件，也不要把方向改写成同一目标的抽象同义句。'
 
   return `用户的原始念头：
 ---
 ${idea}
 ---
 
-用户已明确的目标是「${goal}」，其他信息只能作为系统暂定的创作前提，不能归因给用户。以下方向已经合格，必须保留其创意层级，但不要在输出中重复、改写或借用：
+  用户已明确的目标是「${goal}」，其他信息只能作为系统暂定的创作前提，不能归因给用户。以下方向已经合格，必须保留其创意层级，但不要在输出中重复、改写或借用：
 ${JSON.stringify(retainedDirections)}
 
-现在只补齐 ${requestedMechanismTypes.length} 条缺失的方向。mechanismType 必须分别逐字使用以下类型，不能多、不能少、不能重复：${requestedMechanisms}。每条都要与保留方向拥有不同的戏剧杠杆，并从目标行动的题材、对象或场合中找载体：可使用与目标相关的反常痕迹、错位角色、有限意外、具体可见的交换或代价，但不能把不同题材都改写成同一套“陌生字迹、叫错名字、划掉名字”。不要只写“重要的东西”“当前限制”“时间受限”这类没有画面的概念。${getSystemDraftPreferenceInstruction(preference)}
+  现在只补齐 ${requestedMechanismTypes.length} 条缺失的方向。mechanismType 必须分别逐字使用以下类型，不能多、不能少、不能重复：${requestedMechanisms}。${directionGuidance}${getSystemDraftPreferenceInstruction(preference)}
 
-每条 premise 必须以“暂定：”开头，只建立一个当前钩子。tradeoff 必须包含“还是”，并且只回应这个钩子。可以有一个物件、一个反常痕迹、一次错认或一个代价；不能展开成连续动作、追逐、带路、既定路线、机构流程、支付、证件、通讯、精确时间、过去关系、他人的已确定态度或结局。不要解释，只返回严格 JSON：
+  ${scopeInstruction}不要解释，只返回严格 JSON：
 ${systemDraftDirectionRecoveryResponseSchema}`
 }
 
@@ -7357,8 +7635,14 @@ function buildSystemConflictCoreDraftRepairPrompt(
   const goalInstruction = seed.lockedGoal
     ? `共同目标必须继续使用已锁定目标“${seed.lockedGoal}”，不要改写 goal。`
     : 'goal 必须保留原始念头中的主体、对象或关键事件。'
-  repairMessage = `${repairMessage}${getSystemDraftPreferenceInstruction(preference)}\n优先规则：重写时必须把三条方向写成各自可选择的创意钩子。先从目标的对象、动作和场合挑出不同的戏剧杠杆：反常痕迹、角色错位、有限意外、可见交换或不可轻易收回的代价都可使用；不要让所有题材只换词复用“陌生字迹、一个陌生人、划掉名字”。每条只保留一个让读者能看见的反常画面，不要只写“一件重要东西”之类没有形状的代价。premise 以“暂定：”开头，只引入一个当前物件、反常痕迹、错认、代价或有限机会。门票、手机、工作人员等普通词可以作为单一钩子的载体，但不能写购买、支付、核验、通讯或机构流程，也不能扩成连续动作、被带去某处或既定路线。label 命名钩子，tradeoff 写成“……还是……”。不要返回“条件缺口”“当前限制”“时间受限”或同义的抽象分类。此规则优先于后文任何抽象示例。`
-  return `用户的原始念头：
+  const repairGuidance = hasSparseSystemDraftSeed(seed)
+    ? '优先规则：重写时必须把三条方向写成各自可选择的创意钩子。先从目标的对象、动作和场合挑出不同的戏剧杠杆：反常痕迹、角色错位、有限意外、可见交换或不可轻易收回的代价都可使用；不要让所有题材只换词复用“陌生字迹、一个陌生人、划掉名字”。每条只保留一个让读者能看见的反常画面，不要只写“一件重要东西”之类没有形状的代价。premise 以“暂定：”开头，只引入一个当前物件、反常痕迹、错认、代价或有限机会。门票、手机、工作人员等普通词可以作为单一钩子的载体，但不能写购买、支付、核验、通讯或机构流程，也不能扩成连续动作、被带去某处或既定路线。label 命名钩子，tradeoff 写成“……还是……”。不要返回“条件缺口”“当前限制”“时间受限”或同义的抽象分类。'
+    : '最高优先级规则：这是信息丰富输入，不能再发明任何创意钩子。重写时只能使用作者原文中已经出现的目标、期限、承诺、人物关系和对象；每条 premise 与 tradeoff 至少逐字保留一个作者连续事实短语，三条合计覆盖至少两项不同事实。只允许“继续、暂缓、保留、重新判断、承担取舍”等抽象连接词。严禁新增物件、设备、通讯、字迹、消息、工作人员、匿名人物、地点、机构流程、现场事件、过去经历、他人回应、资源、权限、精确时间、数字或永久结果；不要写手机、便签、钢笔、门票、黑屏、陌生字句、浮现、写着、发来、贴出等词。每个 tradeoff 必须是恰好两个短语组成的“甲还是乙”，不要在两端之后追加“必须、只能、不得、都要、以便、从而”或第二个条件。若作者事实中有期限，直接保留期限短语即可，不要把它改写成新的处理时限。'
+  const repairScope = hasSparseSystemDraftSeed(seed)
+    ? '每条 premise 可以保留一个有限的当前创意钩子，但不能新增人物经历、物品归属、他人许可、交付方式、确定回应或结果；即使加了“暂定”也不能把这些未建立内容写成用户事实。'
+    : '信息丰富输入只能重组作者原文事实；每条 premise 与 tradeoff 至少保留一个连续原文锚点，禁止任何新物件、人物、事件、地点、流程、他人状态、资源、权限、精确时限或结果。不要使用稀疏输入的创意钩子示例，也不要用“暂定”包装新增场景。'
+  repairMessage = `${repairMessage}${getSystemDraftPreferenceInstruction(preference)}\n${repairGuidance}`
+  const prompt = `用户的原始念头：
 ---
 ${idea}
 ---
@@ -7369,10 +7653,16 @@ ${formatStorySeed(seed)}
 上一版系统暂定设定（只修正不合格的地方，仍需返回完整 JSON）：
 ${JSON.stringify(candidate)}
 
-上一版检查结果：${repairMessage}
+  上一版检查结果：${repairMessage}
 
 请重写整份 systemDraft。${goalInstruction} 每个 stake、constraint、premise、tradeoff 只能是一句、一个条件或一个取舍；删除所有精确数字、钟点、日期、倒计时、技术/设备状态、资源操作状态、文书流程、机构信息、他人既定态度、未建立的心理结论和完整行动链。每条 premise 可以保留一个有限的当前创意钩子，例如“暂定：目标相关的旧物上多出一句来历不明的话”，但不能新增人物经历、物品归属、他人许可、交付方式、确定回应或结果；即使加了“暂定”也不能把这些未建立内容写成用户事实。不要把“她答应过不再打扰”改写成对方明确拒绝或禁止联系；不要把未知内容改写成对方的期待或意愿。三条 directions 必须恰好存在、mechanismType 互不相同、彼此互斥，并且每条只保留一个最小前提和一个取舍。不要解释，只返回以下 JSON：
 ${getSystemConflictCoreDraftResponseSchema(seed)}`
+  if (hasSparseSystemDraftSeed(seed)) return prompt
+
+  return prompt.replace(
+    /每条 premise 可以保留一个有限的当前创意钩子，例如“暂定：目标相关的旧物上多出一句来历不明的话”，但不能新增人物经历、物品归属、他人许可、交付方式、确定回应或结果；即使加了“暂定”也不能把这些未建立内容写成用户事实。/u,
+    repairScope,
+  )
 }
 
 function getSystemDraftPreferenceInstruction(preference?: string): string {
@@ -8043,8 +8333,13 @@ function buildConfirmedCurveFirstTurnPrompt(
     .flatMap(getOpeningAnchorCandidates))]
     .filter((anchor) => anchor.length >= 4)
     .slice(0, 16)
+  const openingAnchorPlan = getConfirmedCurveOpeningAnchorPlan(request)
   const subject = request.seed.subject?.trim() || '主角'
   const goal = request.seed.lockedGoal?.trim() || '当前目标'
+  const openingOptionSkeletons = openingAnchorPlan.map((anchor, index) => {
+    const verb = ['面对', '保留', '重新判断'][index] ?? '面对'
+    return `${index + 1}. action 以“${subject}先${verb}「${anchor}」”开头；immediateConsequence 只写“「${anchor}」仍是当前事实”；laterEffect 只写“围绕「${anchor}」的取舍仍待${subject}判断”。`
+  })
   const repair = repairMessage
     ? `\n上一版没有通过首回合事实或质量闸门。${repairMessage} 请完整重写，不要沿用上一版的句子。重试时只能逐字使用下列作者事实锚点：${JSON.stringify(openingAnchors)}。不要写“暂定：”、前项、另一端、已确认条件等审阅元语言；不要用“设备”“某人”或“当时”替代缺失事实。`
     : ''
@@ -8059,16 +8354,19 @@ function buildConfirmedCurveFirstTurnPrompt(
   })}
 已确认曲线的因果顺序（只承接层次，不复述系统提案句）：${JSON.stringify(confirmedStructure)}
 已确认原始事实：${JSON.stringify(sourceFacts)}
-作者可直接核对的事实锚点（可逐字使用；不要把它们扩写成新事件）：${JSON.stringify(openingAnchors)}
+  作者可直接核对的事实锚点（可逐字使用；不要把它们扩写成新事件）：${JSON.stringify(openingAnchors)}
+  三项选择必须分别覆盖的锚点（每项至少使用其中一项，优先逐字照抄）：${JSON.stringify(openingAnchorPlan)}
+  三项选择的可直接照抄句式（必须按此语法组织；只替换锚点，不能为了自然叙事补出细节）：
+${openingOptionSkeletons.join('\n')}
 
-硬性边界：除了上面列出的主体、目标和作者事实锚点，不得出现任何新的关键名词、人物回应、物件、设备、通讯、票券、机构流程、过去经历、日期、时刻、数量或永久结果。曲线只提供“当前处境 -> 卡点 -> 取舍 -> 主动判断”的顺序，不能把其中任何系统提案逐句搬进读者界面。下面作者原文中的物件、期限、关系可以原样逐字保留；“今晚”“周五”“展出前”“姐姐”“投影仪”等如出现在锚点中就是允许的事实，不要把它们误删或换成新的时间和物件。未写出的细节必须留为待决定，而不是用常识补齐。不得把任何未来提案写成已经发生。
+硬性边界：除了上面列出的主体、目标和作者事实锚点，不得出现任何新的关键名词、人物回应、物件、设备、通讯、票券、机构流程、方案、过去经历、日期、时刻、数量或永久结果。曲线只提供“当前处境 -> 卡点 -> 取舍 -> 主动判断”的顺序，不能把其中任何系统提案逐句搬进读者界面。下面作者原文中的物件、期限、关系可以原样逐字保留；“今晚”“周五”“展出前”“姐姐”“投影仪”等如出现在锚点中就是允许的事实，不要把它们误删或换成新的时间和物件。未写出的细节必须留为待决定，而不是用常识补齐。不得把任何未来提案写成已经发生。已知人物可以作为主角行动的对象，但不能预言其“可能、会、将”如何回应，也不能写出其新决定、流程、计划、记忆、责任或态度。
 
 质量要求（比套模板更重要）：
 - node.event 用 1 至 2 句写出此刻的具体卡点，必须包含主体和至少一个事实锚点；不要只写“确认的阻碍”或“目标停住”。
 - node.purpose 说明这个卡点怎样承接已经确认的因果顺序，并把作者带到尚未决定的取舍；不要写解决结果。
 - conflict.conflict 必须同时承接已确认的阻碍与取舍，conflict.action 必须点出两端，conflict.consequence 只写尚未解决的当下压力。
-- 三个选项必须是三个不同的当下判断。每项 action、immediateConsequence、laterEffect 至少逐字承接一个作者事实锚点，三项合计至少使用两项不同锚点；标题要直接说清对应的对象、期限、承诺或关系，不能写“先回应前项”“先看另一端”“先保留目标”“先明确影响”等占位标题。
-- laterEffect 只能写可能继续面对的牵引，不能写成已经发生的新事实；所有 option 的 introducedFacts 由服务端保持为空。
+  - 三个选项必须是三个不同的当下判断。选项一、二、三按顺序分别优先使用上面的第一个、第二个、第三个锚点；每项 action、immediateConsequence、laterEffect 至少逐字承接对应锚点，必须采用上面的短句式，不能用“她已”“他答应”“截止”等新状态替代作者原句。标题要直接说清对应的对象、期限、承诺或关系，不能写“先回应前项”“先看另一端”“先保留目标”“先明确影响”等占位标题。
+  - immediateConsequence 只能说明主角已把哪项已有事实摆到眼前，不能补写他人如何反应、某个流程怎样继续、或一项计划怎样改变。laterEffect 只能写可能继续面对的牵引，不能写成已经发生的新事实；所有 option 的 introducedFacts 由服务端保持为空。
 不要机械复制同一句目标，不要输出“暂定：”或“已确认条件”等系统审阅元语言。将已确认曲线转成当前可判断的作者事实：用一个锚点写卡点，用另一个锚点写取舍，再让三个选项分别指出不同的判断入口。
 ${repair}
 
