@@ -3759,9 +3759,11 @@ const compactCurveGenerationSystemPrompt = `你是故事共创编辑，只负责
 
 只输出一个 JSON 对象，不能有 Markdown、解释或额外键。对象只有 title 和 beats；beats 必须恰好 5 项，顺序固定为 current-state、trigger、escalation、climax-choice、resolution。每项只能有 kind、detail、sourceFactIds 三个键；sourceFactIds 只能使用用户材料中给出的真实 ID，不能创造 ID。服务端会补充节点标题、依赖关系、因果锚点和共享 foundation，不要输出 foundation。
 
-current-state 只能概括用户已写出的当前处境。其余四项必须以“暂定：”开头，各写一个不超过 70 字的抽象因果句：trigger 说明什么使目标停住，escalation 说明继续目标会承担什么取舍，climax-choice 说明主角必须在两端之间作出的主动选择，resolution 说明该选择带来的可辨认变化。只用用户材料中的目标、期限、承诺、关系和对象；不要新增场景动作、对白、未经确认的设备操作、文件流程、人物姓名、精确数字、确定的他人回应或已经发生的结果。作者已明确的物件、期限和关系可以作为条件逐字保留，不能为了抽象而换成“某个安排”后继续声称承接原事实。禁止使用“已经完成、已经解决、最终得到、终于、结果是”等既成结果写法；每一项都必须保持尚待作者确认。
+current-state 只能概括用户已写出的当前处境。其余四项必须以“暂定：”开头，各写一个不超过 90 字、可被作者逐字审阅的抽象因果句：trigger 只说明一个已确认条件怎样使目标停住；escalation 使用不同的已确认条件，说明继续目标要承担什么取舍；climax-choice 写出主体在两端之间的主动选择；resolution 写出选择后哪一项安排、理解或关系会改变。只用用户材料中的目标、期限、承诺、关系和对象；不要新增场景动作、对白、未经确认的设备操作、文件流程、人物姓名、精确数字、确定的他人回应或已经发生的结果。作者已明确的物件、期限和关系可以作为条件逐字保留，不能为了抽象而换成“某个安排”后继续声称承接原事实。禁止使用“已经完成、已经解决、最终得到、终于、结果是”等既成结果写法；每一项都必须保持尚待作者确认。
 
-方向要求：严格遵守用户请求中列出的“方向层级硬约束”。每个所选方向都要先改变目标受阻或取舍升级，再改变后续的主动选择或变化；方向词只能作为抽象因果连接，不能代替作者事实，也不能在任意节点机械重复。反差必须在 trigger/escalation 与 climax-choice/resolution 中各至少出现一个“原有安排、旧办法、局限、反而、失效、重新”中的词；成长必须在 climax-choice 出现“选择、承担、承认、放下、接受、重新”之一，并在 resolution 出现“改变、成长、理解、学会、调整、重新”之一。严格按这个最小形状输出：{"title":"暂定主线","beats":[{"kind":"current-state","detail":"用户当前处境","sourceFactIds":["source-fact-1"]},{"kind":"trigger","detail":"暂定：既有期限使目标停住","sourceFactIds":["source-fact-2"]},{"kind":"escalation","detail":"暂定：继续目标会触碰已确认承诺","sourceFactIds":["source-fact-3"]},{"kind":"climax-choice","detail":"暂定：主角必须在目标与承诺之间选择","sourceFactIds":["source-fact-3"]},{"kind":"resolution","detail":"暂定：选择改变主角对目标的理解","sourceFactIds":["source-fact-2"]}]}`
+避免模板化：不要把同一整句目标复制到四个节点。每个节点都要有不同的因果动词和不同的事实锚点；resolution 不能只把“选择”换成“重新理解”，必须明确说出哪一项已确认安排会改变。不要写“使提交目标停住”“承担某事实的取舍”这种脱离主体和两端的空壳句；把作者原文中的主体、对象或承诺放回句子中。
+
+方向要求：严格遵守用户请求中列出的“方向层级硬约束”。每个所选方向都要先改变目标受阻或取舍升级，再改变后续的主动选择或变化；方向词只能作为抽象因果连接，不能代替作者事实，也不能在任意节点机械重复。反差必须在 trigger/escalation 与 climax-choice/resolution 中各至少出现一个“原有安排、旧办法、局限、反而、失效、重新”中的词；成长必须在 climax-choice 出现“选择、承担、承认、放下、接受、重新”之一，并在 resolution 出现“改变、成长、理解、学会、调整、重新”之一。严格按这个最小形状输出：{"title":"暂定主线","beats":[{"kind":"current-state","detail":"用户当前处境","sourceFactIds":["source-fact-1"]},{"kind":"trigger","detail":"暂定：主体的已确认条件使目标停住","sourceFactIds":["source-fact-2"]},{"kind":"escalation","detail":"暂定：另一条已确认承诺使继续目标必须承担取舍","sourceFactIds":["source-fact-3"]},{"kind":"climax-choice","detail":"暂定：主体必须在目标的一端与承诺的另一端之间选择","sourceFactIds":["source-fact-3"]},{"kind":"resolution","detail":"暂定：这次选择让已确认的原有安排改变，并重新理解其中一端","sourceFactIds":["source-fact-2"]}]}`
 
 const compactCurveGenerationRepairSystemPrompt = `你是故事结构修复器。只输出一个 JSON 对象，不能有 Markdown、解释或额外键；对象只有 title 和 beats。beats 必须恰好 5 项，顺序固定为 current-state、trigger、escalation、climax-choice、resolution；每项只能有 kind、detail、sourceFactIds 三个键，sourceFactIds 只能复制输入中的真实 ID。不要输出 foundation、title 以外的节点字段或任何场景化内容。current-state 保留用户事实；其余 detail 以“暂定：”开头，每项只写一个抽象因果关系，并分别推进目标受阻、取舍升级、主动选择和选择后的变化。
 
@@ -3818,7 +3820,7 @@ function buildCompactCurveGenerationPrompt(
     `作者选择的方向：${directionTerms.join('、') || '开放方向'}；每个所选方向都必须先影响目标受阻或取舍升级，再影响主动选择或结局变化，并让每项推进不同因果。`,
     `方向层级硬约束（列出的词是允许的抽象连接，不是新增事实）：${directionRequirements || '保持抽象因果并避免模板重复。'}`,
     `方向节点最低可审阅形状：${getModelDirectionMarkerInstruction(brief)}`,
-    '安全结构：trigger=目标为什么停住；escalation=继续目标会承担什么取舍；climax-choice=主角在两端之间的主动选择；resolution=选择造成的可辨认变化。',
+    '安全结构：trigger=主体+一个已确认条件+目标为什么停住；escalation=不同的已确认条件+继续目标要承担的取舍；climax-choice=主体在两端之间的主动选择；resolution=选择后哪项已确认安排、理解或关系会改变。四个节点必须各有不同的因果动词，不得把同一整句目标复制到每个节点。',
     `用户原始想法：${idea}`,
     `原始材料（sourceFactIds 只能从这里复制；anchor 是可逐字核对的原文短语）：${JSON.stringify(sourceFacts)}`,
     `事实覆盖清单：整条曲线（current-state 可承接背景）必须覆盖每个 ID：${sourceFactIds.join('、') || '无'}。sourceFactIds 是可审阅的事实声明：单个提案节点只列 detail 中实际出现的事实 ID；每个 ID 都必须在 detail 中保留其 anchor 或原文的另一个有区分度连续短语（至少三个字）。没有写进 detail 的材料不要列 ID；不能把“原有安排”“既有条件”“当前问题”等泛化句挂到任何未出现的事实 ID。`,
@@ -3831,7 +3833,7 @@ function buildCompactCurveGenerationPrompt(
       `本轮只允许复用这些作者原文锚点：${JSON.stringify({ goal: seed.lockedGoal, facts: seed.lockedFacts })}。方向层级硬约束中列出的抽象词可以作为连接词，但必须紧贴这些锚点，不能独立变成新事实。请整条重写，只输出上述 5 个 beat；不要从亲属、身份、物件或常识推断额外背景、人物意图、具体场景或结果，也不要沿用上一轮句子。`,
       buildModelFactRepairMap(design),
     ] : []),
-    '严格按示例形状输出：{"title":"暂定主线","beats":[{"kind":"current-state","detail":"作者当前处境","sourceFactIds":["source-fact-1"]},{"kind":"trigger","detail":"暂定：既有条件使目标停住","sourceFactIds":["source-fact-2"]},{"kind":"escalation","detail":"暂定：继续目标会承担具体取舍","sourceFactIds":["source-fact-3"]},{"kind":"climax-choice","detail":"暂定：主角必须在两端之间选择","sourceFactIds":["source-fact-3"]},{"kind":"resolution","detail":"暂定：选择带来可辨认的变化","sourceFactIds":["source-fact-2"]}]}',
+    '严格按示例形状输出：{"title":"暂定主线","beats":[{"kind":"current-state","detail":"作者当前处境","sourceFactIds":["source-fact-1"]},{"kind":"trigger","detail":"暂定：主体的已确认条件使目标停住","sourceFactIds":["source-fact-2"]},{"kind":"escalation","detail":"暂定：另一条已确认承诺使继续目标必须承担取舍","sourceFactIds":["source-fact-3"]},{"kind":"climax-choice","detail":"暂定：主体必须在目标的一端与承诺的另一端之间选择","sourceFactIds":["source-fact-3"]},{"kind":"resolution","detail":"暂定：这次选择让已确认的原有安排改变，并重新理解其中一端","sourceFactIds":["source-fact-2"]}]}',
   ].join('\n')
 }
 

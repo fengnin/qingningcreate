@@ -82,22 +82,22 @@ function createValidDraft(): StoryConflictCoreSystemDraft {
     origin: 'model',
     directions: [
       {
-        label: '信息未明',
+        label: '归还期限',
         mechanismType: 'information-gap',
-        premise: '暂定：完成目标所需的一项信息尚未确认',
-        tradeoff: '在信息尚未确认时决定是否送回去，还是暂不继续',
+        premise: '暂定：礼服明早要还，让耳环是否送回去的决定不能继续搁置',
+        tradeoff: '在礼服明早要还前决定要不要送回耳环，还是暂不联系',
       },
       {
-        label: '启动受阻',
+        label: '断联承诺',
         mechanismType: 'initiation-block',
-        premise: '暂定：目标行动的启动条件尚未确认',
-        tradeoff: '在启动条件未确认时决定是否送回去，还是先暂缓',
+        premise: '暂定：她答应不再联系，让送回耳环的决定难以启动',
+        tradeoff: '守住不再联系的承诺，还是决定要不要送回耳环',
       },
       {
-        label: '取向取舍',
+        label: '耳环归属',
         mechanismType: 'meaning-commitment',
-        premise: '暂定：作出这个决定会改变行动的取向',
-        tradeoff: '决定是否送回去，还是暂缓以保留选择空间',
+        premise: '暂定：断联朋友的耳环让送回去的决定改变取向',
+        tradeoff: '保留断联朋友的耳环，还是在仪式前决定要不要送回去',
       },
     ],
   }
@@ -177,34 +177,34 @@ function createCompactOpeningModelResponse(event: string): Response {
       message: {
         content: JSON.stringify({
           node: {
-            title: '确认后的起点',
+            title: '归还与署名',
             event,
-            purpose: '只承接作者已经确认的阻碍与取舍。',
+            purpose: '让归还期限、不再改动作品的承诺和署名决定形成当前取舍。',
           },
           conflict: {
-            conflict: '原来的安排不能照旧推进。',
-            action: '在已经确认的取舍中决定当前下一步。',
-            consequence: '选择会留下仍待处理的代价。',
+            conflict: '投影仪今晚要归还，而她答应不再改动作品，也要决定要不要删掉自己的名字。',
+            action: '在归还投影仪、守住不改动作品的承诺和判断署名之间作出当前选择。',
+            consequence: '在展出前决定要不要删掉自己的名字仍有待判断。',
           },
-          question: '现在先怎样回应已经确认的阻碍？',
+          question: '在展出前，现在先判断哪一项？',
           options: [
             {
-              label: '先说明取舍',
-              action: '先说明自己愿意承担哪一边的取舍。',
-              immediateConsequence: '当前选择的边界变得清楚。',
-              laterEffect: '下一步仍要回应已经确认的代价。',
+              label: '先面对归还',
+              action: '先承认投影仪今晚要归还，再决定怎样继续。',
+              immediateConsequence: '投影仪今晚要归还不再被略过。',
+              laterEffect: '下一步仍要回应这项已确认条件。',
             },
             {
-              label: '先保留目标',
-              action: '先确认如何在不改变已知条件的前提下保留目标。',
-              immediateConsequence: '目标与限制被同时看见。',
-              laterEffect: '后续仍需承担不能兼得的部分。',
+              label: '先守住承诺',
+              action: '先保留她答应不再改动作品的承诺。',
+              immediateConsequence: '不再改动作品成为当前判断的一端。',
+              laterEffect: '后续仍需回应删掉自己的名字的取舍。',
             },
             {
-              label: '先面对承诺',
-              action: '先说明已确认承诺会怎样影响当前决定。',
-              immediateConsequence: '承诺不再被当成可以略过的背景。',
-              laterEffect: '接下来的选择需要回应这项承诺。',
+              label: '先看署名取舍',
+              action: '先明确在展出前决定要不要删掉自己的名字。',
+              immediateConsequence: '删掉自己的名字成为需要承担的选择。',
+              laterEffect: '接下来仍要回应投影仪今晚要归还。',
             },
           ],
         }),
@@ -1199,7 +1199,7 @@ test('uses the compact confirmed-curve opening contract without inventing state 
     process.env.DASHSCOPE_BASE_URL = 'https://model.test.invalid'
     globalThis.fetch = async () => {
       calls += 1
-      return createCompactOpeningModelResponse('沈乔面对已经确认的阻碍，先要决定怎样回应。')
+      return createCompactOpeningModelResponse('沈乔面对投影仪今晚要归还这一已确认条件，先要决定怎样回应。')
     }
 
     const spine = await startSessionStorySpineFromCurve({
@@ -1272,6 +1272,95 @@ test('does not persist a confirmed-curve opening after bounded model failure', a
     assert.equal(after.currentTurn, undefined)
     assert.equal(after.history.length, 0)
     assert.equal(after.predicament, undefined)
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+    if (previousApiKey === undefined) delete process.env.DASHSCOPE_API_KEY
+    else process.env.DASHSCOPE_API_KEY = previousApiKey
+    if (previousBaseUrl === undefined) delete process.env.DASHSCOPE_BASE_URL
+    else process.env.DASHSCOPE_BASE_URL = previousBaseUrl
+  }
+})
+
+test('rejects a confirmed-curve opening that repeats proposal text or opaque option labels', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  const previousApiKey = process.env.DASHSCOPE_API_KEY
+  const previousBaseUrl = process.env.DASHSCOPE_BASE_URL
+  const previousFetch = globalThis.fetch
+  process.env.STORY_DISABLE_MODEL = 'true'
+  try {
+    const draft = await startStoryCoCreation({
+      idea: `${richCurveIdea}（递归提案边界）`,
+      brief: { tones: ['growth'], dramaticForces: ['contrast'], allowSystemNamedCharacters: false },
+      operationId: `opening-recursion-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    })
+    const confirmed = await confirmSessionCurve({
+      storyId: draft.storyId,
+      revision: draft.revision,
+      curveId: draft.curve.id,
+    })
+    const before = getStorySessionSnapshot(confirmed.storyId)
+
+    let calls = 0
+    process.env.STORY_DISABLE_MODEL = 'false'
+    process.env.DASHSCOPE_API_KEY = 'test-only-key'
+    process.env.DASHSCOPE_BASE_URL = 'https://model.test.invalid'
+    globalThis.fetch = async () => {
+      calls += 1
+      return createCurveModelResponse({
+        node: {
+          title: '确认后的卡点',
+          event: '沈乔面对“暂定：投影仪今晚要归还使目标停住”，需要先回应前项。',
+          purpose: '把已确认节点直接展示给作者。',
+        },
+        conflict: {
+          conflict: '暂定：继续目标会承担取舍。',
+          action: '先回应前项，还是先看另一端。',
+          consequence: '当前边界仍未改变。',
+        },
+        question: '现在先回应哪一端？',
+        options: [
+          {
+            label: '先回应前项',
+            action: '先回应前项。',
+            immediateConsequence: '前项成为当前判断。',
+            laterEffect: '下一步再看另一端。',
+          },
+          {
+            label: '先保留目标',
+            action: '先保留目标。',
+            immediateConsequence: '目标暂不改变。',
+            laterEffect: '之后处理前项。',
+          },
+          {
+            label: '先看另一端',
+            action: '先看另一端。',
+            immediateConsequence: '另一端被保留。',
+            laterEffect: '之后处理前项。',
+          },
+        ],
+      })
+    }
+
+    await assert.rejects(
+      () => startSessionStorySpineFromCurve({
+        storyId: confirmed.storyId,
+        revision: confirmed.revision,
+        curveId: confirmed.curve.id,
+      }),
+      (error: unknown) => error instanceof AppError
+        && error.code === 'STORY_TURN_RETRY_EXHAUSTED'
+        && error.modelDiagnostic?.attempt === 3
+        && error.modelDiagnostic?.stage === 'story-turn-validation'
+        && /暂定|占位|前项|另一端/u.test(error.modelDiagnostic?.reason ?? ''),
+    )
+
+    assert.equal(calls, 3)
+    const after = getStorySessionSnapshot(confirmed.storyId)
+    assert.equal(after.revision, before.revision)
+    assert.equal(after.currentTurn, undefined)
+    assert.equal(after.history.length, 0)
   } finally {
     globalThis.fetch = previousFetch
     if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
@@ -1998,6 +2087,58 @@ test('uses the direct co-creation seed for a rich Chinese idea with a clear subj
   assert.ok(seed.lockedFacts.includes('她答应不再改动作品'))
 })
 
+test('treats a leading promise as a constraint instead of the protagonist goal', () => {
+  const seed = createDirectCoCreationSeed('林澈答应在周五前把祖母的手稿交给出版社，但他发现最后一页缺失，不知道是否该按承诺提交。')
+
+  assert.ok(seed)
+  assert.equal(seed.subject, '林澈')
+  assert.equal(seed.lockedGoal, '在周五前把祖母的手稿交给出版社')
+  assert.equal(seed.lockedFacts.includes('林澈答应在周五前把祖母的手稿交给出版社'), true)
+})
+
+test('rich model directions keep visible author facts and reject new scene hooks', () => {
+  const seed = createDirectCoCreationSeed(richCurveIdea)
+  assert.ok(seed)
+  const draft: StoryConflictCoreSystemDraft = {
+    goal: seed.lockedGoal ?? '在展出前决定要不要删掉自己的名字',
+    stake: '投影仪今晚要归还，让展出前的署名决定不能继续搁置',
+    constraint: '她答应不再改动作品',
+    origin: 'model',
+    directions: [
+      {
+        label: '归还期限',
+        mechanismType: 'information-gap',
+        premise: '暂定：投影仪今晚要归还，让在展出前决定要不要删掉自己的名字停住',
+        tradeoff: '先面对投影仪今晚要归还，还是暂缓决定要不要删掉自己的名字',
+      },
+      {
+        label: '不改动承诺',
+        mechanismType: 'commitment-conflict',
+        premise: '暂定：她答应不再改动作品，让删掉自己的名字成为取舍',
+        tradeoff: '守住不再改动作品，还是决定要不要删掉自己的名字',
+      },
+      {
+        label: '前队友短片',
+        mechanismType: 'meaning-commitment',
+        premise: '暂定：和前队友剪的短片，让是否删掉自己的名字改变意义',
+        tradeoff: '保留和前队友剪的短片，还是删掉自己的名字',
+      },
+    ],
+  }
+
+  assert.doesNotThrow(() => validateSystemConflictCoreDraft(richCurveIdea, seed, draft))
+
+  const inventedHook = structuredClone(draft)
+  inventedHook.directions![0] = {
+    ...inventedHook.directions![0]!,
+    premise: '暂定：投影仪里的短片结尾浮现陌生字句',
+  }
+  assert.throws(
+    () => validateSystemConflictCoreDraft(richCurveIdea, seed, inventedHook),
+    /具体场景钩子/u,
+  )
+})
+
 test('keeps a leading goal clause separate from later rich source facts', () => {
   const idea = '青柠要在周五毕业展前把祖母留下的投影仪送到学校；好友阿岚答应帮忙但要求不要署名；归还期限是周六；途中发现设备缺少电源线；青柠必须决定是否拆掉自己的展板供电；可能失去署名机会。'
   const seed = createOriginalIdeaFallbackSeed(idea, undefined)
@@ -2422,9 +2563,9 @@ test('allows abstract system draft mechanisms without inventing facts', () => {
 test('allows supported commitment summaries and abstract causal language', () => {
   const draft = createValidDraft()
   draft.stake = '继续行动将触碰自己“不再联系”的承诺'
-  draft.directions![0].tradeoff = '不再主动联系的自我约束会被触碰'
-  draft.directions![1].tradeoff = '继续行动会触碰已有约束，还是先暂缓'
-  draft.directions![2].tradeoff = '这个取向一旦形成可能不可逆，还是暂缓以保留选择空间'
+  draft.directions![0].tradeoff = '触碰自己“不再联系”的承诺，还是暂不送回耳环'
+  draft.directions![1].tradeoff = '守住已有的“不再联系”约束，还是决定要不要送回耳环'
+  draft.directions![2].tradeoff = '在仪式前决定要不要送回耳环，还是暂缓以保留选择空间'
 
   assert.doesNotThrow(() => validateSystemConflictCoreDraft(idea, seed, draft))
 })
@@ -2506,10 +2647,27 @@ test('applies the grounding boundary across unrelated domains', () => {
   const draft = createValidDraft()
   draft.goal = otherSeed.lockedGoal
   draft.stake = '继续行动可能触碰自己的“不再干预”承诺'
-  draft.constraint = '交接前仍有一个决定窗口'
-  draft.directions![0].tradeoff = '在信息尚未确认时决定是否提交，还是暂不继续'
-  draft.directions![1].tradeoff = '在已有承诺下决定是否提交，还是先暂缓'
-  draft.directions![2].tradeoff = '决定是否提交，还是暂缓以保留选择空间'
+  draft.constraint = '项目交接前仍要决定是否提交'
+  draft.directions = [
+    {
+      label: '未发送报告',
+      mechanismType: 'information-gap',
+      premise: '暂定：共享文件夹里发现一份未发送的报告，让是否提交仍需判断',
+      tradeoff: '保留未发送的报告，还是在项目交接前决定是否提交',
+    },
+    {
+      label: '不再干预',
+      mechanismType: 'initiation-block',
+      premise: '暂定：她答应不再干预原团队，让提交报告成为取舍',
+      tradeoff: '守住不再干预原团队，还是决定是否提交',
+    },
+    {
+      label: '交接时限',
+      mechanismType: 'meaning-commitment',
+      premise: '暂定：项目交接前让是否提交的决定改变后续取向',
+      tradeoff: '在项目交接前决定是否提交，还是暂不继续',
+    },
+  ]
   assert.doesNotThrow(() => validateSystemConflictCoreDraft(otherIdea, otherSeed, draft))
 
   const unsupported = [

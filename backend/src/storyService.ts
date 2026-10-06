@@ -3098,6 +3098,7 @@ export async function generateSessionPredicament(
 
 async function resolveStorySeed(request: StoryDirectionsRequest): Promise<ResolvedStorySeed> {
   let repairMessage: string | undefined
+  let lastFailure: AppError | undefined
 
   for (let attempt = 0; attempt < maxStorySeedExtractionAttempts; attempt += 1) {
     try {
@@ -3119,12 +3120,42 @@ async function resolveStorySeed(request: StoryDirectionsRequest): Promise<Resolv
       }
       if (!isRetryableStorySeedExtractionError(error)) throw error
 
+      lastFailure = withModelDiagnostic(error, {
+        stage: error instanceof AppError
+          ? error.modelDiagnostic?.stage ?? 'story-seed-extraction-validation'
+          : 'story-seed-extraction-validation',
+        attempt: attempt + 1,
+        maxAttempts: maxStorySeedExtractionAttempts,
+        reason: error instanceof AppError
+          ? error.modelDiagnostic?.reason ?? error.message
+          : '模型没有通过故事种子事实校验。',
+        response: error instanceof AppError ? error.modelDiagnostic?.response : undefined,
+      })
       repairMessage = getStorySeedExtractionRepairMessage(error)
       console.warn(`Story seed extraction rejected (attempt ${attempt + 1}): ${JSON.stringify({
         code: getErrorIdentifier(error),
-        diagnostic: error instanceof AppError ? error.modelDiagnostic : undefined,
+        diagnostic: lastFailure.modelDiagnostic,
       })}`)
     }
+  }
+
+  // A production request must not silently turn a rejected extraction into a
+  // seemingly complete deterministic story setup. The explicit local mode is
+  // retained for contract tests and offline development only.
+  if (!isExplicitLocalModelMode()) {
+    throw new AppError(
+      `模型连续 ${maxStorySeedExtractionAttempts} 次没有识别出可核对的作者事实，请重试或补充主角、目标和阻碍。`,
+      502,
+      'STORY_SEED_MODEL_GENERATION_FAILED',
+      undefined,
+      undefined,
+      undefined,
+      lastFailure?.modelDiagnostic ?? {
+        stage: 'story-seed-extraction-validation',
+        attempt: maxStorySeedExtractionAttempts,
+        maxAttempts: maxStorySeedExtractionAttempts,
+      },
+    )
   }
 
   console.warn(`Story seed extraction fell back to the original idea after ${maxStorySeedExtractionAttempts} rejected attempts.`)
@@ -3299,7 +3330,12 @@ function createOriginalIdeaAction(subject: string, verb: string, remainder: stri
   const actionRemainder = remainder.trim()
   if (!subject || !actionRemainder) return undefined
 
-  const goal = /^(?:想要|想|要|准备|打算|决定)$/u.test(verb)
+  // A promise describes a constraint around the action, not the action the
+  // protagonist is trying to complete. Keeping the commitment verb in the
+  // locked goal made every downstream card say "答应在..." and obscured the
+  // actual choice. Preserve the deadline/object phrase while leaving the
+  // promise itself in lockedFacts for the causal ledger.
+  const goal = /^(?:想要|想|要|准备|打算|决定|答应|承诺)$/u.test(verb)
     ? actionRemainder
     : `${verb}${actionRemainder}`
   return { subject, goal }
@@ -3418,6 +3454,7 @@ async function generateSystemConflictCoreDraft(
   let repairMessage: string | undefined
   let candidate: StoryConflictCoreSystemDraft | undefined
   let modelUnavailable = false
+  let lastFailure: AppError | undefined
 
   for (let attempt = 0; attempt < maxSystemDraftGenerationAttempts; attempt += 1) {
     try {
@@ -3446,6 +3483,16 @@ async function generateSystemConflictCoreDraft(
       }
       if (!isRetryableSystemDraftGenerationError(error)) throw error
 
+      lastFailure = withModelDiagnostic(error, {
+        stage: error instanceof AppError
+          ? error.modelDiagnostic?.stage ?? 'system-draft-validation'
+          : 'system-draft-validation',
+        attempt: attempt + 1,
+        maxAttempts: maxSystemDraftGenerationAttempts,
+        reason: error instanceof AppError ? error.modelDiagnostic?.reason ?? error.message : '系统暂定方向没有通过校验。',
+        response: error instanceof AppError ? error.modelDiagnostic?.response : undefined,
+      })
+
       repairMessage = describeSystemDraftGenerationFailure(error)
       if (shouldLogConflictCoreDiagnostics) {
         console.warn(`System conflict core draft rejected (attempt ${attempt + 1}): ${repairMessage}`)
@@ -3459,6 +3506,26 @@ async function generateSystemConflictCoreDraft(
   if (recoveredDraft) {
     console.warn('System draft generation kept usable creative directions and recovered missing mechanisms.')
     return recoveredDraft
+  }
+
+  // In a configured environment a rejected model draft is a generation
+  // failure, not permission to silently replace the author's material with a
+  // deterministic story hook. The local fallback remains available only for
+  // the explicit acceptance switch used by regression and contract tests.
+  if (!modelUnavailable && !isExplicitLocalModelMode()) {
+    throw new AppError(
+      `模型暂定方向连续 ${maxSystemDraftGenerationAttempts} 次没有通过事实边界校验，请重试或先补充作者信息。`,
+      502,
+      'STORY_SYSTEM_DRAFT_MODEL_GENERATION_FAILED',
+      undefined,
+      undefined,
+      undefined,
+      lastFailure?.modelDiagnostic ?? {
+        stage: 'system-draft-validation',
+        attempt: maxSystemDraftGenerationAttempts,
+        maxAttempts: maxSystemDraftGenerationAttempts,
+      },
+    )
   }
 
   const fallback = createSystemDraftCandidatePreservingFallback(idea, seed, candidate, excludedTitles)
@@ -3787,6 +3854,7 @@ function createSystemDraftDirectionCollector(
   seed: Pick<StorySeed, 'activeSituation' | 'lockedGoal' | 'lockedFacts'>,
 ): SystemDraftDirectionCollector {
   const establishedSourceTexts = [idea, ...getUserConfirmedSeedSourceTexts(seed)]
+  const enforceDetailedGrounding = !hasSparseSystemDraftSeed(seed)
   const directions: SystemDraftDirection[] = []
   const mechanismTypes = new Set<ConflictCoreMechanismType>()
   const directionTexts = new Set<string>()
@@ -3797,6 +3865,7 @@ function createSystemDraftDirectionCollector(
     add: (direction) => {
       if (mechanismTypes.has(direction.mechanismType)) return false
       if (getSystemDraftDirectionScopeIssue(direction, establishedSourceTexts, true, true)) return false
+      if (enforceDetailedGrounding && findUnestablishedSystemDraftConcreteHook(direction, establishedSourceTexts)) return false
 
       const texts = [direction.label, direction.premise, direction.tradeoff].map(normalizeGoalText)
       if (texts.some((text) => directionTexts.has(text))) return false
@@ -3983,8 +4052,12 @@ function collectSystemDraftMinimalAssumptionIssues(
   const establishedSourceTexts = [idea, ...getUserConfirmedSeedSourceTexts(seed)]
   const requireCreativeHook = draft.origin === 'model' && hasSparseSystemDraftSeed(seed)
   const enforceCreativeShape = requireCreativeHook || draft.origin === 'deterministic-fallback'
+  const richDirectionAnchors = !requireCreativeHook
+    ? getRichSystemDraftAuthorAnchors(establishedSourceTexts)
+    : []
+  const richDirectionEvidence = new Set<string>()
   for (const [index, direction] of (draft.directions ?? []).entries()) {
-    if (!requireCreativeHook) {
+    if (draft.origin === 'model' && !requireCreativeHook) {
       for (const field of [
         { label: '前提', value: direction.premise },
         { label: '取舍', value: direction.tradeoff },
@@ -4002,9 +4075,99 @@ function collectSystemDraftMinimalAssumptionIssues(
       enforceCreativeShape,
     )
     if (scopeIssue) issues.push(`第 ${index + 1} 条分支${scopeIssue}`)
+
+    // Detailed author material is already rich enough to supply the causal
+    // mechanism. A model direction may abstract those facts, but it must not
+    // smuggle in a new prop, staged interaction, or scene hook just because
+    // the branch is labelled "暂定". Sparse ideas intentionally take a
+    // separate creative-hook path above; this guard is only for the rich
+    // input path used by the legacy direction picker.
+    if (draft.origin === 'model' && !requireCreativeHook) {
+      const concreteHook = findUnestablishedSystemDraftConcreteHook(
+        direction,
+        establishedSourceTexts,
+      )
+      if (concreteHook) {
+        issues.push(`第 ${index + 1} 条分支加入了未由作者材料支持的具体场景钩子“${concreteHook}”`)
+      }
+
+      const premiseAnchor = findRichSystemDraftAuthorAnchor(direction.premise, richDirectionAnchors)
+      const tradeoffAnchor = findRichSystemDraftAuthorAnchor(direction.tradeoff, richDirectionAnchors)
+      // A direction is a premise plus a tradeoff.  Requiring the same source
+      // wording in both fields turns a meaningful causal paraphrase into a
+      // forced duplicate.  Require an author handle in the pair instead,
+      // while the cross-direction evidence below still prevents three generic
+      // cards from all leaning on one vague goal.
+      if (!premiseAnchor && !tradeoffAnchor) {
+        issues.push(`第 ${index + 1} 条分支没有保留可核对的作者事实锚点`)
+      }
+      if (premiseAnchor) richDirectionEvidence.add(premiseAnchor)
+      if (tradeoffAnchor) richDirectionEvidence.add(tradeoffAnchor)
+    }
+  }
+
+  if (draft.origin === 'model' && !requireCreativeHook && richDirectionEvidence.size < 2) {
+    issues.push('三条分支没有从至少两项不同的作者事实形成可比较的因果差异')
   }
 
   return issues
+}
+
+/**
+ * Rich inputs must remain an author's material ledger, not a second place for
+ * the model to invent props or people. Keep this detector deliberately about
+ * visible scene carriers and insertion verbs; abstract causal language is
+ * still allowed and is reviewed by the existing semantic rules.
+ */
+function findUnestablishedSystemDraftConcreteHook(
+  direction: SystemDraftDirection,
+  establishedSourceTexts: readonly string[],
+): string | undefined {
+  // Rich material already contains enough causal material.  In that path a
+  // new visible event is not a harmless flourish: it becomes a hidden premise
+  // for the next screen.  Match event-introducing verbs as well as common
+  // scene carriers, while allowing a literal author phrase through below.
+  const sceneHookPattern = /(?:U盘|展签|布展员|牛皮纸|包裹|门边|陌生署名|陌生字迹|剪辑指导|片头|侧面|导览条|覆膜|邮戳|回执单|社徽|抽屉|便签|收银台|中介|钥匙|快递单|门把手|黑屏|白色小字|多出(?:一|了)?行|插着一枚|递来一张|放着一(?:张|个)|印有|未见过|陌生人|一枚|一张|浮现|夹着|掉出|递来|寄来|贴出|多出|写着|传来|发来)/gu
+  const values = [direction.label, direction.premise, direction.tradeoff]
+  for (const value of values) {
+    for (const match of value.matchAll(sceneHookPattern)) {
+      const token = match[0]
+      if (!establishedSourceTexts.some((source) => hasOriginalTextPhrase(source, token))) {
+        return token
+      }
+    }
+  }
+  return undefined
+}
+
+const richSystemDraftNonDistinctFragments = new Set([
+  '主角', '目标', '当前', '条件', '继续', '暂不', '决定', '选择', '取舍', '承诺',
+  '关系', '安排', '原有', '作者', '系统', '暂定', '还是', '以及', '不能', '必须',
+])
+
+/**
+ * Rich-input directions are proposals about which author-provided pressure to
+ * foreground.  They must preserve visible source handles so a reader can tell
+ * that the system is reorganising facts rather than inventing a second scene.
+ */
+function getRichSystemDraftAuthorAnchors(sourceTexts: readonly string[]): string[] {
+  const anchors = new Set<string>()
+  for (const sourceText of sourceTexts) {
+    const normalized = normalizeGoalText(sourceText)
+    const maximumLength = Math.min(12, normalized.length)
+    for (let length = maximumLength; length >= 4; length -= 1) {
+      for (let start = 0; start + length <= normalized.length; start += 1) {
+        const fragment = normalized.slice(start, start + length)
+        if (!richSystemDraftNonDistinctFragments.has(fragment)) anchors.add(fragment)
+      }
+    }
+  }
+  return [...anchors].sort((left, right) => right.length - left.length)
+}
+
+function findRichSystemDraftAuthorAnchor(value: string, anchors: readonly string[]): string | undefined {
+  const normalized = normalizeGoalText(value.replace(/^暂定[：:]/u, ''))
+  return anchors.find((anchor) => normalized.includes(anchor))
 }
 
 function getSystemDraftDirectionScopeIssue(
@@ -4090,7 +4253,7 @@ function getSystemDraftDirectionScopeIssue(
     return '仍停留在抽象分类，缺少可选择的创意钩子'
   }
 
-  if (enforceCreativeShape && !direction.tradeoff.includes('还是')) {
+  if (!direction.tradeoff.includes('还是')) {
     return '取舍没有形成明确的二选一'
   }
 
@@ -4176,7 +4339,7 @@ function getSystemDraftTradeoffStructuralIssue(value: string): string | undefine
   // contain a short direct action such as "撕掉字迹入场" or "转身离开";
   // only an actual sequence of steps makes it a miniature scene.
   const actionChain = systemDraftActionChainPattern.exec(withoutTerminalPunctuation)?.[0]
-  if (actionChain) return `写入了连续行动步骤“${actionChain}”`
+  if (actionChain) return `写入了连续行动步骤（具体行动步骤、地点或执行方式）“${actionChain}”`
 
   return undefined
 }
@@ -4504,7 +4667,11 @@ export async function generateStoryTurn(request: StoryTurnRequest): Promise<Stor
       const record = await requestModelRecord({
         systemPrompt: storyTurnSystemPrompt,
         userPrompt: buildStoryTurnPrompt(request, state, repairMessage, outputFormat),
-        temperature: getStoryTurnTemperature(request.mode, attempt),
+        temperature: getStoryTurnTemperature(
+          request.mode,
+          attempt,
+          Boolean(request.confirmedCurve && request.mode === 'start' && request.history.length === 0),
+        ),
         maxTokens: storyTurnMaxTokens,
         diagnosticStage: 'story-turn',
       }, '模型没有返回下一段可继续发展的故事情境，请重试。')
@@ -4528,7 +4695,11 @@ export async function generateStoryTurn(request: StoryTurnRequest): Promise<Stor
       })
       repairMessage = describeStoryTurnValidationFailure(lastFailure)
       console.warn(
-        `Story turn rejected (mode=${request.mode}, confirmedTurns=${request.history.length}, format=${getStoryTurnOutputFormat(request, attempt)}, attempt=${attempt + 1}): ${repairMessage}`,
+        `Story turn rejected (mode=${request.mode}, confirmedTurns=${request.history.length}, format=${getStoryTurnOutputFormat(request, attempt)}, attempt=${attempt + 1}): ${JSON.stringify({
+          code: lastFailure.code,
+          repair: repairMessage,
+          diagnostic: lastFailure.modelDiagnostic,
+        })}`,
       )
     }
   }
@@ -4604,7 +4775,8 @@ function getStoryTurnOutputFormat(request: Pick<StoryTurnRequest, 'confirmedCurv
   return attempt === 0 ? 'detailed' : 'compact'
 }
 
-function getStoryTurnTemperature(mode: StoryTurnMode, attempt: number): number {
+function getStoryTurnTemperature(mode: StoryTurnMode, attempt: number, strictOpening = false): number {
+  if (strictOpening) return attempt === 0 ? 0.32 : 0.12
   if (attempt === 0) return mode === 'conclude' ? 0.52 : 0.6
   return mode === 'conclude' ? 0.34 : 0.42
 }
@@ -5394,7 +5566,7 @@ function validateConfirmedCurveContinuationFields(
     )
   }
 
-  if (!isInitialConfirmedCurveTurn(request, turn)) return
+  if (!turn || !isInitialConfirmedCurveTurn(request, turn)) return
 
   const introducedFact = getFirstIntroducedConfirmedCurveTurnFact(turn)
   if (introducedFact) {
@@ -5404,6 +5576,150 @@ function validateConfirmedCurveContinuationFields(
       'INVALID_MODEL_OUTPUT',
     )
   }
+
+  const openingQualityIssue = getConfirmedCurveFirstTurnQualityIssue(request, turn)
+  if (openingQualityIssue) {
+    throw new AppError(
+      `已确认曲线后的首回合${openingQualityIssue}，请重试。`,
+      invalidModelOutputContext.statusCode,
+      'INVALID_MODEL_OUTPUT',
+    )
+  }
+}
+
+const genericOpeningOptionLabels = new Set([
+  '先承认阻碍',
+  '先保留目标',
+  '先明确取舍',
+  '先回应前项',
+  '先看另一端',
+  '先明确影响',
+  '先说明取舍',
+  '先面对承诺',
+])
+
+const opaqueConfirmedOpeningTextPattern = /(?:暂定[：:]|先回应前项|先看另一端|先明确影响|前项|另一端|上一项|确认后的(?:卡点|起点|阻碍)|当前边界|尚待决定的影响)/u
+
+function getConfirmedCurveFirstTurnQualityIssue(
+  request: SystemDraftContinuationRequest,
+  turn: StoryTurn,
+): string | undefined {
+  const authorSourceTexts = getConfirmedCurveOpeningAuthorSourceTexts(request)
+  const anchors = authorSourceTexts
+    .flatMap((source) => getOpeningAnchorCandidates(source))
+    .filter((anchor) => anchor.length >= 4)
+  const visibleFields = [
+    turn.node.title,
+    turn.node.event,
+    turn.node.purpose,
+    turn.conflict.conflict,
+    turn.conflict.action,
+    turn.conflict.consequence,
+    turn.question ?? '',
+    ...turn.options.flatMap((option) => [
+      option.label,
+      option.action,
+      option.immediateConsequence,
+      option.laterEffect,
+    ]),
+  ]
+  const visibleText = visibleFields.join('；')
+
+  if (opaqueConfirmedOpeningTextPattern.test(visibleText)) {
+    return '出现了“暂定”或前项/另一端等不可审阅的提案占位语'
+  }
+
+  const echoedProposal = findConfirmedCurveProposalEcho(visibleFields, request.confirmedCurve)
+  if (echoedProposal) {
+    return '直接复述了已确认曲线中的系统提案，而没有把它转成当前可判断的事实'
+  }
+
+  if (turn.node.event.trim().length < 16) return '当前事件过于抽象，没有形成可审阅的已确认情境'
+  if (anchors.length && !anchors.some((anchor) => openingTextContainsAnchor(visibleText, anchor))) {
+    return '当前情境没有承接任何可核对的作者事实'
+  }
+
+  const optionLabels = turn.options.map((option) => option.label.trim())
+  if (optionLabels.some((label) => genericOpeningOptionLabels.has(label))) {
+    return '选择标题仍是通用模板，没有直接说明作者此刻能判断的事实'
+  }
+  const optionAnchorSets = turn.options.map((option) => new Set(
+    anchors.filter((anchor) => [option.action, option.immediateConsequence, option.laterEffect]
+      .some((text) => openingTextContainsAnchor(text, anchor))),
+  ))
+  const anchoredOptions = optionAnchorSets.filter((set) => set.size > 0).length
+  if (turn.options.length === generatedOptionCount && anchoredOptions < generatedOptionCount) {
+    return '三个选择没有分别承接可核对的作者事实'
+  }
+  const distinctOptionAnchors = new Set(optionAnchorSets.flatMap((set) => [...set]))
+  if (turn.options.length === generatedOptionCount && distinctOptionAnchors.size < Math.min(2, anchors.length)) {
+    return '三个选择没有形成不同事实之间的当下判断'
+  }
+
+  const optionSignatures = turn.options.map((option) => normalizeOpeningText(
+    `${option.label}${option.action}${option.immediateConsequence}${option.laterEffect}`,
+  ))
+  if (new Set(optionSignatures).size !== optionSignatures.length) {
+    return '三个选择的可见内容重复，尚未形成不同的当下判断'
+  }
+
+  return undefined
+}
+
+function getConfirmedCurveOpeningAuthorSourceTexts(request: SystemDraftContinuationRequest): string[] {
+  const confirmedCurve = request.confirmedCurve
+  const integratedSourceFacts = confirmedCurve?.design?.sourceFacts
+    .filter((fact) => fact.disposition === 'integrated')
+    .map((fact) => fact.text) ?? []
+  const authorEditedBeats = confirmedCurve?.beats
+    .filter((beat) => beat.status === 'confirmed' && beat.source === 'user-edit')
+    .map((beat) => beat.detail) ?? []
+
+  // A reviewed system beat controls causal order, but it is not author prose
+  // to quote back to the author as the opening situation.  The reader-facing
+  // opening must stay attached to ledger facts and explicit author edits.
+  return uniqueNonEmptySourceTexts([
+    request.seed.lockedGoal ?? '',
+    ...request.seed.lockedFacts,
+    ...integratedSourceFacts,
+    ...authorEditedBeats,
+  ])
+}
+
+function findConfirmedCurveProposalEcho(
+  visibleFields: readonly string[],
+  confirmedCurve: ConfirmedCurve | undefined,
+): string | undefined {
+  const normalizedFields = visibleFields.map(normalizeOpeningText)
+  const proposalDetails = confirmedCurve?.beats
+    .filter((beat) => beat.status === 'confirmed' && beat.source === 'system-proposal')
+    .map((beat) => normalizeOpeningText(beat.detail.replace(/^暂定[：:]/u, '')))
+    .filter((detail) => detail.length >= 18) ?? []
+
+  return proposalDetails.find((detail) => normalizedFields.some((field) => field.includes(detail)))
+}
+
+function openingTextContainsAnchor(value: string, anchor: string): boolean {
+  const normalizedValue = normalizeOpeningText(value)
+  const normalizedAnchor = normalizeOpeningText(anchor)
+  return Boolean(normalizedAnchor && normalizedValue.includes(normalizedAnchor))
+}
+
+function getOpeningAnchorCandidates(source: string): string[] {
+  const normalized = source.trim()
+  if (!normalized) return []
+  const clauses = normalized
+    .split(/[，。！？；、]/u)
+    .map((part) => part.trim())
+    .filter((part) => part.length >= 4)
+  return [...new Set([
+    ...clauses,
+    normalized.length <= 48 ? normalized : normalized.slice(0, 48),
+  ])]
+}
+
+function normalizeOpeningText(value: string): string {
+  return value.replace(/[\s，。！？；、:："“”「」]/gu, '')
 }
 
 function isInitialConfirmedCurveTurn(
@@ -6368,9 +6684,28 @@ function getErrorIdentifier(error: unknown): string {
 }
 
 function describeStoryTurnValidationFailure(error: unknown): string {
-  return error instanceof AppError
-    ? error.message
-    : '上一轮输出不符合当前回合的结构要求。'
+  if (!(error instanceof AppError)) return '上一轮输出不符合当前回合的结构要求。'
+
+  // The repair prompt is sent back to the model.  Keep it categorical so a
+  // rejected response cannot echo arbitrary model text or a hidden detail
+  // into the next instruction, while the server log still carries the
+  // structured diagnostic separately.
+  if (/具体物件|设备|通讯|票务|凭证|机构|工作人员/iu.test(error.message)) {
+    return '上一版加入了未经确认的具体物件、设备、通讯或流程；请只使用已确认材料。'
+  }
+  if (/时间|日期|精确|倒数/iu.test(error.message)) {
+    return '上一版加入了未经确认的时间或数量；请删除具体时限，只保留已确认条件。'
+  }
+  if (/人物|关系|过去经历|他人状态/iu.test(error.message)) {
+    return '上一版加入了未经确认的人物、关系或经历；请回到已确认主体和事实。'
+  }
+  if (/模板|重复|抽象|承接任何可核对|暂定|占位|前项|另一端|系统提案|不可审阅/iu.test(error.message)) {
+    return '上一版复述了系统提案或使用了模板占位语；请直接说出作者事实中的对象、期限、承诺或关系，让每项形成不同判断。'
+  }
+  if (/新增事实|introducedFacts|事实闸门/iu.test(error.message)) {
+    return '首回合只能提供基于已确认材料的可选行动，不能把任何新状态写成已经发生。'
+  }
+  return '上一轮输出没有通过当前故事的结构或事实边界检查，请完整重写。'
 }
 
 function isRetryableStoryTurnError(error: unknown): boolean {
@@ -6961,7 +7296,9 @@ function buildSystemConflictCoreDraftPrompt(
   const goalInstruction = seed.lockedGoal
     ? `用户已确认目标“${seed.lockedGoal}”。服务端会直接保留它；请只生成 stake 和 constraint，不要返回 goal。`
     : '用户尚未确认具体行动目标。请生成 goal，并逐字保留原始念头中的主体、对象或关键事件。'
-  const creativeDirectionInstruction = `\n\n优先规则：第一层必须给出能让人继续读下去的创意钩子，而不是“条件尚未确认”“当前限制”“时间受限”一类可套用任何题材的分类。先从目标本身判断题材和可见载体，再为三条方向选择不同的戏剧杠杆：可以是与目标紧密相关的反常痕迹、身份或角色的错认、可见且不可轻易收回的代价、突然改变原有取舍的一次意外，或让普通目标变得尴尬/危险的反差。不要机械地让每个题材都出现“陌生字迹、一个陌生人、划掉名字”；去某处、交一份内容、见一个人、离开一地时，载体、反差和代价都应随行动而变化。每条都要让读者一眼看见一个反常画面，并能看出继续目标会碰到什么真正的取舍，但只保留这一项钩子。第三条不能只写“失去一件重要东西”这类没有形状的代价。每条 premise 都以“暂定：”开头，只引入一个当前物件、反常痕迹、错认、代价或有限意外；门票、手机、工作人员等普通词可以作为单一钩子的载体，但不能补出购买、支付、核验、通讯或机构流程，也不能扩成连续动作、被带去某处或既定路线。label 要给这个钩子命名，tradeoff 必须写成“……还是……”的实际取舍。此规则优先于后文任何抽象示例。${getSystemDraftSeedScopeInstruction(seed)}${getSystemDraftPreferenceInstruction(preference)}`
+  const creativeDirectionInstruction = hasSparseSystemDraftSeed(seed)
+    ? `\n\n优先规则：第一层必须给出能让人继续读下去的创意钩子，而不是“条件尚未确认”“当前限制”“时间受限”一类可套用任何题材的分类。先从目标本身判断题材和可见载体，再为三条方向选择不同的戏剧杠杆：可以是与目标紧密相关的反常痕迹、身份或角色的错认、可见且不可轻易收回的代价、突然改变原有取舍的一次意外，或让普通目标变得尴尬/危险的反差。不要机械地让每个题材都出现“陌生字迹、一个陌生人、划掉名字”；去某处、交一份内容、见一个人、离开一地时，载体、反差和代价都应随行动而变化。每条都要让读者一眼看见一个反常画面，并能看出继续目标会碰到什么真正的取舍，但只保留这一项钩子。第三条不能只写“失去一件重要东西”这类没有形状的代价。每条 premise 都以“暂定：”开头，只引入一个当前物件、反常痕迹、错认、代价或有限意外；门票、手机、工作人员等普通词可以作为单一钩子的载体，但不能补出购买、支付、核验、通讯或机构流程，也不能扩成连续动作、被带去某处或既定路线。label 要给这个钩子命名，tradeoff 必须写成“……还是……”的实际取舍。此规则优先于后文任何抽象示例。${getSystemDraftSeedScopeInstruction(seed)}${getSystemDraftPreferenceInstruction(preference)}`
+    : `\n\n信息丰富时，第一层不得新增场景钩子。三条方向只能把作者已经写出的目标、期限、承诺、关系和对象重新组合成三种不同的因果机制：一条突出期限或当前条件如何让目标停住，一条突出承诺/关系怎样制造取舍，一条突出目标本身的意义或归属怎样改变选择。每条 premise 必须以“暂定：”开头，并逐字保留至少一个作者原文中的连续事实短语；tradeoff 必须包含“还是”，且两端都只能使用作者事实或不增加事实的抽象词（继续、暂缓、保留、重新判断、承担）。禁止新增任何物件、人物、消息、字迹、地点、流程、场景动作、他人回应、精确时间或结果；不要写“陌生、浮现、夹着、递来、发来、贴出、掉出”等事件词。三条方向要分别改变目标受阻、取舍升级和选择含义，不能只是同一句目标换同义词。${getSystemDraftSeedScopeInstruction(seed)}${getSystemDraftPreferenceInstruction(preference)}`
   const repair = repairMessage
     ? `${creativeDirectionInstruction}\n上一版未通过结构检查：${repairMessage}。请完整重写三条方向，仍然不要补写背景或结果。`
     : creativeDirectionInstruction
@@ -7685,25 +8022,34 @@ function buildConfirmedCurveFirstTurnPrompt(
   repairMessage?: string,
 ): string {
   const confirmedCurve = request.confirmedCurve
-  const foundation = confirmedCurve?.foundation ?? confirmedCurve?.design?.foundation
-  const confirmedBeats = confirmedCurve?.beats
+  const confirmedStructure = confirmedCurve?.beats
     .filter((beat) => beat.status === 'confirmed')
-    .map((beat) => ({ kind: beat.kind, detail: beat.detail })) ?? []
+    .map((beat) => ({
+      kind: beat.kind,
+      source: beat.source === 'user-edit' ? 'author-edit' : 'confirmed-proposal',
+    })) ?? []
   const sourceFacts = confirmedCurve?.design?.sourceFacts
     .filter((fact) => fact.disposition === 'integrated')
     .map((fact) => fact.text) ?? []
-  const foundationSummary = foundation
-    ? {
-      goal: foundation.conflictCore.goal,
-      obstacle: foundation.conflictCore.obstacle,
-      tradeoff: foundation.conflictCore.tradeoff,
-    }
-    : undefined
+  const openingAuthorSources = uniqueNonEmptySourceTexts([
+    request.seed.lockedGoal ?? '',
+    ...request.seed.lockedFacts,
+    ...sourceFacts,
+    ...(confirmedCurve?.beats
+      .filter((beat) => beat.status === 'confirmed' && beat.source === 'user-edit')
+      .map((beat) => beat.detail) ?? []),
+  ])
+  const openingAnchors = [...new Set(openingAuthorSources
+    .flatMap(getOpeningAnchorCandidates))]
+    .filter((anchor) => anchor.length >= 4)
+    .slice(0, 16)
+  const subject = request.seed.subject?.trim() || '主角'
+  const goal = request.seed.lockedGoal?.trim() || '当前目标'
   const repair = repairMessage
-    ? `\n上一次首回合被事实闸门拒绝：${repairMessage}。删除触发问题的具体词及其同类细节，只能回到下面的已确认短语和抽象模板。`
+    ? `\n上一版没有通过首回合事实或质量闸门。${repairMessage} 请完整重写，不要沿用上一版的句子。重试时只能逐字使用下列作者事实锚点：${JSON.stringify(openingAnchors)}。不要写“暂定：”、前项、另一端、已确认条件等审阅元语言；不要用“设备”“某人”或“当时”替代缺失事实。`
     : ''
 
-  return `你是中文互动故事的开场编辑。现在只生成确认主线后的第一个可选择情境；不得写场景小说，不得补背景。
+  return `你是中文互动故事的开场编辑。现在只生成确认主线后的第一个可选择情境；写成作者能直接审阅的短情境，不写小说段落，也不补背景。
 
 原始想法（只用于核对，不得扩写）：${request.idea}
 已确认 seed：${JSON.stringify({
@@ -7711,19 +8057,19 @@ function buildConfirmedCurveFirstTurnPrompt(
     lockedGoal: request.seed.lockedGoal,
     lockedFacts: request.seed.lockedFacts,
   })}
-已确认曲线节点（只能从这些短语承接）：${JSON.stringify(confirmedBeats)}
+已确认曲线的因果顺序（只承接层次，不复述系统提案句）：${JSON.stringify(confirmedStructure)}
 已确认原始事实：${JSON.stringify(sourceFacts)}
-已确认 foundation 核心：${JSON.stringify(foundationSummary)}
+作者可直接核对的事实锚点（可逐字使用；不要把它们扩写成新事件）：${JSON.stringify(openingAnchors)}
 
-硬性边界：除了上面列出的主体、目标、事实、节点和 foundation 短语，不得出现任何新的名词、人物回应、物件、设备、通讯、票券、机构流程、过去经历、日期、时刻、数量或永久结果。不要把“抽象阻碍”变成手机、柜台、门票、清晨、三步等具体细节；若缺少条件，就保留为“尚待决定”的取舍。不得把任何未来提案写成已经发生。
-请严格复制下方安全模板的语义，只替换方括号中的已确认短语；标题必须是“确认的阻碍”。三个选项只能是不同的判断方式，不能引入新的行动对象或事实：
-- 当前事件：［已确认阻碍］仍未解决，［主体］需要决定如何继续［已确认目标］。
-- 当前目的：承接已确认阻碍，暂不写出解决结果。
-- 当前冲突：［已确认阻碍］仍然存在。
-- 行动焦点：在［已确认取舍］两端判断。
-- 后果：原有安排仍然停住。
-- 问题：在不新增事实的情况下，现在先怎么决定？
-- 选项一：先承认阻碍；选项二：先保留目标；选项三：先明确取舍。每项的 action、immediateConsequence、laterEffect 都只能用上述短语和“承认、保留、明确、尚待决定、继续、停住”等抽象词。
+硬性边界：除了上面列出的主体、目标和作者事实锚点，不得出现任何新的关键名词、人物回应、物件、设备、通讯、票券、机构流程、过去经历、日期、时刻、数量或永久结果。曲线只提供“当前处境 -> 卡点 -> 取舍 -> 主动判断”的顺序，不能把其中任何系统提案逐句搬进读者界面。下面作者原文中的物件、期限、关系可以原样逐字保留；“今晚”“周五”“展出前”“姐姐”“投影仪”等如出现在锚点中就是允许的事实，不要把它们误删或换成新的时间和物件。未写出的细节必须留为待决定，而不是用常识补齐。不得把任何未来提案写成已经发生。
+
+质量要求（比套模板更重要）：
+- node.event 用 1 至 2 句写出此刻的具体卡点，必须包含主体和至少一个事实锚点；不要只写“确认的阻碍”或“目标停住”。
+- node.purpose 说明这个卡点怎样承接已经确认的因果顺序，并把作者带到尚未决定的取舍；不要写解决结果。
+- conflict.conflict 必须同时承接已确认的阻碍与取舍，conflict.action 必须点出两端，conflict.consequence 只写尚未解决的当下压力。
+- 三个选项必须是三个不同的当下判断。每项 action、immediateConsequence、laterEffect 至少逐字承接一个作者事实锚点，三项合计至少使用两项不同锚点；标题要直接说清对应的对象、期限、承诺或关系，不能写“先回应前项”“先看另一端”“先保留目标”“先明确影响”等占位标题。
+- laterEffect 只能写可能继续面对的牵引，不能写成已经发生的新事实；所有 option 的 introducedFacts 由服务端保持为空。
+不要机械复制同一句目标，不要输出“暂定：”或“已确认条件”等系统审阅元语言。将已确认曲线转成当前可判断的作者事实：用一个锚点写卡点，用另一个锚点写取舍，再让三个选项分别指出不同的判断入口。
 ${repair}
 
 只输出 JSON，不要 Markdown、解释或额外字段：
@@ -7745,7 +8091,7 @@ function getConfirmedCurveFirstTurnInstruction(
   const formatInstruction = outputFormat === 'compact'
     ? '本次只输出紧凑叙事字段；服务端会为三个选项建立不改变事实的隐式行动。'
     : '本次若使用详细结构，所有 effects 与 introducedFacts 必须为空；不得修改任何 fixed 事实。'
-  return `\n首回合事实闸门：这是确认主线后的第一个情境。${formatInstruction}只允许复述当前已确认 foundation、已确认 source facts、已确认曲线节点和作者已接受的方向；不要把未来的高潮、结局或提案写成已经发生。除这些材料外，不得新增人物、人物回应、物件、设备或通讯渠道、票券/凭证、机构流程、过去经历、精确或相对时间、永久后果。若某个因果条件尚未确认，就把它写成“尚待决定”的问题或取舍，不要用新事实填空。\n首回合采用抽象取舍写法：node.title、node.event、node.purpose、conflict、question、每个 option 的 label/action/immediateConsequence/laterEffect 只能使用主角、已锁定目标、已确认阻碍/承诺/取舍的原句或其不增加事实的抽象连接词；不要为了让情境更像现场而添加任何新的名词、时间词、数量词或动作对象。尤其不要写“手机、电话、柜台、门票、清晨、几步/几分钟”等未在已确认材料中出现的词。可以直接写“先承认阻碍”“暂不改变安排”“在两端之间选择”这类不改变事实的取舍。三个选项只应体现不同的当下判断，不得把任何选项写成已经发生的结果。`
+  return `\n首回合事实闸门：这是确认主线后的第一个情境。${formatInstruction}只允许使用已确认 foundation、source facts、曲线节点和作者接受的方向；不要把未来高潮、结局或提案写成已经发生。除这些材料外，不得新增人物、人物回应、物件、设备或通讯渠道、票券/凭证、机构流程、过去经历、精确或相对时间、永久后果。若因果条件尚未确认，就把它写成尚待决定的取舍。首回合必须让 node.event、conflict 和三个 option 各自承担清楚的因果功能；选项不能只换标题，也不能把同一整句目标复制三遍。`
 }
 
 function buildStoryTurnOptionRefinementPrompt(
