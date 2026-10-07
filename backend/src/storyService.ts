@@ -392,6 +392,10 @@ const confirmedCurveFirstTurnUnsupportedDetailRules: readonly UnsupportedDetailR
     label: '未经确认的他人回应或后续状态',
     pattern: /(?:姐姐|朋友|前队友|队友|他人|对方|某人)[^，。！？；\n]{0,16}(?:可能|会|将|暂停|重申|质疑|被唤起|同意|拒绝|接受|继续按|不参与)/gu,
   },
+  {
+    label: '未经确认的认知或观察',
+    pattern: /(?:得知|听说|注意到|意识到|看见|看到|听见|收到)[^，。！？；\n]{0,18}/gu,
+  },
 ]
 
 // The model review still verifies every first-layer claim against the source.
@@ -4590,6 +4594,17 @@ function isGeneratedDetailSupported(
   match: string,
   label: string,
 ): boolean {
+  // "入口" is also common abstract vocabulary for a decision or a way of
+  // looking at the problem.  The first-turn contract may use that abstract
+  // sense, but a bare physical entrance must still remain blocked.
+  if (
+    label === '未经确认的场景设施或普通物件'
+    && match === '入口'
+    && isAbstractOpeningEntry(candidateText, match)
+  ) {
+    return true
+  }
+
   // A literal phrase is normally enough to prove that a detail was supplied
   // by the user. Relationship/commitment phrases still need a role check:
   // copying "不再联系" into "对方不再联系" would otherwise turn the
@@ -4649,6 +4664,13 @@ function isGeneratedDetailSupported(
   return label === '未经建立的外部结果'
     && match === '违背'
     && hasSupportedCommitmentAction(establishedText, candidateText)
+}
+
+function isAbstractOpeningEntry(candidateText: string, match: string): boolean {
+  const index = candidateText.indexOf(match)
+  if (index < 0) return false
+  const nearbyText = candidateText.slice(Math.max(0, index - 12), index + match.length + 12)
+  return /(?:判断|选择|取舍|支点|角度|路径|方向|优先|先从|着眼)/u.test(nearbyText)
 }
 
 function isSupportedDeadlineSummary(
@@ -5899,6 +5921,7 @@ const genericOpeningOptionLabels = new Set([
 ])
 
 const opaqueConfirmedOpeningTextPattern = /(?:暂定[：:]|先回应前项|先看另一端|先明确影响|前项|另一端|上一项|确认后的(?:卡点|起点|阻碍)|当前边界|尚待决定的影响|当前处境|触发取舍|曲线节点|作者(?:事实|原文)?|系统(?:提案|节点|曲线)?)/u
+const confirmedOpeningMetaConsequencePattern = /(?:仍是当前事实|仍是[^。！？；]{0,12}的事实|取舍仍待[^。！？；]{0,12}(?:判断|决定)|围绕[^。！？；]{0,24}的取舍仍待|不再被略过|成为当前判断的一端|成为需要承担的选择)/u
 
 function getConfirmedCurveFirstTurnQualityIssue(
   request: SystemDraftContinuationRequest,
@@ -5935,6 +5958,14 @@ function getConfirmedCurveFirstTurnQualityIssue(
   }
 
   if (turn.node.event.trim().length < 16) return '当前事件过于抽象，没有形成可审阅的已确认情境'
+  const normalizedEvent = normalizeOpeningText(turn.node.event)
+  const longAnchorCountInEvent = anchors.filter((anchor) => (
+    normalizeOpeningText(anchor).length >= 8
+      && normalizedEvent.includes(normalizeOpeningText(anchor))
+  )).length
+  if (turn.node.event.trim().length >= 72 && longAnchorCountInEvent >= 3) {
+    return '当前事件整句复述了多项作者事实，没有压缩成一个可行动的卡点'
+  }
   if (anchors.length && !anchors.some((anchor) => openingTextContainsAnchor(visibleText, anchor))) {
     return '当前情境没有承接任何可核对的作者事实'
   }
@@ -5954,6 +5985,18 @@ function getConfirmedCurveFirstTurnQualityIssue(
   const distinctOptionAnchors = new Set(optionAnchorSets.flatMap((set) => [...set]))
   if (turn.options.length === generatedOptionCount && distinctOptionAnchors.size < Math.min(2, anchors.length)) {
     return '三个选择没有形成不同事实之间的当下判断'
+  }
+
+  const normalizedOptionConsequences = turn.options.map((option) => normalizeOpeningTemplate(
+    `${option.immediateConsequence}；${option.laterEffect}`,
+    anchors,
+  ))
+  if (
+    normalizedOptionConsequences.length === generatedOptionCount
+    && new Set(normalizedOptionConsequences).size === 1
+    && normalizedOptionConsequences.some((value) => confirmedOpeningMetaConsequencePattern.test(value))
+  ) {
+    return '三个选择都套用了“事实仍在、取舍待判断”的元话术，没有形成不同的判断入口'
   }
 
   const plannedAnchors = getConfirmedCurveOpeningAnchorPlan(request)
@@ -6075,6 +6118,15 @@ function getOpeningAnchorCandidates(source: string): string[] {
 
 function normalizeOpeningText(value: string): string {
   return value.replace(/[\s，。！？；、:："“”「」]/gu, '')
+}
+
+function normalizeOpeningTemplate(value: string, anchors: readonly string[]): string {
+  let normalized = normalizeOpeningText(value)
+  for (const anchor of [...anchors].sort((left, right) => right.length - left.length)) {
+    const compact = normalizeOpeningText(anchor)
+    if (compact) normalized = normalized.replaceAll(compact, '<事实>')
+  }
+  return normalized
 }
 
 function isInitialConfirmedCurveTurn(
@@ -7336,7 +7388,7 @@ function getConfirmedCurveFirstTurnSystemPrompt(): string {
 
 只使用请求中列出的作者原始事实、已确认 foundation、已确认曲线节点和作者已接受的方向。不要写小说段落、未来大纲、高潮、结局或系统审阅说明。不要把任何尚未确认的内容写成当前事实。
 
-首回合禁止新增：手机、消息、纸条、门票、快递、钢笔、设备状态、通讯渠道、工作人员、机构流程、地点、柜台、店员、书架、入口、窗口、匿名人物、人物回应或内部状态、过去经历、精确或相对时间、数量、资源、权限、经历和永久后果。也不要使用“暂定：”“前项”“另一端”“已确认条件”等占位或递归提案词。作者事实中已经出现的对象、期限、承诺和关系可以逐字保留，但不得扩写成新的事件。
+首回合禁止新增：手机、消息、纸条、门票、快递、钢笔、设备状态、通讯渠道、工作人员、机构流程、地点、柜台、店员、书架、入口、窗口、匿名人物、人物回应或内部状态、过去经历、精确或相对时间、数量、资源、权限、经历和永久后果。也不要使用“决定权”“选择权”“署名权”“共同责任”等作者没有写出的权利或关系结论，也不要使用“暂定：”“前项”“另一端”“已确认条件”等占位或递归提案词。作者事实中已经出现的对象、期限、承诺和关系可以逐字保留，但不得扩写成新的事件。
 
 这是一个锚点拼装合同，不是自由场景写作：每个 node/conflict/option 字段只能使用请求中列出的主体、目标和作者事实锚点，再加“继续、暂缓、保留、重新判断、承担、面对、决定、是否、还是、尚待处理”等抽象连接词。用户提示里的“三项选择句式”是可直接照抄的输出格式，不要为了避免重复而改写成场景、行动计划或关系推断。任何不在锚点中的具体名词都视为未确认事实，即使它在现实场景中很常见也不能写入。若缺少细节，宁可重复一个较短的作者锚点并说明取舍，也不要补出场所、设施、道具、流程、方案或他人行动。尤其不要把已知人物可能如何回应、计划如何推进、共同记忆或关系结论写进 immediateConsequence 或 laterEffect；这些都还没有被作者确认。
 
@@ -8595,12 +8647,30 @@ function buildConfirmedCurveFirstTurnPrompt(
   const openingAnchorPlan = getConfirmedCurveOpeningAnchorPlan(request)
   const subject = request.seed.subject?.trim() || '主角'
   const goal = request.seed.lockedGoal?.trim() || '当前目标'
+  const shortLabel = (value: string): string => value.length > 18 ? `${value.slice(0, 18)}…` : value
+  const distinctAnchor = (anchor: string, ...excluded: string[]): string => (
+    openingAnchorPlan.find((candidate) => (
+      !excluded.some((item) => normalizeOpeningText(item) === normalizeOpeningText(candidate))
+      && normalizeOpeningText(candidate) !== normalizeOpeningText(anchor)
+    ))
+    ?? openingAnchorPlan.find((candidate) => normalizeOpeningText(candidate) !== normalizeOpeningText(anchor))
+    ?? goal
+  )
   const openingOptionSkeletons = openingAnchorPlan.map((anchor, index) => {
-    const verb = ['面对', '保留', '重新判断'][index] ?? '面对'
-    return `${index + 1}. action 以“${subject}先${verb}「${anchor}」”开头；immediateConsequence 只写“「${anchor}」仍是当前事实”；laterEffect 只写“围绕「${anchor}」的取舍仍待${subject}判断”。`
+    const counterpart = index === 2
+      ? distinctAnchor(anchor, goal)
+      : distinctAnchor(anchor)
+    const label = shortLabel(anchor)
+    if (index === 0) {
+      return `${index + 1}. label 直接写“先处理${label}”；action 写“${subject}先处理「${anchor}」，暂不改变「${counterpart}」”；immediateConsequence 写先承担「${anchor}」带来的限制、另一项暂不改变；laterEffect 写之后仍要决定能否在「${counterpart}」下继续处理「${anchor}」。`
+    }
+    if (index === 1) {
+      return `${index + 1}. label 直接写“先守住${label}”；action 写“${subject}先守住「${anchor}」，不让「${counterpart}」替它作决定”；immediateConsequence 写先保留「${anchor}」，同时承认「${counterpart}」仍在牵制；laterEffect 写之后要决定两项能否一起保留。`
+    }
+    return `${index + 1}. label 直接写“先决定${label}”；action 写“${subject}先决定「${anchor}」，再接受「${counterpart}」的牵制”；immediateConsequence 写先把「${anchor}」的选择说清，另一项仍不改变；laterEffect 写之后仍要承担「${counterpart}」带来的取舍。`
   })
   const repair = repairMessage
-    ? `\n上一版没有通过首回合事实或质量闸门。${repairMessage} 请完整重写，不要沿用上一版的句子。重试时只能逐字使用下列作者事实锚点：${JSON.stringify(openingAnchors)}。不要写“暂定：”、前项、另一端、已确认条件等审阅元语言；不要用“设备”“某人”或“当时”替代缺失事实。`
+    ? `\n上一版没有通过首回合事实或质量闸门。${repairMessage} 请完整重写，不要沿用上一版的句子。重试时只能逐字使用下列作者事实锚点：${JSON.stringify(openingAnchors)}。不要写“暂定：”、前项、另一端、已确认条件等审阅元语言；不要用“设备”“某人”或“当时”替代缺失事实；三个选项必须分别采取“先处理、先守住、先决定”中的一种不同优先级。`
     : ''
 
   return `你是中文互动故事的开场编辑。现在只生成确认主线后的第一个可选择情境；写成作者能直接审阅的短情境，不写小说段落，也不补背景。
@@ -8615,18 +8685,18 @@ function buildConfirmedCurveFirstTurnPrompt(
 已确认原始事实：${JSON.stringify(sourceFacts)}
   作者可直接核对的事实锚点（可逐字使用；不要把它们扩写成新事件）：${JSON.stringify(openingAnchors)}
   三项选择必须分别覆盖的锚点（每项至少使用其中一项，优先逐字照抄）：${JSON.stringify(openingAnchorPlan)}
-  三项选择的可直接照抄句式（必须按此语法组织；只替换锚点，不能为了自然叙事补出细节）：
+  三项选择的可直接照抄句式（必须按此语法组织；只替换锚点，不能为了自然叙事补出细节；三项分别是不同的优先级判断，不是同一句话替换名词）：
 ${openingOptionSkeletons.join('\n')}
 
 硬性边界：除了上面列出的主体、目标和作者事实锚点，不得出现任何新的关键名词、人物回应、物件、设备、通讯、票券、机构流程、方案、过去经历、日期、时刻、数量或永久结果。曲线只提供“当前处境 -> 卡点 -> 取舍 -> 主动判断”的顺序，不能把其中任何系统提案逐句搬进读者界面。下面作者原文中的物件、期限、关系可以原样逐字保留；“今晚”“周五”“展出前”“姐姐”“投影仪”等如出现在锚点中就是允许的事实，不要把它们误删或换成新的时间和物件。未写出的细节必须留为待决定，而不是用常识补齐。不得把任何未来提案写成已经发生。已知人物可以作为主角行动的对象，但不能预言其“可能、会、将”如何回应，也不能写出其新决定、流程、计划、记忆、责任或态度。
 
 质量要求（比套模板更重要）：
-- node.event 用 1 至 2 句写出此刻的具体卡点，必须包含主体和至少一个事实锚点；不要只写“确认的阻碍”或“目标停住”。
+- node.event 用 1 至 2 句写出此刻的具体卡点，必须包含主体和一至两个事实锚点；不要逐字复述整段作者输入，不要只写“确认的阻碍”或“目标停住”。
 - node.purpose 说明这个卡点怎样承接已经确认的因果顺序，并把作者带到尚未决定的取舍；不要写解决结果。
 - conflict.conflict 必须同时承接已确认的阻碍与取舍，conflict.action 必须点出两端，conflict.consequence 只写尚未解决的当下压力。
-  - 三个选项必须是三个不同的当下判断。选项一、二、三按顺序分别优先使用上面的第一个、第二个、第三个锚点；每项 action、immediateConsequence、laterEffect 至少逐字承接对应锚点，必须采用上面的短句式，不能用“她已”“他答应”“截止”等新状态替代作者原句。标题要直接说清对应的对象、期限、承诺或关系，不能写“先回应前项”“先看另一端”“先保留目标”“先明确影响”等占位标题。
-  - immediateConsequence 只能说明主角已把哪项已有事实摆到眼前，不能补写他人如何反应、某个流程怎样继续、或一项计划怎样改变。laterEffect 只能写可能继续面对的牵引，不能写成已经发生的新事实；所有 option 的 introducedFacts 由服务端保持为空。
-不要机械复制同一句目标，不要输出“暂定：”或“已确认条件”等系统审阅元语言。将已确认曲线转成当前可判断的作者事实：用一个锚点写卡点，用另一个锚点写取舍，再让三个选项分别指出不同的判断入口。
+  - 三个选项必须是三个不同的当下判断，依次采用“先处理”“先守住”“先决定”三种优先级；每项 action、immediateConsequence、laterEffect 至少逐字承接对应锚点，并再承接一个不同锚点。不能用“她已”“他答应”“截止”等新状态替代作者原句。标题要直接说清对应的对象、期限、承诺或关系，不能写“先回应前项”“先看另一端”“先保留目标”“先明确影响”等占位标题。
+  - immediateConsequence 必须说明这项优先级怎样改变主角当前的判断顺序，但不能补写他人如何反应、某个流程怎样继续、或一项计划怎样改变；禁止使用“仍是当前事实”“不再被略过”“取舍仍待判断”等空转句。laterEffect 只能写尚待主角承担的牵引，不能写成已经发生的新事实；所有 option 的 introducedFacts 由服务端保持为空。
+  不要机械复制同一句目标，不要输出“暂定：”或“已确认条件”等系统审阅元语言；不要把“入口”当作场景地点，也不要写决定权、选择权、署名权等权利词。将已确认曲线转成当前可判断的作者事实，让三个选项分别体现不同的优先级。
 ${repair}
 
 只输出 JSON，不要 Markdown、解释或额外字段：
@@ -8722,7 +8792,7 @@ function getStoryTurnRepairInstruction(
 ): string {
   if (!repairMessage) return ''
   if (outputFormat === 'compact') {
-    return `\n上一轮紧凑回合没有通过事实闸门：${repairMessage}。请完整重写读者可见的当前情境和选项；删除触发该问题的词及其同类具体细节，改用已确认目标、阻碍和取舍的抽象表述。不要输出或修复 narrativeAction、transition 等内部字段。`
+    return `\n上一轮紧凑回合没有通过事实闸门：${repairMessage}。请完整重写读者可见的当前情境和选项；删除触发该问题的词及其同类具体细节，改用已确认目标、阻碍和取舍的抽象表述。不得写决定权、选择权、署名权、共同责任、入口（除非明确表示判断入口）或任何新的人物回应。三个选项分别使用先处理、先守住、先决定三种优先级；不要把同一判断句只替换事实名词。不要输出或修复 narrativeAction、transition 等内部字段。`
   }
 
   return `\n上一轮没有通过结构检查：${repairMessage}。请完整重做这一回合，不要沿用不合格字段。`
