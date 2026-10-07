@@ -58,6 +58,7 @@ import type {
   StoryCurveSpineResponse,
   StorySessionSnapshot,
   StoryActionProposalResponse,
+  StoryModelFailureDiagnostic,
 } from '../../shared/story-contract.js'
 
 const app = express()
@@ -231,6 +232,7 @@ app.use((error: unknown, _request: Request, response: Response<ApiErrorResponse>
       error.message,
       error.conflictCoreContextPrefill,
       error.systemDraftPrefill,
+      toPublicModelDiagnostic(error.modelDiagnostic),
     )
     return
   }
@@ -261,15 +263,49 @@ function sendApiError(
   message: string,
   conflictCoreContextPrefill?: StoryConflictCoreContextPrefill,
   systemDraftPrefill?: StoryConflictCoreSystemDraft,
+  diagnostic?: StoryModelFailureDiagnostic,
 ) {
   response.status(statusCode).json({
     error: {
       code,
       message,
+      ...(diagnostic ? { diagnostic } : {}),
       ...(conflictCoreContextPrefill ? { conflictCoreContextPrefill } : {}),
       ...(systemDraftPrefill ? { systemDraftPrefill } : {}),
     },
   } satisfies ApiErrorResponse)
+}
+
+function toPublicModelDiagnostic(
+  diagnostic: AppError['modelDiagnostic'],
+): StoryModelFailureDiagnostic | undefined {
+  if (!diagnostic) return undefined
+  // ModelFailureDiagnostic is already safe internally, but copy only the
+  // documented scalar/shape fields before returning it to a browser client.
+  const response = diagnostic.response
+    ? {
+        kind: diagnostic.response.kind,
+        ...(diagnostic.response.topLevelKeys ? { topLevelKeys: diagnostic.response.topLevelKeys.slice(0, 24) } : {}),
+        ...(diagnostic.response.fieldShapes ? { fieldShapes: { ...diagnostic.response.fieldShapes } } : {}),
+        ...(diagnostic.response.model ? { model: diagnostic.response.model } : {}),
+        ...(diagnostic.response.finishReason ? { finishReason: diagnostic.response.finishReason } : {}),
+        ...(diagnostic.response.usageKeys ? { usageKeys: diagnostic.response.usageKeys.slice(0, 16) } : {}),
+        ...(diagnostic.response.choicesCount === undefined ? {} : { choicesCount: diagnostic.response.choicesCount }),
+        ...(diagnostic.response.firstChoiceKeys ? { firstChoiceKeys: diagnostic.response.firstChoiceKeys.slice(0, 24) } : {}),
+        ...(diagnostic.response.contentType ? { contentType: diagnostic.response.contentType } : {}),
+        ...(diagnostic.response.contentLength === undefined ? {} : { contentLength: diagnostic.response.contentLength }),
+        ...(diagnostic.response.errorKeys ? { errorKeys: diagnostic.response.errorKeys.slice(0, 12) } : {}),
+      }
+    : undefined
+  return {
+    stage: diagnostic.stage,
+    ...(diagnostic.attempt === undefined ? {} : { attempt: diagnostic.attempt }),
+    ...(diagnostic.maxAttempts === undefined ? {} : { maxAttempts: diagnostic.maxAttempts }),
+    ...(diagnostic.httpStatus === undefined ? {} : { httpStatus: diagnostic.httpStatus }),
+    ...(diagnostic.responseFormat === undefined ? {} : { responseFormat: diagnostic.responseFormat }),
+    ...(diagnostic.reason ? { reason: diagnostic.reason.slice(0, 240) } : {}),
+    ...(response ? { response } : {}),
+  }
 }
 
 function registerStoryStage<RequestBody, Result, ResponseBody>(

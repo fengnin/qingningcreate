@@ -27,6 +27,9 @@ export interface ModelResponseSummary {
   kind: 'object' | 'array' | 'string' | 'number' | 'boolean' | 'null' | 'undefined'
   topLevelKeys?: string[]
   fieldShapes?: Record<string, string>
+  model?: string
+  finishReason?: string
+  usageKeys?: string[]
   choicesCount?: number
   firstChoiceKeys?: string[]
   contentType?: string
@@ -400,6 +403,18 @@ export function summarizeModelResponse(value: unknown): ModelResponseSummary {
         .slice(0, 24)
         .map(([key, field]) => [key, describeResponseFieldShape(field)]),
     ),
+  }
+  if (typeof record.model === 'string' && record.model.trim()) {
+    summary.model = record.model.trim().slice(0, 80)
+  }
+  if (Array.isArray(record.choices)) {
+    const firstChoice = record.choices[0]
+    if (isRecord(firstChoice) && typeof firstChoice.finish_reason === 'string') {
+      summary.finishReason = firstChoice.finish_reason.slice(0, 40)
+    }
+  }
+  if (isRecord(record.usage)) {
+    summary.usageKeys = Object.keys(record.usage).slice(0, 16)
   }
   if (Array.isArray(record.choices)) {
     summary.choicesCount = record.choices.length

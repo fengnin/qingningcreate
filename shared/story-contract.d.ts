@@ -756,9 +756,35 @@ export interface ApiErrorResponse {
   error: {
     code: string
     message: string
+    /** Safe model failure metadata; never contains prompts or raw response text. */
+    diagnostic?: StoryModelFailureDiagnostic
     conflictCoreContextPrefill?: StoryConflictCoreContextPrefill
     systemDraftPrefill?: StoryConflictCoreSystemDraft
   }
+}
+
+export interface StoryModelResponseSummary {
+  kind: 'object' | 'array' | 'string' | 'number' | 'boolean' | 'null' | 'undefined'
+  topLevelKeys?: string[]
+  fieldShapes?: Record<string, string>
+  model?: string
+  finishReason?: string
+  usageKeys?: string[]
+  choicesCount?: number
+  firstChoiceKeys?: string[]
+  contentType?: string
+  contentLength?: number
+  errorKeys?: string[]
+}
+
+export interface StoryModelFailureDiagnostic {
+  stage: string
+  attempt?: number
+  maxAttempts?: number
+  httpStatus?: number
+  responseFormat?: boolean
+  reason?: string
+  response?: StoryModelResponseSummary
 }
 
 export interface HealthResponse {
