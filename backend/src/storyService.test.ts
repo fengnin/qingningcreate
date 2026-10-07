@@ -2636,6 +2636,31 @@ test('rejects rich model directions that hide new value or authority conclusions
     () => validateSystemConflictCoreDraft(relationshipCurveIdea, relationshipSeed, inventedAuthority),
     /未由作者原文支持的价值、权限或关系结论/u,
   )
+
+  const abstractTradeoffSides = structuredClone(relationshipDraft)
+  abstractTradeoffSides.directions = abstractTradeoffSides.directions!.map((direction, index) => ({
+    ...direction,
+    tradeoff: [
+      '和姐姐一起保住父亲留下的书店，还是暂缓行动',
+      '保留承诺，还是和姐姐一起保住父亲留下的书店',
+      '重新判断，还是姐姐准备把店卖掉',
+    ][index]!,
+  }))
+  assert.doesNotThrow(() => validateSystemConflictCoreDraft(
+    relationshipCurveIdea,
+    relationshipSeed,
+    abstractTradeoffSides,
+  ))
+
+  const inventedTemporalLabel = structuredClone(relationshipDraft)
+  inventedTemporalLabel.directions![0] = {
+    ...inventedTemporalLabel.directions![0]!,
+    label: '期限卡住目标',
+  }
+  assert.throws(
+    () => validateSystemConflictCoreDraft(relationshipCurveIdea, relationshipSeed, inventedTemporalLabel),
+    /作者没有提供的期限或时机语义/u,
+  )
 })
 
 test('rich system-draft requests never invite sparse-scene hooks', async () => {
