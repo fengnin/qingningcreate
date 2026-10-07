@@ -4179,6 +4179,14 @@ function collectSystemDraftMinimalAssumptionIssues(
       if (ungroundedLanguage) {
         issues.push(`第 ${index + 1} 条分支${ungroundedLanguage}`)
       }
+
+      const ungroundedTradeoffSide = findUngroundedRichSystemDraftTradeoffSide(
+        direction.tradeoff,
+        establishedSourceTexts,
+      )
+      if (ungroundedTradeoffSide) {
+        issues.push(`第 ${index + 1} 条分支取舍加入了未由作者原文支持的判断“${ungroundedTradeoffSide}”`)
+      }
     }
   }
 
@@ -4226,11 +4234,50 @@ const richSystemDraftNonDistinctFragments = new Set([
 // in rich-input outputs.  A literal author phrase still passes; otherwise the
 // branch is rejected and the model keeps its true failed origin.
 const richSystemDraftUnsupportedSemanticPatterns: readonly RegExp[] = [
-  /(?:未竟意志|遗愿|遗嘱|完整权|自我表达|共作意义|共作的意义|单方延续|决定权|决策权)/u,
+  /(?:未竟意志|遗愿|遗嘱|完整性|完整权|完整状态|完整手稿|自我表达|共作意义|共作的意义|共同创作|共同署名|作品归属|单方延续|决定权|决策权|署名权|提交条件|交稿条件|署名意义|手稿意义|信任与边界|信任边界|自主权)/u,
   /(?:信任与边界|信任关系|尊重[^，。！？；\n]{0,8}(?:关系|决定|边界))/u,
   /(?:承认|改变|重新理解)[^，。！？；\n]{0,8}(?:共作|自我表达|未竟意志|完整性之外的意义)/u,
   /(?:突破|打破)[^，。！？；\n]{0,8}(?:约定|承诺)/u,
 ]
+
+const richSystemDraftAllowedTradeoffSidePattern = /^(?:继续(?:目标|提交|行动|处理)?|暂缓(?:目标|提交|行动|处理|决定)?|暂不(?:继续|处理|决定|行动)?|保留(?:目标|承诺|选择|决定)?|以保留选择空间|放弃(?:目标|承诺|选择|决定)?|承担取舍|重新判断|先面对(?:目标|承诺|期限|当前条件)?|按承诺(?:提交|行动)?|不再(?:继续|改动|替对方决定)?)$/u
+
+function splitRichSystemDraftTradeoff(value: string): string[] {
+  const cleaned = value
+    .replace(/^暂定[：:]?/u, '')
+    .replace(/^(?:在|必须在|是否)\s*/u, '')
+    .replace(/(?:之间)?(?:作出)?(?:选择|取舍)?[。！？；]?$/u, '')
+    .trim()
+  const match = cleaned.match(/^(.{2,80}?)(?:还是|或)(.{2,80})$/u)
+  if (!match) return []
+  return [match[1]!.trim(), match[2]!.trim()]
+}
+
+function findUngroundedRichSystemDraftTradeoffSide(
+  value: string,
+  sourceTexts: readonly string[],
+): string | undefined {
+  const sides = splitRichSystemDraftTradeoff(value)
+  if (sides.length !== 2) return undefined
+  const sourceText = sourceTexts.join('\n')
+  const anchors = getRichSystemDraftAuthorAnchors(sourceTexts)
+  for (const side of sides) {
+    const normalizedSide = side
+      .replace(/^(?:在|先|必须|是否|选择|决定|继续|暂缓|保留|承担)\s*/u, '')
+      .replace(/[“”"「」]/gu, '')
+      .trim()
+    if (!normalizedSide) continue
+    const semantic = richSystemDraftUnsupportedSemanticPatterns
+      .map((pattern) => pattern.exec(normalizedSide)?.[0])
+      .find((match) => match !== undefined && !hasOriginalTextPhrase(sourceText, match))
+    if (semantic) return semantic
+    if (sourceTexts.some((source) => hasOriginalTextPhrase(source, normalizedSide))) continue
+    if (richSystemDraftAllowedTradeoffSidePattern.test(normalizedSide)) continue
+    const hasVisibleAnchor = anchors.some((anchor) => normalizeGoalText(normalizedSide).includes(normalizeGoalText(anchor)))
+    if (!hasVisibleAnchor) return normalizedSide
+  }
+  return undefined
+}
 
 function findRichSystemDraftUngroundedLanguage(
   direction: SystemDraftDirection,

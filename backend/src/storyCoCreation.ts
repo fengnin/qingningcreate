@@ -115,15 +115,15 @@ const curveUnsupportedSemanticRules: readonly {
 }[] = [
   {
     label: '未经确认的价值、意义或归属结论',
-    pattern: /(?:完整性|完整权|自我表达|共作意义|共作的意义|作品归属|归属|署名意义|手稿意义)/u,
+    pattern: /(?:完整性|完整权|完整状态|完整手稿|自我表达|共作意义|共作的意义|作品归属|归属|署名意义|手稿意义)/u,
   },
   {
     label: '未经确认的权限或自主结论',
-    pattern: /(?:自主权|决定权|决策权|选择权|控制权|话语权)/u,
+    pattern: /(?:自主权|决定权|决策权|选择权|控制权|话语权|署名权|提交条件|交稿条件)/u,
   },
   {
     label: '未经确认的关系、承诺或责任结论',
-    pattern: /(?:信任边界|承诺边界|承诺的边界|关系边界|共同责任|共同记忆|共同承诺|伙伴关系|合作署名|共同署名|协作方|创作边界|关系裂痕|关系损耗|关系后果|失信于|单方延续)/u,
+    pattern: /(?:信任与边界|信任边界|承诺边界|承诺的边界|关系边界|共同责任|共同记忆|共同承诺|伙伴关系|合作署名|共同署名|协作方|创作边界|关系裂痕|关系损耗|关系后果|失信于|单方延续|尊重[^，。！？；\n]{0,8}(?:关系|决定|边界))/u,
   },
   {
     label: '未经确认的条件、标准或流程结论',
@@ -133,6 +133,17 @@ const curveUnsupportedSemanticRules: readonly {
     label: '未经确认的复合意义或关系判断',
     pattern: /(?:改变|重新理解|重新判断|重构|确认|定义|承认)[^，。！？；\n]{0,10}(?:意义|归属|完整性|边界|责任)/u,
     allowEstablishedSubphrase: true,
+  },
+  {
+    label: '未经确认的递归理解或条件结论',
+    // A direct author phrase may follow "重新理解". Reject the malformed
+    // model pattern where it wraps a desire/question again ("重新理解……要不要…")
+    // or turns a generic method/condition into a new fact.
+    pattern: /(?:重新理解|重新定义|重新判断)[^，。！？；\n]{0,24}(?:想|是否|要不要|原有安排|旧办法|条件|取舍)/u,
+  },
+  {
+    label: '未经确认的模板化安排结论',
+    pattern: /(?:原有安排|旧办法|原计划)[^，。！？；\n]{0,8}(?:的失效|失效|不再足够|不再奏效)/u,
   },
   {
     label: '未经确认的补写、修复或完成操作',
@@ -411,6 +422,12 @@ function buildCurveModelRepairInstruction(error: AppError): string {
   if (/sourceFactIds|原文锚点/u.test(reason)) {
     return '逐条核对事实 ID：每个节点只列 detail 中逐字出现的作者短语对应的 ID；没有照抄锚点的材料不要列入该节点。'
   }
+  if (/戏剧力量「反差」.*trigger\/escalation/u.test(reason)) {
+    return '反差早期节点必须把两个作者锚点组成事实因果句：例如“[条件]让[目标]无法按已确认条件推进”或“[条件]反而让[目标]停住”。不要只写孤立的“原有安排/失效”，不要新增场景。'
+  }
+  if (/戏剧力量「反差」.*climax-choice\/resolution/u.test(reason)) {
+    return '反差后期节点必须把[作者目标]和[作者期限/承诺/关系]写进同一句：例如“[目标]不能再按[条件]继续”或“这次选择调整[目标]在[条件]下的处理方式”。不要写“原有安排失效/不再足够”或“重新理解要不要……”。'
+  }
   if (/创意方向|戏剧力量|故事感觉|因果层级/u.test(reason)) {
     return '重写为四个不同因果层级：目标受阻、取舍升级、主动选择、选择后的变化；让所选方向词紧贴对应作者锚点。'
   }
@@ -442,10 +459,10 @@ function describeCurveModelFailure(error: AppError): string {
       return `${message}请让 trigger 或 escalation 明确写出“承担、放弃、失去、保留、取舍”之一，并紧贴对应作者原文锚点；不要只写目标停住。`
     }
     if (/戏剧力量「反差」.*trigger\/escalation/u.test(message)) {
-      return `${message}请让 trigger 或 escalation 逐字出现“原有安排、旧办法、局限、反而、失效”之一，并说明该作者条件为何不能照旧推进；不要新增场景。`
+      return `${message}请把 trigger 或 escalation 改成事实因果句，例如“[作者条件]让[作者目标]无法按已确认条件推进”或“[作者条件]反而让[作者目标]停住”。不要只孤立写“原有安排/失效”，不要新增场景。`
     }
     if (/戏剧力量「反差」.*climax-choice\/resolution/u.test(message)) {
-      return `${message}请让 climax-choice 或 resolution 逐字出现“旧办法、原有安排、局限、反而、失效、重新”之一，并紧贴作者目标或承诺说明变化。`
+      return `${message}请把 climax-choice 或 resolution 改成“[作者目标]不能再按[作者条件]继续”或“这次选择调整[作者目标]在[作者条件]下的处理方式”这类因果句；不要写“原有安排失效/不再足够”或“重新理解要不要……”，不要新增价值、权限或关系结论。`
     }
     if (/创意方向|戏剧力量|故事感觉|因果层级/u.test(message)) {
       return `${message}请只在指定的节点层级使用提示中的抽象方向词，并让每个方向词紧贴原文目标、期限、承诺、关系或对象；方向词不能替代事实，也不能单独凑关键词。`
@@ -2555,11 +2572,14 @@ function getCreativeDirectionEvidenceRequirements(brief: CreativeBrief): Creativ
         requirements.push({
           label: '戏剧力量「反差」',
           earlyKinds: earlyPressureKinds,
-          earlyPattern: /反而|反倒|反过来|局限|旧办法|旧路径|原本|原计划|原有安排|依赖|惯用|习惯|露出|失效|不再奏效/u,
-          earlyInstruction: '原有安排、旧办法、局限、反而或失效之一，说明目标为何不能照旧推进',
+          // A bare marker such as "原有安排" is not evidence: it can be
+          // pasted into an otherwise generic sentence. Require the marker to
+          // participate in a visible obstruction/contrast relation instead.
+          earlyPattern: /(?:反而|反倒|反过来)[^。！？；\n]{0,48}(?:停住|卡住|无法|不能|受限|取舍|推进)|(?:无法|不能|不再|暴露|卡住|停住)[^。！？；\n]{0,28}(?:已确认条件|原有安排|旧办法|旧路径|原本|原计划)|(?:已确认条件|原有安排|旧办法|旧路径|原本|原计划)[^。！？；\n]{0,28}(?:无法|不能|不再|暴露|局限|停住|卡住|推进)/u,
+          earlyInstruction: '用“[作者条件]让[作者目标]无法按已确认条件推进”或“[作者条件]反而让[作者目标]停住”这类因果句，说明作者事实为何不能照旧推进',
           lateKinds: lateChoiceKinds,
-          latePattern: /反而|反倒|局限|旧办法|旧路径|原本|原计划|原有安排|失效|不再奏效|重新/u,
-          lateInstruction: '旧办法、原有安排、局限、反而、失效或重新之一，说明选择怎样不再照旧',
+          latePattern: /(?:不能再|不再|无法再)[^。！？；\n]{0,36}(?:按[^。！？；\n]{0,24}(?:继续|处理|推进)|沿用|照旧|依赖旧办法)|(?:已确认条件|原有安排|旧办法|旧路径|原本|原计划)[^。！？；\n]{0,28}(?:不再照旧|不能继续|暴露局限|选择|取舍|保留|放弃)|(?:反而|反倒|调整)[^。！？；\n]{0,48}(?:选择|判断|处理|推进|目标)/u,
+          lateInstruction: '用“[作者目标]不能再按[作者条件]继续”或“调整[作者目标]在[作者条件]下的处理方式”这类因果句，说明选择怎样改变原路径',
         })
         break
       case 'cost':
@@ -3844,11 +3864,11 @@ const compactCurveGenerationSystemPrompt = `你是故事共创编辑，只负责
 
 只输出一个 JSON 对象，不能有 Markdown、解释或额外键。对象只有 title 和 beats；beats 必须恰好 5 项，顺序固定为 current-state、trigger、escalation、climax-choice、resolution。每项只能有 kind、detail、sourceFactIds 三个键；sourceFactIds 只能使用用户材料中给出的真实 ID，不能创造 ID。服务端会补充节点标题、依赖关系、因果锚点和共享 foundation，不要输出 foundation。
 
-current-state 只能概括用户已写出的当前处境。其余四项必须以“暂定：”开头，各写一个不超过 90 字、可被作者逐字审阅的抽象因果句：trigger 只说明一个已确认条件怎样使目标停住；escalation 使用不同的已确认条件，说明继续目标要承担什么取舍；climax-choice 写出主体在两端之间的主动选择；resolution 写出选择后哪一项安排、理解或关系会改变。只用用户材料中的目标、期限、承诺、关系和对象；不要新增场景动作、对白、未经确认的设备操作、文件流程、人物姓名、精确数字、确定的他人回应或已经发生的结果。作者已明确的物件、期限和关系可以作为条件逐字保留，不能为了抽象而换成“某个安排”后继续声称承接原事实。事实锚点后不得附加作者未写出的价值、意义、归属、权限、关系边界、责任或修复结论，除非该概念逐字出现在作者材料中。禁止使用“已经完成、已经解决、最终得到、终于、结果是”等既成结果写法；每一项都必须保持尚待作者确认。
+current-state 只能概括用户已写出的当前处境。其余四项必须以“暂定：”开头，各写一个不超过 90 字、可被作者逐字审阅的抽象因果句：trigger 只说明一个已确认条件怎样使目标停住；escalation 使用不同的已确认条件，说明继续目标要承担什么取舍；climax-choice 写出主体在两端之间的主动选择；resolution 必须同时写出一个原文目标和另一项原文期限、承诺或关系，说明这个目标在该条件下需要怎样调整或不能继续。只用用户材料中的目标、期限、承诺、关系和对象；不要新增场景动作、对白、未经确认的设备操作、文件流程、人物姓名、精确数字、确定的他人回应或已经发生的结果。作者已明确的物件、期限和关系可以作为条件逐字保留，不能为了抽象而换成“某个安排”后继续声称承接原事实。事实锚点后不得附加作者未写出的价值、意义、归属、权限、关系边界、责任或修复结论，除非该概念逐字出现在作者材料中。禁止使用“已经完成、已经解决、最终得到、终于、结果是”等既成结果写法；每一项都必须保持尚待作者确认。
 
-避免模板化：不要把同一整句目标复制到四个节点。每个节点都要有不同的因果动词和不同的事实锚点；resolution 不能只把“选择”换成“重新理解”，必须明确说出哪一项已确认安排会改变。不要写“使提交目标停住”“承担某事实的取舍”这种脱离主体和两端的空壳句；把作者原文中的主体、对象或承诺放回句子中。
+避免模板化：不要把同一整句目标复制到四个节点。每个节点都要有不同的因果动词和不同的事实锚点；resolution 不能只把“选择”换成“重新理解”，而要明确说明一个原文目标如何受另一项原文条件影响。不要写“使提交目标停住”“承担某事实的取舍”这种脱离主体和两端的空壳句；把作者原文中的主体、对象或承诺放回句子中。
 
-方向要求：严格遵守用户请求中列出的“方向层级硬约束”。每个所选方向都要先改变目标受阻或取舍升级，再改变后续的主动选择或变化；方向词只能作为抽象因果连接，不能代替作者事实，也不能在任意节点机械重复。反差必须在 trigger/escalation 与 climax-choice/resolution 中各至少出现一个“原有安排、旧办法、局限、反而、失效、重新”中的词；成长必须在 climax-choice 出现“选择、承担、承认、放下、接受、重新”之一，并在 resolution 出现“改变、成长、理解、学会、调整、重新”之一。严格按这个最小形状输出：{"title":"暂定主线","beats":[{"kind":"current-state","detail":"用户当前处境","sourceFactIds":["source-fact-1"]},{"kind":"trigger","detail":"暂定：主体的已确认条件使目标停住","sourceFactIds":["source-fact-2"]},{"kind":"escalation","detail":"暂定：另一条已确认承诺使继续目标必须承担取舍","sourceFactIds":["source-fact-3"]},{"kind":"climax-choice","detail":"暂定：主体必须在目标的一端与承诺的另一端之间选择","sourceFactIds":["source-fact-3"]},{"kind":"resolution","detail":"暂定：这次选择让已确认的原有安排改变，并重新理解其中一端","sourceFactIds":["source-fact-2"]}]}`
+方向要求：严格遵守用户请求中列出的“方向层级硬约束”。每个所选方向都要先改变目标受阻或取舍升级，再改变后续的主动选择或变化；方向词只能作为抽象因果连接，不能代替作者事实，也不能在任意节点机械重复。反差的早期节点必须写成“[作者条件]让[作者目标]无法按已确认条件推进”或“[作者条件]反而让[作者目标]停住”这类事实因果句；后期节点必须把两项作者事实写成“[作者目标]不能再按[作者条件]继续”或“调整[作者目标]在[作者条件]下的处理方式”。不要只孤立写“原有安排”“失效”“不再足够”，也不要把作者的问题再包成“重新理解……要不要……”；这些句式会把模板结论误当成故事事实。关系方向只能复用作者原句（例如“答应过不再替姐姐做决定”“姐姐准备把店卖掉”），禁止新增“决定权、署名权、信任边界、共同责任、共同署名、共同创作”等抽象结论。成长必须在 climax-choice 出现“选择、承担、承认、放下、接受、重新”之一，并在 resolution 出现“改变、成长、理解、学会、调整、重新”之一。严格按这个最小形状输出：{"title":"暂定主线","beats":[{"kind":"current-state","detail":"用户当前处境","sourceFactIds":["source-fact-1"]},{"kind":"trigger","detail":"暂定：主体的已确认条件使目标停住","sourceFactIds":["source-fact-2"]},{"kind":"escalation","detail":"暂定：另一条已确认承诺使继续目标必须承担取舍","sourceFactIds":["source-fact-3"]},{"kind":"climax-choice","detail":"暂定：主体必须在目标的一端与承诺的另一端之间选择","sourceFactIds":["source-fact-3"]},{"kind":"resolution","detail":"暂定：这次选择调整原文目标在原文承诺下的处理方式","sourceFactIds":["source-fact-2"]}]}`
 
 const compactCurveGenerationRepairSystemPrompt = `你是故事结构修复器。只输出一个 JSON 对象，不能有 Markdown、解释或额外键；对象只有 title 和 beats。beats 必须恰好 5 项，顺序固定为 current-state、trigger、escalation、climax-choice、resolution；每项只能有 kind、detail、sourceFactIds 三个键，sourceFactIds 只能复制输入中的真实 ID。不要输出 foundation、title 以外的节点字段或任何场景化内容。current-state 保留用户事实；其余 detail 以“暂定：”开头，每项只写一个抽象因果关系，并分别推进目标受阻、取舍升级、主动选择和选择后的变化。
 
@@ -3856,9 +3876,9 @@ const compactCurveGenerationRepairSystemPrompt = `你是故事结构修复器。
 
 禁止把任何未列在作者材料中的具体名词、人物状态、过往信息、操作步骤、精确量化或既成结果写进曲线。已由作者明确写出的期限、承诺、关系、物件或目标动作可以逐字作为条件保留，但不能扩写成场景或操作。
 
-方向词必须以用户请求中的“方向层级硬约束”为准；只可作为紧贴原文锚点的抽象连接，不能自行套用未选择的反差、成长或其他题材词。反差的早期节点必须写“原有安排、旧办法、局限、反而或失效”之一，后期选择或变化节点也必须写“旧办法、原有安排、局限、反而、失效或重新”之一；成长的选择节点必须写“选择、承担、承认、放下、接受或重新”之一，变化节点必须写“改变、成长、理解、学会、调整或重新”之一。严格遵守上一轮失败原因，整条曲线重新写，不要复制上一版句子。
+方向词必须以用户请求中的“方向层级硬约束”为准；只可作为紧贴原文锚点的抽象连接，不能自行套用未选择的反差、成长或其他题材词。反差早期只用“[作者条件]让[作者目标]无法按已确认条件推进/反而让目标停住”，后期只用“[作者目标]不能再按[作者条件]继续/调整[作者目标]在[作者条件]下的处理方式”；不要把“失效、不再足够、重新理解……要不要……”单独写成结论。关系方向只能照抄作者的承诺和关系事实，不能写决定权、署名权、信任边界、共同责任或共同创作。成长的选择节点必须写“选择、承担、承认、放下、接受或重新”之一，变化节点必须写“改变、成长、理解、学会、调整或重新”之一。严格遵守上一轮失败原因，整条曲线重新写，不要复制上一版句子。
 
-安全句式是：trigger=“暂定：[原文期限/承诺/关系]使[原文目标]停住”；escalation=“暂定：继续[原文目标]会承担[原文承诺/关系/条件]的取舍”；climax-choice=“暂定：[主体]必须在[原文目标]与[原文承诺/关系]之间选择”；resolution=“暂定：这次选择让[原有安排/旧办法]不再照旧，并重新理解[原文目标或承诺]”。方括号必须替换为输入中的短语，不能新增名词。`
+安全句式是：trigger=“暂定：[原文期限/承诺/关系]使[原文目标]停住”；escalation=“暂定：继续[原文目标]会承担[原文承诺/关系/条件]的取舍”；climax-choice=“暂定：[主体]必须在[原文目标]与[原文承诺/关系]之间选择”；resolution=“暂定：这次选择调整[原文目标]在[原文期限/承诺/关系]下的处理方式”。方括号必须替换为输入中的短语，不能新增名词。`
 
 function buildCurveGenerationPrompt(
   idea: string,
@@ -3905,7 +3925,7 @@ function buildCompactCurveGenerationPrompt(
     `作者选择的方向：${directionTerms.join('、') || '开放方向'}；每个所选方向都必须先影响目标受阻或取舍升级，再影响主动选择或结局变化，并让每项推进不同因果。`,
     `方向层级硬约束（列出的词是允许的抽象连接，不是新增事实）：${directionRequirements || '保持抽象因果并避免模板重复。'}`,
     `方向节点最低可审阅形状：${getModelDirectionMarkerInstruction(brief)}`,
-    '安全结构：trigger=主体+一个已确认条件+目标为什么停住；escalation=不同的已确认条件+继续目标要承担的取舍；climax-choice=主体在两端之间的主动选择；resolution=选择后哪项已确认安排、理解或关系会改变。四个节点必须各有不同的因果动词，不得把同一整句目标复制到每个节点。',
+    '安全结构：trigger=主体+一个已确认条件+目标为什么停住；escalation=不同的已确认条件+继续目标要承担的取舍；climax-choice=主体在两端之间的主动选择；resolution=这次选择如何调整一个原文目标在另一项原文期限、承诺或关系下的处理方式。四个节点必须各有不同的因果动词，不得把同一整句目标复制到每个节点。',
     `用户原始想法：${idea}`,
     `原始材料（sourceFactIds 只能从这里复制；anchor 是可逐字核对的原文短语）：${JSON.stringify(sourceFacts)}`,
     `事实覆盖清单：整条曲线（current-state 可承接背景）必须覆盖每个 ID：${sourceFactIds.join('、') || '无'}。sourceFactIds 是可审阅的事实声明：单个提案节点只列 detail 中实际出现的事实 ID；每个 ID 都必须在 detail 中保留其 anchor 或原文的另一个有区分度连续短语（至少三个字）。没有写进 detail 的材料不要列 ID；不能把“原有安排”“既有条件”“当前问题”等泛化句挂到任何未出现的事实 ID。`,
@@ -3918,7 +3938,7 @@ function buildCompactCurveGenerationPrompt(
       `本轮只允许复用这些作者原文锚点：${JSON.stringify({ goal: seed.lockedGoal, facts: seed.lockedFacts })}。方向层级硬约束中列出的抽象词可以作为连接词，但必须紧贴这些锚点，不能独立变成新事实。请整条重写，只输出上述 5 个 beat；不要从亲属、身份、物件或常识推断额外背景、人物意图、具体场景或结果，也不要沿用上一轮句子。`,
       buildModelFactRepairMap(design),
     ] : []),
-    '严格按示例形状输出：{"title":"暂定主线","beats":[{"kind":"current-state","detail":"作者当前处境","sourceFactIds":["source-fact-1"]},{"kind":"trigger","detail":"暂定：主体的已确认条件使目标停住","sourceFactIds":["source-fact-2"]},{"kind":"escalation","detail":"暂定：另一条已确认承诺使继续目标必须承担取舍","sourceFactIds":["source-fact-3"]},{"kind":"climax-choice","detail":"暂定：主体必须在目标的一端与承诺的另一端之间选择","sourceFactIds":["source-fact-3"]},{"kind":"resolution","detail":"暂定：这次选择让已确认的原有安排改变，并重新理解其中一端","sourceFactIds":["source-fact-2"]}]}',
+    '严格按示例形状输出：{"title":"暂定主线","beats":[{"kind":"current-state","detail":"作者当前处境","sourceFactIds":["source-fact-1"]},{"kind":"trigger","detail":"暂定：主体的已确认条件使目标停住","sourceFactIds":["source-fact-2"]},{"kind":"escalation","detail":"暂定：另一条已确认承诺使继续目标必须承担取舍","sourceFactIds":["source-fact-3"]},{"kind":"climax-choice","detail":"暂定：主体必须在目标的一端与承诺的另一端之间选择","sourceFactIds":["source-fact-3"]},{"kind":"resolution","detail":"暂定：这次选择调整原文目标在原文承诺下的处理方式","sourceFactIds":["source-fact-2"]}]}',
   ].join('\n')
 }
 
@@ -4015,7 +4035,7 @@ function getModelDirectionMarkerInstruction(brief: CreativeBrief): string {
   const markers: string[] = []
   for (const force of brief.dramaticForces) {
     if (force === 'contrast') {
-      markers.push('反差：trigger 或 escalation 逐字出现“原有安排/旧办法/局限/反而/失效”之一，climax-choice 或 resolution 出现“重新/不再照旧”之一')
+      markers.push('反差：trigger 或 escalation 必须把作者条件写成“[作者条件]让[作者目标]无法按已确认条件推进/反而让目标停住”的因果句；climax-choice 或 resolution 必须写“[作者目标]不能再按[作者条件]继续/调整[作者目标]在[作者条件]下的处理方式”。不要孤立写“失效”或“重新理解……要不要……”')
     } else if (force === 'cost') {
       markers.push('代价：trigger 或 escalation 出现“承担/放弃/失去/保留/取舍”之一，climax-choice 或 resolution 出现“在……与……之间选择/取舍”或明确写出承担、放弃的一端')
     } else if (force === 'relationship-tension') {

@@ -107,10 +107,19 @@ export function buildStoryCurveFoundation(
   // midpoint sentence made the frozen map look like a set of duplicated
   // labels instead of a progression.
   const urgency = triggerAnchor
-  const extractedCost = getFoundationCost(
-    resolution.detail,
-    getFoundationCost(climax.detail, resolution.causalAnchor ?? '选择会改变目标和关系'),
-  )
+  // Once the climax contains two explicit sides, the pair itself is the only
+  // safe cost. Reading the resolution again often turns a model's abstract
+  // phrase ("重新理解...", "不再照旧") into a recursive pseudo-fact.
+  const tradeoffSides = getTradeoffSides(tradeoff)
+  const extractedCost = tradeoffSides
+    ? ''
+    : getFoundationCost(
+      // Resolution is a reviewed display sentence, not a source of new
+      // planning facts. Deriving cost from it was the source of recursive
+      // values such as "重新理解……" and duplicated tradeoff clauses.
+      climax.detail,
+      resolution.causalAnchor ?? '选择会改变目标和关系',
+    )
   const plausibleCost = ensureConcreteFoundationCost(extractedCost, tradeoff, decisionLabel)
   const openingClue = triggerAnchor
   const opening = current.detail.trim()
@@ -174,10 +183,10 @@ export function buildStoryCurveFoundation(
       climax: climax.detail.trim(),
       resolution: resolution.detail.trim(),
       cost: plausibleCost,
-      promise: `围绕${shortenFoundationLabel(decisionLabel)}先回应${shortenFoundationLabel(triggerAnchor)}，再处理${shortenFoundationLabel(escalationAnchor)}，让${forceLabel}留下${shortenFoundationLabel(plausibleCost)}。`,
+      promise: buildFoundationPromise(decisionLabel, triggerAnchor, escalationAnchor, plausibleCost),
     },
     approach: {
-      intent: `先回应${shortenFoundationLabel(triggerAnchor)}，再处理${shortenFoundationLabel(escalationAnchor)}，并承担${shortenFoundationLabel(plausibleCost)}。`,
+      intent: buildFoundationApproachIntent(triggerAnchor, escalationAnchor, tradeoff, plausibleCost),
       cost: plausibleCost,
     },
     sourceFactIds,
@@ -402,7 +411,7 @@ function buildFoundationChoice(
   const sides = getTradeoffSides(tradeoff)
   if (sides) {
     return shortenFoundationLabel(
-      `先回应${shortenFoundationLabel(urgency)}，再决定保留${sides[0]}还是承担${sides[1]}带来的后果`,
+      `先处理${shortenFoundationLabel(urgency)}，再在${sides[0]}与${sides[1]}之间作出选择`,
     )
   }
 
@@ -411,6 +420,34 @@ function buildFoundationChoice(
     return shortenFoundationLabel(`围绕${decisionLabel}，由作者决定如何回应${explicit}`)
   }
   return shortenFoundationLabel(`先回应${shortenFoundationLabel(urgency)}，再决定如何承担${decisionLabel}这项取舍`)
+}
+
+function buildFoundationPromise(
+  decisionLabel: string,
+  trigger: string,
+  escalation: string,
+  cost: string,
+): string {
+  return shortenFoundationLabel(
+    `${decisionLabel}由${shortenFoundationLabel(trigger)}推进到${shortenFoundationLabel(escalation)}，代价保持为${shortenFoundationLabel(cost)}。`,
+  )
+}
+
+function buildFoundationApproachIntent(
+  trigger: string,
+  escalation: string,
+  tradeoff: string,
+  cost: string,
+): string {
+  const sides = getTradeoffSides(tradeoff)
+  if (sides) {
+    return shortenFoundationLabel(
+      `先处理${shortenFoundationLabel(trigger)}，再在${sides[0]}与${sides[1]}之间作出选择。`,
+    )
+  }
+  return shortenFoundationLabel(
+    `先处理${shortenFoundationLabel(trigger)}，再回应${shortenFoundationLabel(escalation)}；代价是${shortenFoundationLabel(cost)}。`,
+  )
 }
 
 function buildClimaxPressure(choice: string, cost: string): string {
@@ -428,6 +465,7 @@ function ensureConcreteFoundationCost(
   const sides = getTradeoffSides(tradeoff)
   const generic = !normalized
     || /^(?:并)?留下(?:可见|明确)?代价$/u.test(normalized)
+    || /^(?:两边|双方|两端)(?:都|均)?承担(?:责任|代价|后果)$/u.test(normalized)
     || /^(?:选择会|结果会|发生可见变化|得到什么结果)/u.test(normalized)
     || /^(?:选择|取舍|承担这次选择)$/u.test(normalized)
     || /^(?:并)?(?:留下)?(?:让|使)(?:主角|人物|她|他).*(?:重新定义|发生变化|获得新的位置|看见彼此|成长)/u.test(normalized)
@@ -447,11 +485,21 @@ function getTradeoffSides(value: string): [string, string] | undefined {
     .replace(/^(?:[^，。！？；]{0,18})(?:必须|需要|只能)?在/u, '')
     .trim()
   const match = cleaned.match(/^(.{2,40}?)(?:与|和|还是|或)(.{2,40}?)(?:之间|中|的取舍|的要求|作出取舍|放弃一项条件|之间选择)/u)
-  if (!match?.[1] || !match[2]) return undefined
-  const left = match[1].replace(/^(?:继续|选择|决定|是否)/u, '').trim()
-  const right = match[2].replace(/^(?:继续|选择|决定|是否)/u, '').trim()
+  const selectionMatch = cleaned.match(/(?:必须|需要|只能)?选择(.{2,80}?)还是(.{2,80})$/u)
+  const leftRaw = match?.[1] ?? selectionMatch?.[1]
+  const rightRaw = match?.[2] ?? selectionMatch?.[2]
+  if (!leftRaw || !rightRaw) return undefined
+  const left = normalizeFoundationTradeoffSide(leftRaw)
+  const right = normalizeFoundationTradeoffSide(rightRaw)
   if (left.length < 2 || right.length < 2 || left === right) return undefined
   return [shortenFoundationLabel(left), shortenFoundationLabel(right)]
+}
+
+function normalizeFoundationTradeoffSide(value: string): string {
+  return value
+    .replace(/^(?:继续|选择|决定|是否|先|再|必须|承担|保留|放弃)\s*/u, '')
+    .replace(/(?:带来的后果|的后果|的取舍|这项取舍)$/u, '')
+    .trim()
 }
 
 export function ensureStoryDesignRecord(

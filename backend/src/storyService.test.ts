@@ -410,10 +410,10 @@ test('repairs a rich contrast-and-growth curve with directional evidence across 
   ]
   const repairedBeats = [
     { kind: 'current-state', detail: richCurveIdea, sourceFactIds: ['source-fact-1', 'source-fact-2', 'source-fact-3', 'source-fact-4', 'source-fact-5'] },
-    { kind: 'trigger', detail: '暂定：投影仪今晚要归还让删掉自己的名字无法按原有安排推进', sourceFactIds: ['source-fact-3', 'source-fact-5'] },
+    { kind: 'trigger', detail: '暂定：投影仪今晚要归还让在展出前决定要不要删掉自己的名字无法按已确认条件推进', sourceFactIds: ['source-fact-3', 'source-fact-5'] },
     { kind: 'escalation', detail: '暂定：继续删掉自己的名字反而会触碰不再改动作品的承诺', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
-    { kind: 'climax-choice', detail: '暂定：沈乔必须在保留旧办法的自己的名字与不再改动作品之间选择', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
-    { kind: 'resolution', detail: '暂定：这次选择改变她对前队友剪的短片、自己的名字与旧办法的理解', sourceFactIds: ['source-fact-2', 'source-fact-5'] },
+    { kind: 'climax-choice', detail: '暂定：沈乔必须在在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择，不能再按她答应不再改动作品的条件继续', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+    { kind: 'resolution', detail: '暂定：这次选择调整在展出前决定要不要删掉自己的名字在她答应不再改动作品下的处理方式', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
   ]
   const prompts: string[] = []
   let calls = 0
@@ -438,9 +438,9 @@ test('repairs a rich contrast-and-growth curve with directional evidence across 
     assert.match(prompts[0] ?? '', /方向层级硬约束/u)
     assert.match(prompts[1] ?? '', /反差|因果层级/u)
     assert.equal(curve.generation?.origin, 'model')
-    assert.match(curve.beats.find((beat) => beat.kind === 'trigger')?.detail ?? '', /原有安排/u)
-    assert.match(curve.beats.find((beat) => beat.kind === 'climax-choice')?.detail ?? '', /旧办法/u)
-    assert.match(curve.beats.find((beat) => beat.kind === 'resolution')?.detail ?? '', /改变|理解/u)
+    assert.match(curve.beats.find((beat) => beat.kind === 'trigger')?.detail ?? '', /投影仪今晚要归还.*在展出前决定要不要删掉自己的名字/u)
+    assert.match(curve.beats.find((beat) => beat.kind === 'climax-choice')?.detail ?? '', /不能再按她答应不再改动作品的条件继续/u)
+    assert.match(curve.beats.find((beat) => beat.kind === 'resolution')?.detail ?? '', /调整.*处理方式/u)
   } finally {
     globalThis.fetch = previousFetch
     if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
@@ -470,21 +470,21 @@ test('model curves keep three creative directions causally distinct on the same 
     { kind: 'trigger', detail: '暂定：投影仪今晚要归还让在展出前决定要不要删掉自己的名字无法按原有安排推进', sourceFactIds: ['source-fact-3', 'source-fact-5'] },
     { kind: 'escalation', detail: '暂定：继续在展出前决定要不要删掉自己的名字反而会触碰她答应不再改动作品的承诺', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
     { kind: 'climax-choice', detail: '暂定：沈乔必须在在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择，不能再沿用旧办法', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
-    { kind: 'resolution', detail: '暂定：这次选择让原有安排不再照旧，并重新理解在展出前决定要不要删掉自己的名字', sourceFactIds: ['source-fact-5'] },
+    { kind: 'resolution', detail: '暂定：这次选择调整在展出前决定要不要删掉自己的名字在她答应不再改动作品下的处理方式', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
   ]
   const costBeats = [
     currentState,
     { kind: 'trigger', detail: '暂定：投影仪今晚要归还让在展出前决定要不要删掉自己的名字必须承担时间取舍', sourceFactIds: ['source-fact-3', 'source-fact-5'] },
     { kind: 'escalation', detail: '暂定：继续在展出前决定要不要删掉自己的名字会承担她答应不再改动作品的代价', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
     { kind: 'climax-choice', detail: '暂定：沈乔必须在在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择，并承担代价', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
-    { kind: 'resolution', detail: '暂定：这次选择改变她对在展出前决定要不要删掉自己的名字的理解，并承担不再改动作品的代价', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+    { kind: 'resolution', detail: '暂定：这次选择调整沈乔在展出前决定要不要删掉自己的名字的方式，并承担她答应不再改动作品的代价', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
   ]
   const relationshipBeats = [
     currentState,
     { kind: 'trigger', detail: '暂定：沈乔在借来的投影仪里看到和前队友剪的短片，使她在展出前决定要不要删掉自己的名字不能只按个人安排推进', sourceFactIds: ['source-fact-2', 'source-fact-5'] },
     { kind: 'escalation', detail: '暂定：继续在展出前决定要不要删掉自己的名字会触碰她答应不再改动作品的承诺，前队友关系的分歧因此更明显', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
     { kind: 'climax-choice', detail: '暂定：沈乔必须在在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择，并回应与前队友的关系', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
-    { kind: 'resolution', detail: '暂定：这次选择改变她如何回应与前队友的关系，并重新理解在展出前决定要不要删掉自己的名字', sourceFactIds: ['source-fact-5'] },
+    { kind: 'resolution', detail: '暂定：这次选择调整沈乔在展出前决定要不要删掉自己的名字的方式，并回应和前队友剪的短片', sourceFactIds: ['source-fact-2', 'source-fact-5'] },
   ]
   const responses = [contrastBeats, costBeats, relationshipBeats]
 
@@ -575,7 +575,7 @@ test('rejects a model source-fact claim when the proposal has no visible author 
   }
 })
 
-test('rejects curve semantics that add value or relationship conclusions to valid fact anchors', async () => {
+test('rejects curve semantics that add value, authority or relationship conclusions to valid fact anchors', async () => {
   const previousDisableModel = process.env.STORY_DISABLE_MODEL
   const previousApiKey = process.env.DASHSCOPE_API_KEY
   const previousBaseUrl = process.env.DASHSCOPE_BASE_URL
@@ -604,6 +604,18 @@ test('rejects curve semantics that add value or relationship conclusions to vali
         { kind: 'resolution', detail: '暂定：这次选择改变她对信任边界的理解', sourceFactIds: ['source-fact-2'] },
       ],
       expected: /关系、承诺或责任/u,
+    },
+    {
+      idea: richCurveIdea,
+      brief: { tones: ['growth'], dramaticForces: ['cost'], allowSystemNamedCharacters: false } as CreativeBrief,
+      beats: [
+        { kind: 'current-state', detail: richCurveIdea, sourceFactIds: ['source-fact-1', 'source-fact-2', 'source-fact-3', 'source-fact-4', 'source-fact-5'] },
+        { kind: 'trigger', detail: '暂定：投影仪今晚要归还让在展出前决定要不要删掉自己的名字停住', sourceFactIds: ['source-fact-3', 'source-fact-5'] },
+        { kind: 'escalation', detail: '暂定：继续在展出前决定要不要删掉自己的名字会承担她答应不再改动作品的取舍', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+        { kind: 'climax-choice', detail: '暂定：沈乔必须在在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+        { kind: 'resolution', detail: '暂定：这次选择改变她对署名权的理解', sourceFactIds: ['source-fact-5'] },
+      ],
+      expected: /权限或自主/u,
     },
   ]
 
@@ -667,6 +679,43 @@ test('allows a semantic phrase when the author explicitly wrote that phrase', as
     const curve = await generateProvisionalCurve(idea, seed, { tones: ['growth'], dramaticForces: ['cost'], allowSystemNamedCharacters: false })
     assert.equal(curve.generation?.origin, 'model')
     assert.match(curve.beats.map((beat) => beat.detail).join('\n'), /完整性/u)
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+    if (previousApiKey === undefined) delete process.env.DASHSCOPE_API_KEY
+    else process.env.DASHSCOPE_API_KEY = previousApiKey
+    if (previousBaseUrl === undefined) delete process.env.DASHSCOPE_BASE_URL
+    else process.env.DASHSCOPE_BASE_URL = previousBaseUrl
+  }
+})
+
+test('allows an author-established authorship right in a model curve', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  const previousApiKey = process.env.DASHSCOPE_API_KEY
+  const previousBaseUrl = process.env.DASHSCOPE_BASE_URL
+  const previousFetch = globalThis.fetch
+  const idea = `${richCurveIdea} 沈乔明确说署名权必须由她自己决定。`
+  const seed = createDirectCoCreationSeed(idea)
+  assert.ok(seed)
+  const design = createStoryDesignRecord(idea, seed)
+  const factId = (phrase: string): string => design.sourceFacts.find((fact) => fact.text.includes(phrase))?.id ?? design.sourceFacts[0]!.id
+  const beats = [
+    { kind: 'current-state', detail: idea, sourceFactIds: design.sourceFacts.map((fact) => fact.id) },
+    { kind: 'trigger', detail: '暂定：投影仪今晚要归还让在展出前决定要不要删掉自己的名字停住', sourceFactIds: [factId('投影仪今晚要归还'), factId('在展出前决定要不要删掉自己的名字')] },
+    { kind: 'escalation', detail: '暂定：继续在展出前决定要不要删掉自己的名字会承担她答应不再改动作品的取舍', sourceFactIds: [factId('她答应不再改动作品'), factId('在展出前决定要不要删掉自己的名字')] },
+    { kind: 'climax-choice', detail: '暂定：沈乔必须在在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择', sourceFactIds: [factId('她答应不再改动作品'), factId('在展出前决定要不要删掉自己的名字')] },
+    { kind: 'resolution', detail: '暂定：这次选择调整在展出前决定要不要删掉自己的名字在署名权必须由她自己决定下的处理方式', sourceFactIds: [factId('在展出前决定要不要删掉自己的名字'), factId('署名权必须由她自己决定')] },
+  ]
+
+  process.env.STORY_DISABLE_MODEL = 'false'
+  process.env.DASHSCOPE_API_KEY = 'test-only-key'
+  process.env.DASHSCOPE_BASE_URL = 'https://model.test.invalid'
+  try {
+    globalThis.fetch = async () => createCurveModelResponse({ title: '作者明确署名权', beats })
+    const curve = await generateProvisionalCurve(idea, seed, { tones: ['growth'], dramaticForces: ['cost'], allowSystemNamedCharacters: false })
+    assert.equal(curve.generation?.origin, 'model')
+    assert.match(curve.beats.find((beat) => beat.kind === 'resolution')?.detail ?? '', /署名权必须由她自己决定/u)
   } finally {
     globalThis.fetch = previousFetch
     if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
@@ -2522,6 +2571,32 @@ test('rejects rich model directions that hide new value or authority conclusions
     /未由作者原文支持的价值、权限或关系结论/u,
   )
 
+  const inventedAuthorshipRight = structuredClone(deadlineDraft)
+  inventedAuthorshipRight.directions![2] = {
+    ...inventedAuthorshipRight.directions![2]!,
+    tradeoff: '按承诺提交，还是保留署名权',
+  }
+  assert.throws(
+    () => validateSystemConflictCoreDraft(deadlineIdea, deadlineSeed, inventedAuthorshipRight),
+    /未由作者原文支持的价值、权限或关系结论/u,
+  )
+
+  const explicitAuthorshipIdea = `${deadlineIdea} 林澈明确保留署名权。`
+  const explicitAuthorshipSeed = createDirectCoCreationSeed(explicitAuthorshipIdea)
+  assert.ok(explicitAuthorshipSeed)
+  const explicitAuthorshipDraft = structuredClone(deadlineDraft)
+  explicitAuthorshipDraft.directions![2] = {
+    label: '署名权',
+    mechanismType: 'meaning-commitment',
+    premise: '暂定：林澈明确保留署名权',
+    tradeoff: '保留署名权，还是按承诺提交',
+  }
+  assert.doesNotThrow(() => validateSystemConflictCoreDraft(
+    explicitAuthorshipIdea,
+    explicitAuthorshipSeed,
+    explicitAuthorshipDraft,
+  ))
+
   const relationshipSeed = createDirectCoCreationSeed(relationshipCurveIdea)
   assert.ok(relationshipSeed)
   const relationshipDraft: StoryConflictCoreSystemDraft = {
@@ -2582,7 +2657,7 @@ test('rich system-draft requests never invite sparse-scene hooks', async () => {
       userPrompts.push(request.messages?.[1]?.content ?? '')
       return createCurveModelResponse({
         systemDraft: {
-          stake: '按时提交与手稿完整性之间存在取舍',
+          stake: '按时提交与最后一页缺失之间存在取舍',
           constraint: '周五前交稿与最后一页缺失同时存在',
           directions: [
             {
@@ -2598,10 +2673,10 @@ test('rich system-draft requests never invite sparse-scene hooks', async () => {
               tradeoff: '守住不擅自补写，还是在周五前提交祖母的手稿',
             },
             {
-              label: '缺页归属',
+              label: '缺页取舍',
               mechanismType: 'meaning-commitment',
-              premise: '暂定：祖母的手稿最后一页缺失，让提交决定改变完整性的意义',
-              tradeoff: '保留最后一页缺失，还是重新判断祖母的手稿是否提交',
+              premise: '暂定：祖母的手稿最后一页缺失，让提交决定需要重新判断',
+              tradeoff: '保留最后一页缺失，还是在周五前提交祖母的手稿',
             },
           ],
         },
