@@ -2231,7 +2231,7 @@ function getCurveProposalSafetyFailure(
     escalation: /(?:继续|若|必须|取舍|代价|原本|升级|两难|因此|意味着|承担|不再|承诺|关系|责任|删|保留|公开|分歧|边界)/u,
     'midpoint-turn': /(?:发现|办法|代价|重新|转折|问题|表面|真正|改变|改成|不只是|意识|承认|转向|开始|选择|理解|判断)/u,
     'climax-choice': /(?:必须|选择|承担|放下|决定|代价|保留|删|是否|还是|改写|拒绝|接受|继续|停止|目标|承诺|关系)/u,
-    resolution: /(?:结果|变化|得到|失去|理解|成长|离开|落点|保留|改写|接受|承担|决定|转为|不再|仍然|改变|关系|承诺)/u,
+    resolution: /(?:结果|变化|得到|失去|理解|成长|离开|落点|保留|改写|接受|承担|决定|转为|不再|仍然|改变|调整|关系|承诺)/u,
   }
   if (!requirement[kind].test(normalized)) return '没有表达该节点所需的结构语义'
   return undefined
@@ -3907,6 +3907,10 @@ function buildCompactCurveGenerationPrompt(
   excludedProposalDetails: readonly string[],
   repairMessage?: string,
 ): string {
+  if (repairMessage) {
+    return buildCompactCurveRepairPrompt(idea, seed, brief, design, excludedProposalDetails, repairMessage)
+  }
+
   const sourceFacts = design.sourceFacts.map((fact) => ({
     id: fact.id,
     text: fact.text,
@@ -3939,6 +3943,90 @@ function buildCompactCurveGenerationPrompt(
       buildModelFactRepairMap(design),
     ] : []),
     '严格按示例形状输出：{"title":"暂定主线","beats":[{"kind":"current-state","detail":"作者当前处境","sourceFactIds":["source-fact-1"]},{"kind":"trigger","detail":"暂定：主体的已确认条件使目标停住","sourceFactIds":["source-fact-2"]},{"kind":"escalation","detail":"暂定：另一条已确认承诺使继续目标必须承担取舍","sourceFactIds":["source-fact-3"]},{"kind":"climax-choice","detail":"暂定：主体必须在目标的一端与承诺的另一端之间选择","sourceFactIds":["source-fact-3"]},{"kind":"resolution","detail":"暂定：这次选择调整原文目标在原文承诺下的处理方式","sourceFactIds":["source-fact-2"]}]}',
+  ].join('\n')
+}
+
+interface CompactCurveRepairSlots {
+  trigger: StorySourceFact
+  escalation: StorySourceFact
+  goal: StorySourceFact
+}
+
+function getCompactCurveRepairSlots(
+  design: StoryDesignRecord,
+  seed: StorySeed,
+): CompactCurveRepairSlots | undefined {
+  const sourceFacts = design.sourceFacts.filter((fact) => fact.disposition !== 'parked')
+  const goal = sourceFacts.find((fact) => (
+    Boolean(seed.lockedGoal) && hasModelSourceFactEvidence(seed.lockedGoal!, fact.text)
+  )) ?? sourceFacts.at(-1)
+  if (!goal) return undefined
+
+  const trigger = sourceFacts.find((fact) => (
+    /(?:今晚|明早|明天|周[一二三四五六日天]|归还|截止|期限|倒数|必须在[^，。！？；]{0,24}前|要在[^，。！？；]{0,24}前)/u.test(fact.text)
+  )) ?? sourceFacts.find((fact) => /(?:答应|承诺|约定|保证|不再|缺失|卖掉|无法|不能|冲突|分歧)/u.test(fact.text))
+  const escalation = sourceFacts.find((fact) => (
+    fact.id !== trigger?.id && /(?:缺失|卖掉|无法|不能|冲突|分歧|答应|承诺|约定|保证|不再|关系|姐姐|朋友|队友|家人)/u.test(fact.text)
+  )) ?? sourceFacts.find((fact) => fact.id !== trigger?.id) ?? trigger
+  if (!trigger || !escalation) return undefined
+  return { trigger, escalation, goal }
+}
+
+function getCompactCurveRepairAnchor(fact: StorySourceFact): string {
+  return getModelCurveFactAnchor(fact.text)
+}
+
+function buildCompactCurveRepairPrompt(
+  idea: string,
+  seed: StorySeed,
+  brief: CreativeBrief,
+  design: StoryDesignRecord,
+  excludedProposalDetails: readonly string[],
+  repairMessage: string,
+): string {
+  const slots = getCompactCurveRepairSlots(design, seed)
+  if (!slots) {
+    return [
+      '只输出 JSON：对象只能有 title、beats；beats 恰好 5 项，每项只能有 kind、detail、sourceFactIds。',
+      `上一轮未通过校验：${repairMessage}。只使用作者原文，不要新增价值、意义、归属、权限、关系、人物意图、场景或结果。`,
+      `用户原始想法：${idea}`,
+      `作者材料：${JSON.stringify(design.sourceFacts.filter((fact) => fact.disposition !== 'parked').map((fact) => ({ id: fact.id, text: fact.text })))}`,
+      'current-state 保留原始处境；其余节点分别写目标受阻、取舍升级、主动选择和处理方式调整。',
+    ].join('\n')
+  }
+
+  const goal = getCompactCurveRepairAnchor(slots.goal)
+  const trigger = getCompactCurveRepairAnchor(slots.trigger)
+  const escalation = getCompactCurveRepairAnchor(slots.escalation)
+  const subject = seed.subject?.trim() || '主角'
+  const usesContrast = brief.dramaticForces.includes('contrast')
+  const triggerDetail = usesContrast
+    ? `暂定：${trigger}让${goal}无法按已确认条件推进`
+    : `暂定：${trigger}使${goal}停住`
+  const escalationDetail = `暂定：继续${goal}要承担${escalation}的取舍`
+  const climaxDetail = `暂定：${subject}必须在${goal}与${escalation}之间选择`
+  const resolutionDetail = `暂定：这次选择调整${goal}在${escalation}下的处理方式`
+  const sourceFacts = design.sourceFacts
+    .filter((fact) => fact.disposition !== 'parked')
+    .map((fact) => ({ id: fact.id, text: fact.text, anchor: getCompactCurveRepairAnchor(fact) }))
+  const template = {
+    title: '暂定主线',
+    beats: [
+      { kind: 'current-state', detail: seed.activeSituation, sourceFactIds: sourceFacts.map((fact) => fact.id) },
+      { kind: 'trigger', detail: triggerDetail, sourceFactIds: [slots.trigger.id] },
+      { kind: 'escalation', detail: escalationDetail, sourceFactIds: [slots.escalation.id] },
+      { kind: 'climax-choice', detail: climaxDetail, sourceFactIds: [slots.goal.id, slots.escalation.id] },
+      { kind: 'resolution', detail: resolutionDetail, sourceFactIds: [slots.goal.id, slots.escalation.id] },
+    ],
+  }
+
+  return [
+    '只输出 JSON，不要 Markdown、解释或额外键。不要写小说。',
+    `上一轮未通过校验：${repairMessage}。这次不要自行换词或补写语义；只复制下方模板中的作者锚点。`,
+    '硬规则：除模板中的逐字作者原文锚点和“暂定、让、使、无法按已确认条件推进、停住、继续、要承担、取舍、必须在、与、之间、选择、这次选择、调整、在、下、处理方式”外，不得加入任何词。尤其不能写价值、意义、归属、完整、遗愿、权利、关系结论、流程、场景或结果。',
+    `作者材料（只可从这里核对）：${JSON.stringify(sourceFacts)}`,
+    `严格复制这个结构并只返回它：${JSON.stringify(template)}`,
+    ...(excludedProposalDetails.length ? [`已拒绝提案不能重现：${JSON.stringify(excludedProposalDetails)}`] : []),
   ].join('\n')
 }
 

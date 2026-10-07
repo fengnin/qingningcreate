@@ -2390,7 +2390,11 @@ export async function generateDirections(request: StoryDirectionsRequest): Promi
   // co-creation entry. Otherwise a sparse premise could bypass the curve
   // workflow and receive concrete tickets, devices, or other invented hooks.
   if (!isExplicitLocalModelMode() && !request.context) {
-    const preliminarySeed = createOriginalIdeaFallbackSeed(request.idea, undefined)
+    // Use the same conservative direct extraction as the actual generation
+    // path. Checking a generic fallback seed first drops an explicit goal
+    // before the model ever sees the author's facts.
+    const preliminarySeed = createDirectCoCreationSeed(request.idea)
+      ?? createOriginalIdeaFallbackSeed(request.idea, undefined)
     if (needsAuthorDetailBeforeCurve(request.idea, preliminarySeed)) {
       throw createAuthorDetailRequiredError()
     }
@@ -4234,7 +4238,7 @@ const richSystemDraftNonDistinctFragments = new Set([
 // in rich-input outputs.  A literal author phrase still passes; otherwise the
 // branch is rejected and the model keeps its true failed origin.
 const richSystemDraftUnsupportedSemanticPatterns: readonly RegExp[] = [
-  /(?:未竟意志|遗愿|遗嘱|完整性|完整权|完整状态|完整手稿|自我表达|共作意义|共作的意义|共同创作|共同署名|作品归属|单方延续|决定权|决策权|署名权|提交条件|交稿条件|署名意义|手稿意义|信任与边界|信任边界|自主权)/u,
+  /(?:未竟意志|遗愿|遗嘱|完整性|完整权|完整状态|完整手稿|自我表达|共作意义|共作的意义|共同创作|共同署名|作品归属|归属权|目标归属|单方延续|共同承诺|共同责任|决定权|决策权|处置权|署名权|提交条件|交稿条件|署名意义|手稿意义|信任与边界|信任边界|自主权)/u,
   /(?:信任与边界|信任关系|尊重[^，。！？；\n]{0,8}(?:关系|决定|边界))/u,
   /(?:承认|改变|重新理解)[^，。！？；\n]{0,8}(?:共作|自我表达|未竟意志|完整性之外的意义)/u,
   /(?:突破|打破)[^，。！？；\n]{0,8}(?:约定|承诺)/u,
@@ -7272,7 +7276,7 @@ const richSystemConflictCoreDraftSystemPrompt = `你是一位严谨的中文故�
 
 这是信息丰富输入：作者事实是唯一可用的事实源。每条 premise 和 tradeoff 至少逐字保留一个作者原文中的连续短语；三条方向合计至少使用两项不同作者事实。允许使用“继续、暂缓、保留、重新判断、承担取舍”等抽象连接词，但不得新增任何普通物件、设备、通讯、字迹、消息、工作人员、匿名人物、地点、机构流程、现场事件、过去经历、他人回应、资源、权限、精确时间、数字或永久结果。尤其不要写手机、快递单、钢笔、便签、门票、陌生字句、陌生人、浮现、写着、发来、贴出等新载体或事件。
 
-三条方向应分别突出：作者已有期限/当前条件如何卡住目标；作者已有承诺或关系如何制造取舍；作者已有对象/事件如何改变选择的意义或归属。不要把三条方向写成同一句目标的同义复述，也不要把多个作者事实塞进同一条 premise。stake 和 constraint 也只能抽象概括作者已给出的压力，不能新增资源状态或解法。`
+三条方向应分别突出：作者已有期限/当前条件如何卡住目标；作者已有承诺或关系如何制造取舍；作者已有对象/事件如何形成另一项可比较的选择条件。不要把“意义、归属、归属权、决定权、完整性、信任边界、共同责任”写成方向名称、前提或取舍，除非作者逐字写出。不要把三条方向写成同一句目标的同义复述，也不要把多个作者事实塞进同一条 premise。stake 和 constraint 也只能抽象概括作者已给出的压力，不能新增资源状态或解法。`
 
 function getSystemConflictCoreDraftSystemPrompt(
   seed: Pick<StorySeed, 'lockedGoal' | 'lockedFacts'>,
@@ -7765,6 +7769,10 @@ function buildSystemConflictCoreDraftRepairPrompt(
   repairMessage: string,
   preference?: string,
 ): string {
+  if (!hasSparseSystemDraftSeed(seed)) {
+    return buildRichSystemConflictCoreDraftRepairPrompt(idea, seed, repairMessage, preference)
+  }
+
   const goalInstruction = seed.lockedGoal
     ? `共同目标必须继续使用已锁定目标“${seed.lockedGoal}”，不要改写 goal。`
     : 'goal 必须保留原始念头中的主体、对象或关键事件。'
@@ -7796,6 +7804,124 @@ ${getSystemConflictCoreDraftResponseSchema(seed)}`
     /每条 premise 可以保留一个有限的当前创意钩子，例如“暂定：目标相关的旧物上多出一句来历不明的话”，但不能新增人物经历、物品归属、他人许可、交付方式、确定回应或结果；即使加了“暂定”也不能把这些未建立内容写成用户事实。/u,
     repairScope,
   )
+}
+
+/**
+ * A rich input already contains the material needed for three directions. The
+ * normal repair prompt used to repeat the rejected prose and invite Qwen to
+ * paraphrase it into abstract claims such as "完整性" or "决定权". Give the
+ * model a closed, source-first repair contract instead: the server selects
+ * exact author anchors, while the model still has to return and pass the JSON
+ * response. The template is guidance, never a server-side result.
+ */
+function buildRichSystemConflictCoreDraftRepairPrompt(
+  idea: string,
+  seed: Pick<StorySeed, 'lockedGoal' | 'lockedFacts' | 'subject'>,
+  repairMessage: string,
+  preference?: string,
+): string {
+  const template = createRichSystemDraftRepairTemplate(seed)
+  const preferenceInstruction = getSystemDraftPreferenceInstruction(preference)
+  return [
+    '你是故事结构修复器。只输出严格 JSON，不要 Markdown、解释或额外字段。',
+    '这是信息丰富输入，作者原文是唯一事实源。上一版没有通过事实边界；不要重复失败词，也不要自行换成价值、意义、归属、权限、责任或关系结论。',
+    '三条方向必须恰好存在，mechanismType 互不相同。每条 premise 必须以“暂定：”开头；每条 tradeoff 必须只由两个短语组成“甲还是乙”。除作者锚点和“暂定、让、使、停住、继续、必须、取舍、选择、调整、处理方式、暂缓、保留、重新判断”外，不要加入任何词。',
+    '每个作者锚点必须逐字复制；不要补写场景、物件、人物意图、权限、时间语义或结果。若模板的同一目标出现在多条方向中，只是共享目标，不是新增事实。',
+    `上一轮修复状态：${repairMessage}`,
+    `用户原始念头（只用于核对锚点）：${idea}`,
+    `锁定目标与事实（只能逐字复制）：${JSON.stringify({ goal: seed.lockedGoal, facts: seed.lockedFacts })}`,
+    `请返回以下槽位模板的 JSON；模板中的值已经由服务器从作者原文拼好，必须逐字复制，不要增删词：${JSON.stringify(template)}`,
+    preferenceInstruction,
+  ].filter(Boolean).join('\n')
+}
+
+interface RichSystemDraftRepairAnchor {
+  text: string
+  kind: 'time' | 'commitment' | 'relationship' | 'obstacle' | 'other'
+}
+
+function createRichSystemDraftRepairTemplate(
+  seed: Pick<StorySeed, 'lockedGoal' | 'lockedFacts' | 'subject'>,
+): StoryConflictCoreSystemDraft {
+  const facts = [...new Set(seed.lockedFacts.map((fact) => fact.trim()).filter(Boolean))]
+  const goal = seed.lockedGoal?.trim() || facts[0] || '作者目标'
+  const anchors = facts
+    .filter((fact) => fact !== goal)
+    .map((text): RichSystemDraftRepairAnchor => ({ text, kind: classifyRichRepairAnchor(text) }))
+
+  const ordered = [
+    ...anchors.filter((anchor) => anchor.kind === 'time'),
+    ...anchors.filter((anchor) => anchor.kind === 'commitment'),
+    ...anchors.filter((anchor) => anchor.kind === 'obstacle'),
+    ...anchors.filter((anchor) => anchor.kind === 'relationship'),
+    ...anchors.filter((anchor) => anchor.kind === 'other'),
+  ]
+  const selected = [...ordered, { text: goal, kind: 'other' as const }]
+  const first = selected[0] ?? { text: goal, kind: 'other' as const }
+  const second = selected.find((anchor) => anchor.text !== first.text) ?? { text: goal, kind: 'other' as const }
+  const third = selected.find((anchor) => anchor.text !== first.text && anchor.text !== second.text)
+    ?? { text: goal, kind: 'other' as const }
+  const subject = seed.subject?.trim() || '主角'
+  const directions = [
+    createRichRepairDirection(first, goal, subject, 0),
+    createRichRepairDirection(second, goal, subject, 1),
+    createRichRepairDirection(third, goal, subject, 2),
+  ]
+
+  return {
+    goal,
+    stake: '继续目标需要承担一项取舍',
+    constraint: '作者材料中的当前条件使目标停住',
+    origin: 'model',
+    directions,
+  }
+}
+
+function classifyRichRepairAnchor(value: string): RichSystemDraftRepairAnchor['kind'] {
+  if (/(?:今晚|明天|后天|今天|明早|明晚|周[一二三四五六日天]|本周|下周|月底|月末|期限|截止|倒数|之前|以后|前)/u.test(value)) return 'time'
+  if (/(?:答应|承诺|约定|保证|不再|不得|必须)/u.test(value)) return 'commitment'
+  if (/(?:缺失|卖掉|无法|不能|冲突|分歧|阻碍|拒绝|不知道|不知|没有)/u.test(value)) return 'obstacle'
+  if (/(?:姐姐|哥哥|弟弟|妹妹|朋友|队友|家人|同事|伴侣|父亲|母亲|前队友|对方)/u.test(value)) return 'relationship'
+  return 'other'
+}
+
+function createRichRepairDirection(
+  anchor: RichSystemDraftRepairAnchor,
+  goal: string,
+  subject: string,
+  index: number,
+): SystemDraftDirection {
+  const mechanismType: ConflictCoreMechanismType = anchor.kind === 'time'
+    ? 'window-pressure'
+    : anchor.kind === 'commitment'
+      ? 'commitment-conflict'
+      : anchor.kind === 'relationship'
+        ? 'boundary-conflict'
+        : anchor.kind === 'obstacle'
+          ? 'information-gap'
+          : index === 0
+            ? 'meaning-commitment'
+            : index === 1
+              ? 'initiation-block'
+              : 'resource-constraint'
+  const label = getRichRepairLabel(anchor.text)
+  const premise = index === 0
+    ? `暂定：${anchor.text}让${goal}停住`
+    : index === 1
+      ? `暂定：${anchor.text}使继续${goal}必须取舍`
+      : `暂定：${anchor.text}让${subject}需要重新判断${goal}`
+  const alternative = index === 0
+    ? '暂缓'
+    : index === 1
+      ? '保留'
+      : '重新判断'
+  const tradeoff = `${goal}还是${alternative}`
+  return { label, mechanismType, premise, tradeoff }
+}
+
+function getRichRepairLabel(value: string): string {
+  const stripped = value.replace(/^(?:却|但|同时|并且|她|他|我|我们|周岚|林澈|沈乔)\s*/u, '').trim()
+  return (stripped || value).slice(0, 16)
 }
 
 function getSystemDraftPreferenceInstruction(preference?: string): string {
