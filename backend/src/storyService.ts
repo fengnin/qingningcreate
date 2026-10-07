@@ -6290,17 +6290,21 @@ function getConfirmedCurveOpeningAnchorPlan(
     if (candidate) chosen.push(candidate)
   }
 
-  // Prefer a concrete pressure before a generic deadline hidden in the goal.
-  pick(/(?:归还|缺失|卖掉|准备|无法|不能|必须|阻碍)/u)
-  pick(/(?:今晚|明天|后天|今天|明早|明晚|周[一二三四五六日天]|月底|展出前|布置前|交接前|期限|截止|之前)/u)
-  // A direct author promise is stronger evidence than merely naming a
-  // relationship such as a former teammate or sibling.
-  pick(/(?:答应|承诺|约定|保证|不再)/u)
-  pick(/(?:姐姐|朋友|队友|家人|同事|前任|关系)/u)
   const goal = request.seed.lockedGoal?.trim()
+  // Keep the three opening choices tied to three different author concerns:
+  // one concrete pressure, one commitment/relationship boundary, and the
+  // locked goal. This is more useful than selecting three adjacent clauses
+  // from one long sentence, and gives the model a small, deterministic menu
+  // of legal anchors to choose from.
+  pick(/(?:归还|缺失|卖掉|准备|无法|不能|必须|阻碍|发现|失效|不知道|不知)/u)
+  pick(/(?:答应|承诺|约定|保证|不再|姐姐|朋友|队友|家人|同事|前任|关系)/u)
   if (goal && goal.length >= 4 && !chosen.some((item) => normalizeOpeningText(item) === normalizeOpeningText(goal))) {
     chosen.push(goal)
   }
+  // A goal may already be the first clause in a promise sentence. Fill the
+  // remaining slot with a concrete object or deadline rather than repeating
+  // that sentence under a different label.
+  pick(/(?:今晚|明天|后天|今天|明早|明晚|周[一二三四五六日天]|月底|展出前|布置前|交接前|期限|截止|之前)/u)
   pick(/(?:投影仪|短片|作品|名字|书店|手稿|最后一页|出版社|耳环|礼服|报告)/u)
   for (const candidate of candidates) {
     if (chosen.length >= generatedOptionCount) break
@@ -7613,17 +7617,14 @@ const storyTurnSystemPrompt = `你是一位擅长互动短篇故事的中文编�
 生成顺序提示：先写 node 和 conflict，再写 question；非收束时逐个完成每个 option。若本次要求详细状态结构，再补齐每个 option 中的 narrativeAction 和 transition，收束时补齐顶层 narrativeAction 和 transition；若本次要求紧凑叙事结构，则绝不输出这些内部字段。详细状态结构中 transition.introducedFacts 即使为空也必须保留为空数组 []。`
 
 function getConfirmedCurveFirstTurnSystemPrompt(): string {
-  return `你是中文互动故事的开场编辑。现在只生成作者确认主线后的第一个可选择情境，必须严格返回 JSON，不要 Markdown、解释或额外字段。
+  return `你是中文互动故事的开场事实选择器。现在只为作者确认主线后的第一个可选择情境选择事实锚点，不能写任何自由文本故事。必须严格返回 JSON，不要 Markdown、解释或额外字段。
 
-这是一份封闭的作者事实合同，不是自由续写。用户消息会给出作者事实卡。每一个人物、对象、期限、承诺、关系、目标和因果条件都必须能在事实卡中逐字找到；每个可见字段最多组合两张事实卡和少量连接词。只写主角当前还能判断的事，不把任何选择、结果或他人反应说成已经发生。
+输入会给出“作者事实锚点”数组。你只能从数组中复制 anchorId，不能改写 text，不能创造新的对象、动作、场景、人物状态、时间、流程、结果或概念。必须选择恰好 3 个不同的 anchorId，并按当前压力、承诺/关系边界、主线目标的顺序排列；若一个锚点同时属于多类，只按它在作者原文中的具体内容选择。不要输出任何锚点文本，只输出 ID。
 
-首回合只给作者可选的判断，不执行任何事。每个 option.action 必须以“先面对、先守住、先判断、先保留、暂缓、重新判断”之一开始，并紧跟事实卡中的原句；不能写拿起、放下、打包、归还、提交、查看、联系、关掉、走去、等待等实际操作，即使相关对象出现在事实卡中。immediateConsequence 只写判断优先级怎样变化，laterEffect 只写另一项事实仍待判断；不能写压力被解除、物件被取走、失去机会、计划完成或任何外部结果。
+这不是让你生成事件、冲突或选项；服务器会用你选择的三个 ID 组装首回合，并再次执行 schema、事实追踪和因果边界校验。不要输出 turn、node、conflict、question、options 或 openingPlan 之外的字段。若作者材料不足以提供三个不同锚点，仍只能返回已有 ID，服务器会拒绝并要求作者补充，不得自行补全。
 
-请使用未完成的判断语气，例如“面对、先、暂缓、保留、继续、判断、决定、取舍、仍待”。不要使用“已、已经、会、将、可能”这类完成或预测语气，除非这个词逐字出现在作者事实卡中。不得使用事实卡外的名词或动作，也不要用“原计划、流程、进程、方案、安排、步骤、处理方式、设备、署名、时限、决定权”等概念词替代作者原句。信息不足时，把句子缩短为现有事实之间尚未决定的取舍；不得用常识补背景、场景、操作、人物状态或后续事件。
-
-node.event 用一至两句写主体面对的具体卡点；node.purpose 说明这个卡点把哪些作者事实带到尚未决定的取舍。conflict 必须明确阻碍、两端和当前压力。恰好三个 option 必须是不同的主动判断：第一项优先处理一个压力，第二项优先守住另一个约束，第三项直接判断一个对象或目标。每项 action、immediateConsequence、laterEffect 都要用事实卡中不同的短语形成不同的判断顺序：immediateConsequence 只说明当前优先级怎样变化，laterEffect 只留下仍待判断的牵引，不能陈述外部结果。紧凑首回合不输出 narrativeAction 或 transition。
-
- 只输出以下结构。options 数组已经展示三项，必须保留恰好三项；不要删掉或合并任何一项：${storyTurnOngoingCompactResponseSchema}`
+严格使用以下结构：
+${confirmedCurveOpeningPlanResponseSchema}`
 }
 
 const storyTurnOptionRefinementSystemPrompt = `你是一位擅长互动短篇故事的中文编辑。你只修改当前情境中的一个备选行动，绝不改写已经确认的故事路径、当前情境、另外两条选择或预定的故事两端。`
@@ -7732,6 +7733,12 @@ const storyTurnConclusionResponseSchema = `{
       ],
       "introducedFacts": []
     }
+  }
+}`
+
+const confirmedCurveOpeningPlanResponseSchema = `{
+  "openingPlan": {
+    "anchorIds": ["opening-anchor-1", "opening-anchor-2", "opening-anchor-3"]
   }
 }`
 
@@ -8851,48 +8858,28 @@ function buildConfirmedCurveFirstTurnPrompt(
   request: Pick<StoryTurnRequest, 'idea' | 'seed' | 'confirmedCurve'>,
   repairMessage?: string,
 ): string {
-  const confirmedCurve = request.confirmedCurve
-  const sourceFacts = confirmedCurve?.design?.sourceFacts
-    .filter((fact) => fact.disposition === 'integrated')
-    .map((fact) => fact.text) ?? []
-  const openingAuthorSources = uniqueNonEmptySourceTexts([
-    request.seed.lockedGoal ?? '',
-    ...request.seed.lockedFacts,
-    ...sourceFacts,
-    ...(confirmedCurve?.beats
-      .filter((beat) => beat.status === 'confirmed' && beat.source === 'user-edit')
-      .map((beat) => beat.detail) ?? []),
-  ])
-  const openingAnchorPlan = getConfirmedCurveOpeningAnchorPlan(request)
-  const subject = request.seed.subject?.trim() || '主角'
-  const goal = request.seed.lockedGoal?.trim() || '当前目标'
-  const authorFactCards = openingAuthorSources.map((text, index) => ({
-    id: `author-fact-${index + 1}`,
+  const openingAnchors = getConfirmedCurveOpeningAnchorPlan(request).map((text, index) => ({
+    id: `opening-anchor-${index + 1}`,
     text,
   }))
-  const plannedAnchors = openingAnchorPlan.map((anchor, index) => ({ option: index + 1, text: anchor }))
-  const optionJudgementVerbs = ['先面对', '先守住', '先判断']
-  const optionAssignments = openingAnchorPlan.map((anchor, index) => {
-    const counterpart = openingAnchorPlan[(index + 1) % openingAnchorPlan.length] ?? goal
-    return `选择 ${index + 1}：以「${anchor}」为中心，至少再逐字引用「${counterpart}」；action 以“${optionJudgementVerbs[index] ?? '先判断'}”开始，只把它作为判断，不执行任何操作。`
-  })
+  const anchorRoles = [
+    'opening-anchor-1：当前压力或具体阻碍',
+    'opening-anchor-2：作者已经写出的承诺或关系边界',
+    'opening-anchor-3：作者锁定的主线目标或对象',
+  ]
   const repair = repairMessage
-    ? `\n上一版未通过事实闭合校验。请完全重写，不要解释原因，不要复用上一版句子；仍然只使用下列作者事实卡。修复规则：${repairMessage}`
+    ? `\n上一版没有通过首回合事实闭合校验。不要输出上一版的文本，也不要解释；只重新选择三个不同的 anchorId。修复类别：${repairMessage}`
     : ''
 
-  return `任务：只生成确认主线后的第一个可选择情境。把作者事实转成可审阅的当前判断，不写小说段落，不补背景。
+  return `任务：只选择确认主线后的第一个情境所需的作者事实锚点。不要生成任何故事句子。
 
-主体：${subject}
-当前目标：${goal}
-作者事实卡（唯一具体事实来源）：${JSON.stringify(authorFactCards)}
-三项选择各自优先覆盖的短语：${JSON.stringify(plannedAnchors)}
-${optionAssignments.join('\n')}
-
-写作检查：每个字段都先从事实卡复制一个连续短语，再添加最少的判断连接词。每项选择必须有不同的优先级和不同的事实组合；不要整句复述任一事实卡，也不要用概念词替代具体短语。可以采用“先面对「事实 A」，暂不改变「事实 B」”“当前先围绕「事实 A」判断”“「事实 B」仍待判断”这样的判断句式，但不要把它扩展成现实操作或结果。已确认曲线只提供“当前处境 -> 卡点 -> 取舍 -> 主动判断”的顺序，不能逐句复述系统提案。
+作者事实锚点（唯一允许的具体来源）：${JSON.stringify(openingAnchors)}
+三个槽位必须按以下顺序各选一个不同 ID：${anchorRoles.join('；')}
+选择规则：只复制上面已有的 ID；不要输出 text，不要增加或删除 ID，不要返回 turn/node/conflict/options，不要把系统提案当作事实。服务器会从这三个 ID 生成判断式首回合并做最终校验。
 ${repair}
 
-只输出 JSON，不要 Markdown、解释或额外字段：
-${storyTurnOngoingCompactResponseSchema}`
+只输出以下 JSON：
+${confirmedCurveOpeningPlanResponseSchema}`
 }
 
 function getConfirmedCurveTurnConstraintInstruction(confirmedCurve: ConfirmedCurve | undefined): string {
@@ -9654,6 +9641,14 @@ function parseModelStoryTurn(
   const record = getStoryTurnRecord(value)
   const turnId = `turn-${request.history.length + 1}`
   const isConclusion = request.mode === 'conclude'
+  if (outputFormat === 'compact' && isConfirmedCurveFirstTurnRequest(request)) {
+    const openingPlanTurn = parseConfirmedCurveOpeningPlan(record, request, turnId)
+    if (openingPlanTurn) {
+      validateStoryTurnShape(openingPlanTurn, invalidModelOutputContext, getStoryTurnValidationMessage(false))
+      validateStoryTurnStateTransition(openingPlanTurn, state, getStoryTurnValidationMessage(false))
+      return openingPlanTurn
+    }
+  }
   const message = getStoryTurnValidationMessage(isConclusion)
   const node = parseModelStoryTurnNode(record.node, turnId, isConclusion, request.history.length)
   const conclusionPayload = parseConclusionPayload(record, isConclusion, turnId, outputFormat)
@@ -9680,6 +9675,171 @@ function parseModelStoryTurn(
   return turn
 }
 
+/**
+ * The confirmed opening uses a closed selection contract. The model chooses
+ * three server-provided author anchors; it does not get a free-text field in
+ * which to invent a prop, outcome, or relationship. Reader-facing wording is
+ * assembled from those exact anchors and is still passed through the normal
+ * turn, fact, and causal validators below.
+ */
+function parseConfirmedCurveOpeningPlan(
+  record: Record<string, unknown>,
+  request: StoryTurnRequest,
+  turnId: string,
+): StoryTurn | undefined {
+  if (record.openingPlan === undefined) return undefined
+
+  const plan = expectRecord(
+    record.openingPlan,
+    '确认主线首回合的 openingPlan 必须是对象。',
+    invalidModelOutputContext,
+  )
+  const rawAnchorIds = plan.anchorIds
+  if (!Array.isArray(rawAnchorIds) || rawAnchorIds.length !== generatedOptionCount) {
+    throw new AppError(
+      `确认主线首回合必须选择恰好 ${generatedOptionCount} 个作者事实锚点。`,
+      invalidModelOutputContext.statusCode,
+      invalidModelOutputContext.code,
+    )
+  }
+
+  const anchors = getConfirmedCurveOpeningAnchorPlan(request)
+    .map((text, index) => ({ id: `opening-anchor-${index + 1}`, text }))
+  const anchorById = new Map(anchors.map((anchor) => [anchor.id, anchor.text]))
+  const selectedIds = rawAnchorIds.map((value) => {
+    if (typeof value !== 'string' || !anchorById.has(value.trim())) {
+      throw new AppError(
+        '确认主线首回合只能引用服务器列出的作者事实锚点。',
+        invalidModelOutputContext.statusCode,
+        invalidModelOutputContext.code,
+      )
+    }
+    return value.trim()
+  })
+  if (new Set(selectedIds).size !== selectedIds.length) {
+    throw new AppError(
+      '确认主线首回合的三个作者事实锚点必须彼此不同。',
+      invalidModelOutputContext.statusCode,
+      invalidModelOutputContext.code,
+    )
+  }
+
+  const selectedAnchors = selectedIds.map((id) => anchorById.get(id)!)
+  const authorDetailMessage = getConfirmedCurveFirstTurnAuthorDetailMessage(request)
+  if (authorDetailMessage) {
+    // Keep this as a retryable model-output failure here. After the bounded
+    // attempts generateStoryTurn converts it to the explicit author question,
+    // preserving the existing no-persistence boundary for relationship-only
+    // premises.
+    throw new AppError(
+      authorDetailMessage,
+      invalidModelOutputContext.statusCode,
+      invalidModelOutputContext.code,
+    )
+  }
+
+  return createConfirmedCurveOpeningPlanTurn(request, turnId, selectedAnchors)
+}
+
+function createConfirmedCurveOpeningPlanTurn(
+  request: StoryTurnRequest,
+  turnId: string,
+  anchors: readonly string[],
+): StoryTurn {
+  const [pressure, boundary, goal] = anchors
+  const subject = request.seed.subject?.trim() || '主角'
+  const nodeId = `node-${turnId.slice('turn-'.length)}`
+  const quote = (value: string) => `「${trimTerminalSentence(value)}」`
+  const makeOption = (
+    index: number,
+    mode: 'face' | 'protect' | 'decide',
+    primary: string,
+    secondary: string,
+  ): StoryTurnOption => {
+    const id = `${turnId}-option-${index}`
+    const actionId = `${id}-action`
+    const primaryText = quote(primary)
+    const secondaryText = quote(secondary)
+    const label = mode === 'face'
+      ? `面对${shortConfirmedOpeningAnchor(primary)}`
+      : mode === 'protect'
+        ? `守住${shortConfirmedOpeningAnchor(primary)}`
+        : `判断${shortConfirmedOpeningAnchor(primary)}`
+    const action = mode === 'face'
+      ? `先面对${primaryText}。`
+      : mode === 'protect'
+        ? `先守住${primaryText}。`
+        : `先判断${primaryText}。`
+    const immediateConsequence = mode === 'face'
+      ? `${primaryText}成为当前压力。`
+      : mode === 'protect'
+        ? `${primaryText}作为当前优先。`
+        : `${primaryText}成为当前取舍。`
+    const laterEffect = mode === 'face'
+      ? `${secondaryText}仍待判断。`
+      : mode === 'protect'
+        ? `${secondaryText}暂缓判断。`
+        : `${secondaryText}继续判断。`
+    return {
+      id,
+      label,
+      action,
+      immediateConsequence,
+      laterEffect,
+      narrativeAction: {
+        id: actionId,
+        intent: action,
+        preconditions: [],
+        effects: [],
+        source: 'generated',
+      },
+      transition: {
+        actionId,
+        consumedFacts: [],
+        changedFacts: [],
+        introducedFacts: [],
+      },
+    }
+  }
+
+  const options = [
+    makeOption(1, 'face', pressure, boundary),
+    makeOption(2, 'protect', boundary, goal),
+    makeOption(3, 'decide', goal, pressure),
+  ]
+
+  return {
+    id: turnId,
+    phase: 'opening',
+    node: {
+      id: nodeId,
+      title: `${shortConfirmedOpeningAnchor(pressure)}的取舍`,
+      event: `${subject}面对${quote(pressure)}，并围绕${quote(boundary)}、${quote(goal)}形成当前取舍。`,
+      purpose: `围绕${quote(goal)}判断${quote(pressure)}与${quote(boundary)}。`,
+      goalState: 'trying',
+    },
+    conflict: {
+      nodeId,
+      conflict: `${quote(pressure)}与${quote(boundary)}形成取舍，${quote(goal)}仍待判断。`,
+      action: `先判断${quote(pressure)}还是${quote(boundary)}。`,
+      consequence: `${quote(pressure)}、${quote(boundary)}与${quote(goal)}仍待判断。`,
+      intensity: 2,
+      anchor: '起点',
+    },
+    question: `当前先判断${quote(pressure)}还是${quote(boundary)}？`,
+    options,
+    narrativeAction: null,
+    transition: null,
+    canConclude: false,
+    isConclusion: false,
+  }
+}
+
+function shortConfirmedOpeningAnchor(value: string): string {
+  const compact = trimTerminalSentence(value).replace(/[「」“”"']/gu, '').trim()
+  return compact.length <= 10 ? compact : `${compact.slice(0, 9)}…`
+}
+
 function getStoryTurnRecord(value: unknown): Record<string, unknown> {
   const message = '回合 JSON 缺少 turn 对象。'
   const record = expectRecord(value, message, invalidModelOutputContext)
@@ -9687,7 +9847,7 @@ function getStoryTurnRecord(value: unknown): Record<string, unknown> {
   // json_object models occasionally omit this otherwise redundant wrapper.
   // Accept the direct shape only when it unmistakably contains a turn body.
   if (isPlainRecord(record.turn)) return record.turn
-  if (isPlainRecord(record.node) || isPlainRecord(record.conflict) || Array.isArray(record.options)) return record
+  if (isPlainRecord(record.node) || isPlainRecord(record.conflict) || Array.isArray(record.options) || isPlainRecord(record.openingPlan)) return record
 
   throw new AppError(message, invalidModelOutputContext.statusCode, invalidModelOutputContext.code)
 }

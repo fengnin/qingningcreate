@@ -222,6 +222,14 @@ function createCompactOpeningModelResponse(
   })
 }
 
+function createOpeningPlanModelResponse(
+  anchorIds = ['opening-anchor-1', 'opening-anchor-2', 'opening-anchor-3'],
+): Response {
+  return createCurveModelResponse({
+    openingPlan: { anchorIds },
+  })
+}
+
 function createRelationshipOpeningModelResponse(
   inventedResponse = false,
   hasCurrentBoundary = false,
@@ -1543,7 +1551,7 @@ test('uses the compact confirmed-curve opening contract without inventing state 
       calls += 1
       const request = JSON.parse(String(init?.body)) as { messages?: Array<{ content?: string }> }
       systemPrompts.push(request.messages?.[0]?.content ?? '')
-      return createCompactOpeningModelResponse('投影仪今晚要归还，沈乔答应不再改动作品，却想在展出前决定要不要删掉自己的名字。')
+      return createOpeningPlanModelResponse()
     }
 
     const spine = await startSessionStorySpineFromCurve({
@@ -1553,8 +1561,8 @@ test('uses the compact confirmed-curve opening contract without inventing state 
     })
 
     assert.equal(calls, 1, 'the confirmed opening should use the compact contract on its first model request')
-    assert.match(systemPrompts[0] ?? '', /封闭的作者事实合同/u)
-    assert.match(systemPrompts[0] ?? '', /不把任何选择、结果或他人反应说成已经发生/u)
+    assert.match(systemPrompts[0] ?? '', /开场事实选择器/u)
+    assert.match(systemPrompts[0] ?? '', /只能从数组中复制 anchorId/u)
     assert.doesNotMatch(systemPrompts[0] ?? '', /临时场景细节.+可以自然补写/u)
     assert.equal(spine.turn.options.length, 3)
     assert.equal(spine.turn.narrativeAction, null)
@@ -1602,7 +1610,7 @@ test('repairs a relationship opening after rejecting an unconfirmed other-person
       userPrompts.push(request.messages?.[1]?.content ?? '')
       return calls === 1
         ? createRelationshipOpeningModelResponse(true, true)
-        : createRelationshipOpeningModelResponse(false, true)
+        : createOpeningPlanModelResponse()
     }
 
     const spine = await startSessionStorySpineFromCurve({
@@ -1612,9 +1620,9 @@ test('repairs a relationship opening after rejecting an unconfirmed other-person
     })
 
     assert.equal(calls, 2, 'the first response predicts the sister response and must be repaired')
-    assert.match(userPrompts[0] ?? '', /作者事实卡（唯一具体事实来源）/u)
-    assert.match(userPrompts[0] ?? '', /每个字段都先从事实卡复制一个连续短语/u)
-    assert.match(userPrompts[1] ?? '', /事实闭合校验/u)
+    assert.match(userPrompts[0] ?? '', /作者事实锚点（唯一允许的具体来源）/u)
+    assert.match(userPrompts[0] ?? '', /不要生成任何故事句子/u)
+    assert.match(userPrompts[1] ?? '', /只重新选择三个不同的 anchorId/u)
     assert.doesNotMatch(userPrompts[1] ?? '', /姐姐可能暂停|出售动作/u)
     assert.equal(spine.turn.options.length, 3)
     assert.equal(spine.turn.options.every((option) => option.transition.introducedFacts.length === 0), true)
