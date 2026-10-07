@@ -154,6 +154,7 @@ const richCurveSeed = {
 }
 
 const relationshipCurveIdea = '周岚想和姐姐一起保住父亲留下的书店，却答应过不再替姐姐做决定；姐姐准备把店卖掉。'
+const relationshipBoundaryCurveIdea = '周岚想和姐姐一起保住父亲留下的书店，却答应过不再替姐姐做决定；姐姐准备把店卖掉，卖店合同将在周五前签署。'
 
 const reportSeed = {
   activeSituation: '周岚要提交报告',
@@ -173,7 +174,10 @@ test.after(() => {
   else process.env.STORY_DISABLE_MODEL = initialStoryDisableModel
 })
 
-function createCompactOpeningModelResponse(event: string): Response {
+function createCompactOpeningModelResponse(
+  event: string,
+  firstAction = '先面对投影仪今晚要归还。',
+): Response {
   return new Response(JSON.stringify({
     choices: [{
       message: {
@@ -181,32 +185,32 @@ function createCompactOpeningModelResponse(event: string): Response {
           node: {
             title: '归还与署名',
             event,
-            purpose: '让归还期限、不再改动作品的承诺和署名决定形成当前取舍。',
+            purpose: '投影仪今晚要归还、答应不再改动作品、在展出前决定要不要删掉自己的名字之间的当前取舍。',
           },
           conflict: {
-            conflict: '投影仪今晚要归还，而她答应不再改动作品，也要决定要不要删掉自己的名字。',
-            action: '在归还投影仪、守住不改动作品的承诺和判断署名之间作出当前选择。',
-            consequence: '在展出前决定要不要删掉自己的名字仍有待判断。',
+            conflict: '投影仪今晚要归还，沈乔答应不再改动作品，却想在展出前决定要不要删掉自己的名字。',
+            action: '先判断投影仪今晚要归还、答应不再改动作品，还是在展出前决定要不要删掉自己的名字。',
+            consequence: '在展出前决定要不要删掉自己的名字仍待判断。',
           },
-          question: '在展出前，现在先判断哪一项？',
+          question: '当前先判断投影仪今晚要归还，还是答应不再改动作品？',
           options: [
             {
               label: '先面对归还',
-              action: '先承认投影仪今晚要归还，再决定怎样继续。',
-              immediateConsequence: '投影仪今晚要归还不再被略过。',
-              laterEffect: '下一步仍要回应这项已确认条件。',
+              action: firstAction,
+              immediateConsequence: '投影仪今晚要归还形成当前卡点。',
+              laterEffect: '答应不再改动作品仍待判断。',
             },
             {
               label: '先守住承诺',
-              action: '先保留她答应不再改动作品的承诺。',
-              immediateConsequence: '不再改动作品成为当前判断的一端。',
-              laterEffect: '后续仍需回应删掉自己的名字的取舍。',
+              action: '先保留她答应不再改动作品。',
+              immediateConsequence: '答应不再改动作品作为当前优先。',
+              laterEffect: '在展出前决定要不要删掉自己的名字仍待判断。',
             },
             {
               label: '先看署名取舍',
               action: '先明确在展出前决定要不要删掉自己的名字。',
-              immediateConsequence: '删掉自己的名字成为需要承担的选择。',
-              laterEffect: '接下来仍要回应投影仪今晚要归还。',
+              immediateConsequence: '在展出前决定要不要删掉自己的名字成为当前判断。',
+              laterEffect: '投影仪今晚要归还仍待判断。',
             },
           ],
         }),
@@ -218,39 +222,100 @@ function createCompactOpeningModelResponse(event: string): Response {
   })
 }
 
-function createRelationshipOpeningModelResponse(inventedResponse = false): Response {
+function createRelationshipOpeningModelResponse(
+  inventedResponse = false,
+  hasCurrentBoundary = false,
+): Response {
+  const deadlineFact = hasCurrentBoundary ? '卖店合同将在周五前签署。' : ''
+  const boundaryPurpose = hasCurrentBoundary
+    ? '姐姐准备把店卖掉、卖店合同将在周五前签署、答应过不再替姐姐做决定之间的当前取舍。'
+    : '姐姐准备把店卖掉、答应过不再替姐姐做决定之间的当前取舍。'
+  const secondOption = hasCurrentBoundary
+    ? {
+      label: '面对周五前',
+      action: '周岚先判断卖店合同将在周五前签署。',
+      immediateConsequence: '卖店合同将在周五前签署作为当前优先。',
+      laterEffect: '答应过不再替姐姐做决定仍待判断。',
+    }
+    : {
+      label: '守住不替姐姐决定',
+      action: '周岚先保留「却答应过不再替姐姐做决定」这项承诺。',
+      immediateConsequence: '却答应过不再替姐姐做决定仍是当前事实。',
+      laterEffect: '姐姐准备把店卖掉仍待周岚继续面对。',
+    }
   return createCurveModelResponse({
     node: {
       title: '书店的取舍',
-      event: '周岚想和姐姐一起保住父亲留下的书店；姐姐准备把店卖掉，而她却答应过不再替姐姐做决定。',
-      purpose: '让周岚面对卖店、承诺和保住书店之间尚未决定的取舍。',
+      event: `周岚想和姐姐一起保住父亲留下的书店；姐姐准备把店卖掉，她却答应过不再替姐姐做决定。${deadlineFact}`,
+      purpose: boundaryPurpose,
     },
     conflict: {
       conflict: '姐姐准备把店卖掉，但周岚想和姐姐一起保住父亲留下的书店，也答应过不再替姐姐做决定。',
-      action: '周岚要在保住书店与不替姐姐做决定之间作出判断。',
-      consequence: '姐姐准备把店卖掉、答应过不再替姐姐做决定和保住书店的想法都还没有改变。',
+      action: hasCurrentBoundary
+        ? '周岚先判断姐姐准备把店卖掉、卖店合同将在周五前签署，还是答应过不再替姐姐做决定。'
+        : '周岚先判断姐姐准备把店卖掉，还是答应过不再替姐姐做决定。',
+      consequence: hasCurrentBoundary
+        ? '姐姐准备把店卖掉与卖店合同将在周五前签署仍待判断。'
+        : '姐姐准备把店卖掉与答应过不再替姐姐做决定仍待判断。',
     },
-    question: '周岚现在先面对姐姐准备把店卖掉，还是先守住不替姐姐做决定的承诺？',
+    question: hasCurrentBoundary
+      ? '周岚当前先判断姐姐准备把店卖掉，还是卖店合同将在周五前签署？'
+      : '周岚现在先面对姐姐准备把店卖掉，还是先守住不替姐姐做决定的承诺？',
     options: [
       {
         label: '面对姐姐卖店',
-        action: '周岚先面对「姐姐准备把店卖掉」，不替姐姐作出决定。',
+        action: '周岚先面对姐姐准备把店卖掉。',
         immediateConsequence: inventedResponse
           ? '姐姐可能暂停出售动作，再说明自己的决定。'
-          : '姐姐准备把店卖掉仍是当前事实。',
-        laterEffect: '是否和姐姐一起保住父亲留下的书店仍待周岚判断。',
+          : '姐姐准备把店卖掉形成当前卡点。',
+        laterEffect: hasCurrentBoundary
+          ? '卖店合同将在周五前签署仍待判断。'
+          : '是否和姐姐一起保住父亲留下的书店仍待周岚判断。',
       },
-      {
-        label: '守住不替姐姐决定',
-        action: '周岚先保留「却答应过不再替姐姐做决定」这项承诺。',
-        immediateConsequence: '却答应过不再替姐姐做决定仍是当前事实。',
-        laterEffect: '姐姐准备把店卖掉仍待周岚继续面对。',
-      },
+      secondOption,
       {
         label: '保住父亲书店',
-        action: '周岚重新判断「和姐姐一起保住父亲留下的书店」是否是自己要守住的目标。',
-        immediateConsequence: '和姐姐一起保住父亲留下的书店仍是周岚的想法。',
-        laterEffect: '却答应过不再替姐姐做决定仍让这项判断不能替姐姐完成。',
+        action: '周岚先守住和姐姐一起保住父亲留下的书店。',
+        immediateConsequence: '和姐姐一起保住父亲留下的书店成为当前判断。',
+        laterEffect: '却答应过不再替姐姐做决定仍待判断。',
+      },
+    ],
+  })
+}
+
+function createDeadlineOpeningModelResponse(
+  firstAction = '先面对在周五前把祖母的手稿交给出版社。',
+): Response {
+  return createCurveModelResponse({
+    node: {
+      title: '手稿与承诺',
+      event: '林澈答应在周五前把祖母的手稿交给出版社，但他发现最后一页缺失，不知道是否该按承诺提交。',
+      purpose: '在周五前把祖母的手稿交给出版社、最后一页缺失与按承诺提交之间的当前取舍。',
+    },
+    conflict: {
+      conflict: '林澈答应在周五前把祖母的手稿交给出版社，但他发现最后一页缺失，不知道是否该按承诺提交。',
+      action: '先判断最后一页缺失，还是按承诺提交。',
+      consequence: '在周五前把祖母的手稿交给出版社仍待判断。',
+    },
+    question: '当前先判断最后一页缺失，还是按承诺提交？',
+    options: [
+      {
+        label: '面对周五前',
+        action: firstAction,
+        immediateConsequence: '在周五前把祖母的手稿交给出版社作为当前优先。',
+        laterEffect: '最后一页缺失仍待判断。',
+      },
+      {
+        label: '面对最后一页',
+        action: '先面对最后一页缺失。',
+        immediateConsequence: '最后一页缺失形成当前卡点。',
+        laterEffect: '按承诺提交仍待判断。',
+      },
+      {
+        label: '判断承诺提交',
+        action: '先判断按承诺提交。',
+        immediateConsequence: '按承诺提交成为当前判断。',
+        laterEffect: '在周五前把祖母的手稿交给出版社仍待判断。',
       },
     ],
   })
@@ -1261,7 +1326,15 @@ test('allows a confirmed deadline to be summarized as cutoff pressure without ad
   }
   const confirmed = confirmProvisionalCurve(createProvisionalCurveFallback(idea, seed, brief)).confirmedCurve
   const foundation = materializeConfirmedCurve(seed, confirmed)
-  const turn = createConfirmedOpeningTurn('林澈答应在周五前把祖母的手稿交给出版社，截止压力下仍要决定是否按承诺提交。')
+  const turn = createConfirmedOpeningTurn('林澈答应在周五前把祖母的手稿交给出版社，但他发现最后一页缺失，不知道是否该按承诺提交。')
+  turn.node.purpose = '在周五前把祖母的手稿交给出版社、最后一页缺失与按承诺提交之间的当前取舍。'
+  turn.conflict = {
+    ...turn.conflict,
+    conflict: '最后一页缺失；是否按承诺提交。',
+    action: '先判断最后一页缺失，还是按承诺提交。',
+    consequence: '在周五前把祖母的手稿交给出版社仍待判断。',
+  }
+  turn.question = '当前先判断最后一页缺失，还是按承诺提交？'
   const createOption = (
     id: string,
     label: string,
@@ -1295,23 +1368,23 @@ test('allows a confirmed deadline to be summarized as cutoff pressure without ad
     createOption(
       'turn-1-option-1',
       '面对周五前',
-      '先确认在周五前把祖母的手稿交给出版社这一已确认条件。',
-      '周五前的截止压力不再被略过。',
-      '之后仍要决定是否按承诺提交。',
+      '先面对在周五前把祖母的手稿交给出版社。',
+      '在周五前把祖母的手稿交给出版社作为当前优先。',
+      '按承诺提交仍待判断。',
     ),
     createOption(
       'turn-1-option-2',
       '面对最后一页',
-      '先面对“但他发现最后一页缺失”这项当前事实。',
-      '但他发现最后一页缺失不再被略过。',
-      '之后仍要决定是否按承诺提交。',
+      '先面对但他发现最后一页缺失。',
+      '最后一页缺失形成当前卡点。',
+      '在周五前把祖母的手稿交给出版社仍待判断。',
     ),
     createOption(
       'turn-1-option-3',
       '判断承诺提交',
-      '先判断“林澈答应在周五前把祖母的手稿交给出版社”是否仍要按承诺提交。',
-      '林澈答应在周五前把祖母的手稿交给出版社，是否按承诺提交成为当前判断的一端。',
-      '之后仍要面对周五前把祖母的手稿交给出版社。',
+      '先判断林澈答应在周五前把祖母的手稿交给出版社，还是按承诺提交。',
+      '按承诺提交成为当前判断。',
+      '最后一页缺失仍待判断。',
     ),
   ]
 
@@ -1336,7 +1409,7 @@ test('rejects introduced facts from a confirmed first-turn option', () => {
   const foundation = materializeConfirmedCurve(sparseSeed, confirmed)
   const action: StoryAction = {
     id: 'turn-1-option-1-action',
-    intent: '先确认当前阻碍',
+    intent: '先面对青柠去游乐园。',
     preconditions: [],
     effects: [],
     source: 'generated',
@@ -1358,25 +1431,25 @@ test('rejects introduced facts from a confirmed first-turn option', () => {
     node: {
       id: 'node-1',
       title: '停住的安排',
-      event: '青柠仍要去游乐园，但原来的安排暂时停住。',
-      purpose: '让主角先看清已确认的阻碍。',
+      event: '青柠去游乐园。',
+      purpose: '青柠去游乐园当前判断。',
       goalState: 'trying',
     },
     conflict: {
       nodeId: 'node-1',
-      conflict: '原来的安排需要重新判断。',
-      action: '选择一个此刻可以承担的方向。',
-      consequence: '选择会留下需要继续面对的取舍。',
+      conflict: '青柠去游乐园仍待判断。',
+      action: '先判断青柠去游乐园。',
+      consequence: '青柠去游乐园仍待判断。',
       intensity: 1,
       anchor: '起点',
     },
-    question: '现在先怎么做？',
+    question: '青柠去游乐园是否当前判断？',
     options: [{
       id: 'turn-1-option-1',
-      label: '先确认阻碍',
+      label: '面对游乐园',
       action: action.intent,
-      immediateConsequence: '阻碍被摆到眼前。',
-      laterEffect: '后续仍需作出选择。',
+      immediateConsequence: '青柠去游乐园作为当前优先。',
+      laterEffect: '青柠去游乐园仍待判断。',
       narrativeAction: action,
       transition,
     }],
@@ -1470,7 +1543,7 @@ test('uses the compact confirmed-curve opening contract without inventing state 
       calls += 1
       const request = JSON.parse(String(init?.body)) as { messages?: Array<{ content?: string }> }
       systemPrompts.push(request.messages?.[0]?.content ?? '')
-      return createCompactOpeningModelResponse('沈乔面对投影仪今晚要归还这一已确认条件，先要决定怎样回应。')
+      return createCompactOpeningModelResponse('投影仪今晚要归还，沈乔答应不再改动作品，却想在展出前决定要不要删掉自己的名字。')
     }
 
     const spine = await startSessionStorySpineFromCurve({
@@ -1480,7 +1553,8 @@ test('uses the compact confirmed-curve opening contract without inventing state 
     })
 
     assert.equal(calls, 1, 'the confirmed opening should use the compact contract on its first model request')
-    assert.match(systemPrompts[0] ?? '', /首回合禁止新增：手机、消息、纸条、门票/u)
+    assert.match(systemPrompts[0] ?? '', /封闭的作者事实合同/u)
+    assert.match(systemPrompts[0] ?? '', /不把任何选择、结果或他人反应说成已经发生/u)
     assert.doesNotMatch(systemPrompts[0] ?? '', /临时场景细节.+可以自然补写/u)
     assert.equal(spine.turn.options.length, 3)
     assert.equal(spine.turn.narrativeAction, null)
@@ -1499,7 +1573,7 @@ test('uses the compact confirmed-curve opening contract without inventing state 
   }
 })
 
-test('repairs a relationship opening after rejecting an unconfirmed other-person response', async () => {
+test('repairs a relationship opening after rejecting an unconfirmed other-person response when the author gives a present boundary', async () => {
   const previousDisableModel = process.env.STORY_DISABLE_MODEL
   const previousApiKey = process.env.DASHSCOPE_API_KEY
   const previousBaseUrl = process.env.DASHSCOPE_BASE_URL
@@ -1507,7 +1581,7 @@ test('repairs a relationship opening after rejecting an unconfirmed other-person
   process.env.STORY_DISABLE_MODEL = 'true'
   try {
     const draft = await startStoryCoCreation({
-      idea: relationshipCurveIdea,
+      idea: relationshipBoundaryCurveIdea,
       brief: { tones: ['friendship'], dramaticForces: ['relationship-tension'], allowSystemNamedCharacters: false },
       operationId: `opening-relationship-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     })
@@ -1527,8 +1601,8 @@ test('repairs a relationship opening after rejecting an unconfirmed other-person
       const request = JSON.parse(String(init?.body)) as { messages?: Array<{ content?: string }> }
       userPrompts.push(request.messages?.[1]?.content ?? '')
       return calls === 1
-        ? createRelationshipOpeningModelResponse(true)
-        : createRelationshipOpeningModelResponse()
+        ? createRelationshipOpeningModelResponse(true, true)
+        : createRelationshipOpeningModelResponse(false, true)
     }
 
     const spine = await startSessionStorySpineFromCurve({
@@ -1538,12 +1612,14 @@ test('repairs a relationship opening after rejecting an unconfirmed other-person
     })
 
     assert.equal(calls, 2, 'the first response predicts the sister response and must be repaired')
-    assert.match(userPrompts[0] ?? '', /不能预言其“可能、会、将”如何回应/u)
-    assert.match(userPrompts[1] ?? '', /未经确认的流程、方案或关系判断|他人回应/u)
+    assert.match(userPrompts[0] ?? '', /作者事实卡（唯一具体事实来源）/u)
+    assert.match(userPrompts[0] ?? '', /每个字段都先从事实卡复制一个连续短语/u)
+    assert.match(userPrompts[1] ?? '', /事实闭合校验/u)
+    assert.doesNotMatch(userPrompts[1] ?? '', /姐姐可能暂停|出售动作/u)
     assert.equal(spine.turn.options.length, 3)
     assert.equal(spine.turn.options.every((option) => option.transition.introducedFacts.length === 0), true)
     assert.equal(spine.turn.options.some((option) => /可能暂停|出售动作/u.test(option.immediateConsequence)), false)
-    assert.equal(spine.turn.options.every((option) => /姐姐准备把店卖掉|答应过不再替姐姐做决定|和姐姐一起保住父亲留下的书店/u.test(
+    assert.equal(spine.turn.options.every((option) => /姐姐准备把店卖掉|卖店合同将在周五前签署|答应过不再替姐姐做决定|和姐姐一起保住父亲留下的书店/u.test(
       `${option.action}${option.immediateConsequence}${option.laterEffect}`,
     )), true)
   } finally {
@@ -1662,6 +1738,122 @@ test('does not persist a confirmed-curve opening after bounded model failure', a
     assert.equal(after.currentTurn, undefined)
     assert.equal(after.history.length, 0)
     assert.equal(after.predicament, undefined)
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+    if (previousApiKey === undefined) delete process.env.DASHSCOPE_API_KEY
+    else process.env.DASHSCOPE_API_KEY = previousApiKey
+    if (previousBaseUrl === undefined) delete process.env.DASHSCOPE_BASE_URL
+    else process.env.DASHSCOPE_BASE_URL = previousBaseUrl
+  }
+})
+
+test('rejects a confirmed opening that turns a known object into an executed outcome', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  const previousApiKey = process.env.DASHSCOPE_API_KEY
+  const previousBaseUrl = process.env.DASHSCOPE_BASE_URL
+  const previousFetch = globalThis.fetch
+  process.env.STORY_DISABLE_MODEL = 'true'
+  try {
+    const draft = await startStoryCoCreation({
+      idea: `${richCurveIdea}（执行结果边界）`,
+      brief: { tones: ['growth'], dramaticForces: ['contrast'], allowSystemNamedCharacters: false },
+      operationId: `opening-executed-outcome-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    })
+    const confirmed = await confirmSessionCurve({
+      storyId: draft.storyId,
+      revision: draft.revision,
+      curveId: draft.curve.id,
+    })
+    const before = getStorySessionSnapshot(confirmed.storyId)
+
+    let calls = 0
+    process.env.STORY_DISABLE_MODEL = 'false'
+    process.env.DASHSCOPE_API_KEY = 'test-only-key'
+    process.env.DASHSCOPE_BASE_URL = 'https://model.test.invalid'
+    globalThis.fetch = async () => {
+      calls += 1
+      return createCompactOpeningModelResponse(
+        '投影仪今晚要归还，沈乔答应不再改动作品，却想在展出前决定要不要删掉自己的名字。',
+        '先面对投影仪今晚要归还，再把投影仪打包归还。',
+      )
+    }
+
+    await assert.rejects(
+      () => startSessionStorySpineFromCurve({
+        storyId: confirmed.storyId,
+        revision: confirmed.revision,
+        curveId: confirmed.curve.id,
+      }),
+      (error: unknown) => error instanceof AppError
+        && error.code === 'STORY_TURN_RETRY_EXHAUSTED'
+        && error.modelDiagnostic?.attempt === 3
+        && /打包归还|执行动作/u.test(error.modelDiagnostic?.reason ?? ''),
+    )
+
+    assert.equal(calls, 3)
+    const after = getStorySessionSnapshot(confirmed.storyId)
+    assert.equal(after.revision, before.revision)
+    assert.equal(after.currentTurn, undefined)
+    assert.equal(after.history.length, 0)
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+    if (previousApiKey === undefined) delete process.env.DASHSCOPE_API_KEY
+    else process.env.DASHSCOPE_API_KEY = previousApiKey
+    if (previousBaseUrl === undefined) delete process.env.DASHSCOPE_BASE_URL
+    else process.env.DASHSCOPE_BASE_URL = previousBaseUrl
+  }
+})
+
+test('rejects unconfirmed process wording in a deadline opening instead of turning it into a fact', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  const previousApiKey = process.env.DASHSCOPE_API_KEY
+  const previousBaseUrl = process.env.DASHSCOPE_BASE_URL
+  const previousFetch = globalThis.fetch
+  const idea = '林澈答应在周五前把祖母的手稿交给出版社，但他发现最后一页缺失，不知道是否该按承诺提交。'
+  process.env.STORY_DISABLE_MODEL = 'true'
+  try {
+    const draft = await startStoryCoCreation({
+      idea,
+      brief: { tones: ['growth'], dramaticForces: ['cost'], allowSystemNamedCharacters: false },
+      operationId: `opening-deadline-process-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    })
+    const confirmed = await confirmSessionCurve({
+      storyId: draft.storyId,
+      revision: draft.revision,
+      curveId: draft.curve.id,
+    })
+    const before = getStorySessionSnapshot(confirmed.storyId)
+
+    let calls = 0
+    process.env.STORY_DISABLE_MODEL = 'false'
+    process.env.DASHSCOPE_API_KEY = 'test-only-key'
+    process.env.DASHSCOPE_BASE_URL = 'https://model.test.invalid'
+    globalThis.fetch = async () => {
+      calls += 1
+      return createDeadlineOpeningModelResponse('先判断原计划、流程还是替代方案。')
+    }
+
+    await assert.rejects(
+      () => startSessionStorySpineFromCurve({
+        storyId: confirmed.storyId,
+        revision: confirmed.revision,
+        curveId: confirmed.curve.id,
+      }),
+      (error: unknown) => error instanceof AppError
+        && error.code === 'STORY_TURN_RETRY_EXHAUSTED'
+        && error.modelDiagnostic?.attempt === 3
+        && /原计划|流程|替代方案/u.test(error.modelDiagnostic?.reason ?? ''),
+    )
+
+    assert.equal(calls, 3)
+    const after = getStorySessionSnapshot(confirmed.storyId)
+    assert.equal(after.revision, before.revision)
+    assert.equal(after.currentTurn, undefined)
+    assert.equal(after.history.length, 0)
   } finally {
     globalThis.fetch = previousFetch
     if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
@@ -2526,6 +2718,16 @@ test('rich model directions keep visible author facts and reject new scene hooks
   assert.throws(
     () => validateSystemConflictCoreDraft(richCurveIdea, seed, inventedHook),
     /具体场景钩子/u,
+  )
+
+  const observationAsChoice = structuredClone(draft)
+  observationAsChoice.directions![2] = {
+    ...observationAsChoice.directions![2]!,
+    tradeoff: '和前队友剪的短片，还是暂缓决定',
+  }
+  assert.throws(
+    () => validateSystemConflictCoreDraft(richCurveIdea, seed, observationAsChoice),
+    /取舍加入了未由作者原文支持的判断/u,
   )
 })
 

@@ -353,6 +353,12 @@ const confirmedCurveContinuationUnsupportedDetailRules: readonly UnsupportedDeta
   },
 ]
 
+// Require a predicate payload after a person-state verb. A loose suffix such
+// as `姐姐...将` can otherwise match the tail of an author fact that the model
+// merely quoted, producing a false prediction diagnostic.
+const unconfirmedOtherPersonStatePattern = /(?:对方|朋友|他人|前队友|队友|陌生人|某人|姐姐|哥哥|妹妹|他|她)(?:(?:已经|已|曾)(?:离开|到达|等待|知道|收到|同意|不愿|愿意|生气|沉默|失联)|(?:答应|拒绝|离开|到达|等待|知道|收到|同意|不愿|愿意|生气|沉默|失联)(?=[，。！？；\n]|$))/gu
+const unconfirmedOtherPersonPredictionPattern = /(?:姐姐|朋友|前队友|队友|他人|对方|某人|他|她)(?:(?:可能|会|将)(?:暂停|重申|质疑|同意|拒绝|接受|继续(?:按)?|不参与|出售|卖掉|保住|改变|回应|决定)|(?:暂停|重申|质疑|同意|拒绝|接受|不参与)(?=[，。！？；\n]|$))/gu
+
 // The opening turn is the strictest boundary in a co-creation session. A
 // confirmed foundation permits the model to phrase the reviewed mechanism,
 // but it does not permit it to invent the concrete prop, timestamp, history,
@@ -378,7 +384,7 @@ const confirmedCurveFirstTurnUnsupportedDetailRules: readonly UnsupportedDetailR
   },
   {
     label: '未经确认的他人状态',
-    pattern: /(?:对方|朋友|他人|前队友|队友|陌生人|某人|她|他)[^，。！？；\n]{0,12}(?:已经|已|曾|答应|拒绝|离开|到达|等待|知道|收到|同意|不愿|愿意|生气|沉默|失联)/gu,
+    pattern: unconfirmedOtherPersonStatePattern,
   },
   {
     label: '未经确认的场景设施或普通物件',
@@ -390,11 +396,11 @@ const confirmedCurveFirstTurnUnsupportedDetailRules: readonly UnsupportedDetailR
   },
   {
     label: '未经确认的他人回应或后续状态',
-    pattern: /(?:姐姐|朋友|前队友|队友|他人|对方|某人)[^，。！？；\n]{0,16}(?:可能|会|将|暂停|重申|质疑|被唤起|同意|拒绝|接受|继续按|不参与)/gu,
+    pattern: unconfirmedOtherPersonPredictionPattern,
   },
   {
     label: '未经确认的认知或观察',
-    pattern: /(?:得知|听说|注意到|意识到|看见|看到|听见|收到)[^，。！？；\n]{0,18}/gu,
+    pattern: /(?:得知|听说|注意到|意识到|看见|看到|听见|收到)[^，。！？；\n]{0,40}/gu,
   },
 ]
 
@@ -3046,9 +3052,17 @@ export function looksLikeAuthorInstruction(text: string): boolean {
 
 export function createDirectCoCreationSeed(idea: string): StorySeed | undefined {
   const inferredAction = extractOriginalIdeaAction(idea)
-  // This narrow path avoids asking a model to interpret an already explicit
-  // one-line premise. Longer prose continues through normal seed extraction.
-  if (!inferredAction || inferredAction.subject.length > 4) return undefined
+  // Preserve an already explicit author premise before asking the model to
+  // restate its subject, goal and fact ledger. This is deliberately narrower
+  // than story generation: it only accepts a verb-linked subject, an original
+  // goal, and an author-written conflict signal. The model still generates and
+  // must validate directions/curve content; this avoids a null seed-extraction
+  // response turning a fully specified author premise into a false model
+  // failure.
+  if (
+    !inferredAction
+    || (inferredAction.subject.length > 4 && !hasExplicitDirectCoCreationConflict(idea))
+  ) return undefined
 
   return {
     ...createOriginalIdeaFallbackSeed(idea, undefined),
@@ -3056,6 +3070,10 @@ export function createDirectCoCreationSeed(idea: string): StorySeed | undefined 
     lockedGoal: inferredAction.goal,
     expansionScope: 'keep-scale',
   }
+}
+
+function hasExplicitDirectCoCreationConflict(idea: string): boolean {
+  return /(?:但|却|可是|然而|因为|所以|无法|不能|不得|必须|阻碍|冲突|期限|截止|之前|今晚|明天|答应|承诺|约定|不再|朋友|队友|家人|同事|前任|关系|是否|要不要|决定|选择|归还|提交|删除|公开|隐瞒)/u.test(idea)
 }
 
 function needsAuthorDetailBeforeCurve(idea: string, seed: Pick<StorySeed, 'lockedGoal'>): boolean {
@@ -3066,7 +3084,7 @@ function needsAuthorDetailBeforeCurve(idea: string, seed: Pick<StorySeed, 'locke
   // A curve can expand a premise, but it cannot invent the first conflict for
   // a bare noun or a goal-only sentence. Require at least one author-provided
   // signal for an obstacle, deadline, commitment, choice, or relationship.
-  const hasConflictSignal = /(?:但|却|可是|然而|因为|所以|无法|不能|不得|必须|阻碍|冲突|期限|截止|之前|今晚|明天|答应|承诺|约定|不再|朋友|队友|家人|同事|前任|关系|是否|要不要|决定|选择|归还|提交|删除|公开|隐瞒)/u.test(normalized)
+  const hasConflictSignal = hasExplicitDirectCoCreationConflict(normalized)
   return !hasConflictSignal
 }
 
@@ -3904,6 +3922,11 @@ function createSystemDraftDirectionCollector(
       )) return false
       if (enforceDetailedGrounding && findUnestablishedSystemDraftConcreteHook(direction, establishedSourceTexts)) return false
       if (enforceDetailedGrounding && findRichSystemDraftUngroundedLanguage(direction, establishedSourceTexts)) return false
+      // The final rich-input validator also checks each side of a tradeoff
+      // against the author's material. Apply that same check while collecting
+      // partial model branches; otherwise a rejected branch can occupy a
+      // mechanism slot and prevent bounded model recovery from replacing it.
+      if (enforceDetailedGrounding && findUngroundedRichSystemDraftTradeoffSide(direction.tradeoff, establishedSourceTexts)) return false
 
       const texts = [direction.label, direction.premise, direction.tradeoff].map(normalizeGoalText)
       if (texts.some((text) => directionTexts.has(text))) return false
@@ -4242,7 +4265,7 @@ const richSystemDraftNonDistinctFragments = new Set([
 // in rich-input outputs.  A literal author phrase still passes; otherwise the
 // branch is rejected and the model keeps its true failed origin.
 const richSystemDraftUnsupportedSemanticPatterns: readonly RegExp[] = [
-  /(?:未竟意志|遗愿|遗嘱|完整性|完整权|完整状态|完整手稿|自我表达|共作意义|共作的意义|共同创作|共同署名|作品归属|归属权|目标归属|单方延续|共同承诺|共同责任|决定权|决策权|处置权|署名权|提交条件|交稿条件|署名意义|手稿意义|信任与边界|信任边界|自主权)/u,
+  /(?:未竟意志|遗愿|遗嘱|完整性|完整权|完整状态|完整手稿|自我表达|共作意义|共作的意义|共同创作|共同署名|作品归属|归属权|目标归属|单方延续|共同承诺|共同责任|决定权|决策权|处置权|署名权|提交条件|交稿条件|署名(?:的)?意义|手稿(?:的)?意义|作品(?:的)?意义|短片(?:的)?意义|信任与边界|信任边界|自主权)/u,
   /(?:信任与边界|信任关系|尊重[^，。！？；\n]{0,8}(?:关系|决定|边界))/u,
   /(?:承认|改变|重新理解)[^，。！？；\n]{0,8}(?:共作|自我表达|未竟意志|完整性之外的意义)/u,
   /(?:突破|打破)[^，。！？；\n]{0,8}(?:约定|承诺)/u,
@@ -4251,6 +4274,11 @@ const richSystemDraftUnsupportedSemanticPatterns: readonly RegExp[] = [
 const richSystemDraftAllowedTradeoffSidePattern = /^(?:继续(?:目标|提交|行动|处理)?|暂缓(?:目标|提交|行动|处理|决定)?|暂不(?:继续|处理|决定|行动)?|保留(?:目标|承诺|选择|决定)?|以保留选择空间|放弃(?:目标|承诺|选择|决定)?|承担取舍|重新判断|先面对(?:目标|承诺|期限|当前条件)?|按承诺(?:提交|行动)?|不再(?:继续|改动|替对方决定)?)$/u
 const richSystemDraftTemporalLabelPattern = /(?:期限|时限|截止|倒计时|时间压力|时间限制|限时|窗口)/u
 const richSystemDraftTemporalEvidencePattern = /(?:期限|时限|截止|倒计时|时间压力|时间限制|限时|窗口|今晚|明天|后天|今天|明早|明晚|周[一二三四五六日天](?:前|后|之前|之后)?|本周|下周|月底|月末|展出前|仪式前|布置前|交接前|(?:\d+|[零〇一二两三四五六七八九十百千万亿半]+)(?:秒|分钟|小时|天|周|月|年|点(?:钟)?|时|分))/u
+// A scene observation can be a valid premise, but it is not by itself a
+// meaningful side of a rich-input tradeoff. Keeping it out of this slot avoids
+// accepting choices such as "删除名字还是继续和前队友剪的短片" merely because
+// the latter repeats an author sentence.
+const richSystemDraftSceneOnlyTradeoffPattern = /^(?:和|与|在|于|从|对)?[^，。！？；\n]{0,24}(?:看到|看见|听见|发现|剪的短片|投影仪里|片段|画面|影像)[^，。！？；\n]*$/u
 
 function splitRichSystemDraftTradeoff(value: string): string[] {
   const cleaned = value
@@ -4285,6 +4313,16 @@ function findUngroundedRichSystemDraftTradeoffSide(
       .map((pattern) => pattern.exec(cleanSide)?.[0])
       .find((match) => match !== undefined && !hasOriginalTextPhrase(sourceText, match))
     if (semantic) return semantic
+    // A source phrase can be valid evidence for a premise while still being
+    // an invalid choice side. Check this before the literal-source shortcut:
+    // otherwise an observation such as "和前队友剪的短片" is accepted as a
+    // complete alternative merely because the author happened to mention it.
+    if (
+      richSystemDraftSceneOnlyTradeoffPattern.test(cleanSide)
+      && !/(?:决定|选择|判断|是否|要不要|删|改|保留|提交|归还|交给|卖掉|承诺|答应|不再|不能|无法|缺失|冲突|分歧)/u.test(cleanSide)
+    ) {
+      return cleanSide
+    }
     if (sourceTexts.some((source) => (
       hasOriginalTextPhrase(source, cleanSide)
       || hasOriginalTextPhrase(source, normalizedSide)
@@ -4617,6 +4655,17 @@ function isGeneratedDetailSupported(
 
   if (hasOriginalTextPhrase(establishedText, match)) return true
 
+  // The opening may combine two already-confirmed observations into one
+  // causal description. For example, "看到短片与投影仪归还时限的并置"
+  // restates the author's short-film observation and return deadline; it does
+  // not assert that a new message, person, or event occurred. Require an
+  // explicit observation verb, a non-event relationship word, and two
+  // separate source-backed fragments so an invented observation cannot pass by
+  // sharing only one familiar noun.
+  if (label === '未经确认的认知或观察' && isSupportedComposedObservation(establishedText, match)) {
+    return true
+  }
+
   if (label === '未经确认的相对时间' && isSupportedDeadlineSummary(establishedText, candidateText, match)) {
     return true
   }
@@ -4664,6 +4713,48 @@ function isGeneratedDetailSupported(
   return label === '未经建立的外部结果'
     && match === '违背'
     && hasSupportedCommitmentAction(establishedText, candidateText)
+}
+
+const composedObservationRelationPattern = /(?:并置|并列|同时|交叠|并存|关联|联系|放在一起|牵在一起|之间|与|和)/u
+const composedObservationVerbPattern = /^(?:得知|听说|注意到|意识到|看见|看到|听见|收到)/u
+const composedObservationStopFragments = new Set([
+  '看到', '看见', '听见', '得知', '听说', '注意到', '意识到', '收到',
+  '作者', '事实', '当前', '已经', '仍然', '时限', '条件', '并置', '并列',
+  '同时', '之间', '以及', '因为', '所以',
+])
+
+function isSupportedComposedObservation(establishedText: string, match: string): boolean {
+  if (!composedObservationVerbPattern.test(match) || !composedObservationRelationPattern.test(match)) {
+    return false
+  }
+
+  const normalizedMatch = normalizeOpeningText(match)
+  const sourceFragments = new Set<string>()
+  for (const source of establishedText.split(/\n+/u)) {
+    const normalizedSource = normalizeOpeningText(source)
+    for (let length = 8; length >= 2; length -= 1) {
+      for (let start = 0; start + length <= normalizedSource.length; start += 1) {
+        const fragment = normalizedSource.slice(start, start + length)
+        if (!composedObservationStopFragments.has(fragment) && normalizedMatch.includes(fragment)) {
+          sourceFragments.add(fragment)
+        }
+      }
+    }
+  }
+
+  // Keep only two non-overlapping concrete fragments. This avoids counting a
+  // long phrase and all of its substrings as independent evidence.
+  const concreteFragments = [...sourceFragments]
+    .filter((fragment) => fragment.length >= 2)
+    .sort((left, right) => right.length - left.length)
+  const selected: string[] = []
+  for (const fragment of concreteFragments) {
+    if (selected.some((existing) => existing.includes(fragment) || fragment.includes(existing))) continue
+    selected.push(fragment)
+    if (selected.length >= 2) return true
+  }
+
+  return false
 }
 
 function isAbstractOpeningEntry(candidateText: string, match: string): boolean {
@@ -5090,7 +5181,10 @@ function getConfirmedCurveFirstTurnAuthorDetailMessage(request: StoryTurnRequest
 }
 
 function getStoryTurnTemperature(mode: StoryTurnMode, attempt: number, strictOpening = false): number {
-  if (strictOpening) return attempt === 0 ? 0.08 : 0.01
+  // The opening still has a strict fact contract, but a near-zero temperature
+  // makes Qwen repeat the same option shell after a validation failure.  Keep
+  // retries bounded while leaving enough room for genuinely different wording.
+  if (strictOpening) return [0.22, 0.12, 0.06][attempt] ?? 0.06
   if (attempt === 0) return mode === 'conclude' ? 0.52 : 0.6
   return mode === 'conclude' ? 0.34 : 0.42
 }
@@ -5890,6 +5984,30 @@ function validateConfirmedCurveContinuationFields(
 
   if (!turn || !isInitialConfirmedCurveTurn(request, turn)) return
 
+  // Keyword guards above catch known unsafe detail classes such as a phone,
+  // timestamp, or another person's prediction. They are not sufficient for a
+  // closed first turn: a model can still turn a known object into an invented
+  // action ("打包归还") or assert a new outcome ("再无机会"). At this point
+  // every visible sentence must be explainable as author text plus a small
+  // vocabulary of unfinished judgement words.
+  const closedVocabularyIssue = findConfirmedCurveFirstTurnClosedVocabularyIssue(request, turn)
+  if (closedVocabularyIssue) {
+    throw new AppError(
+      `已确认曲线后的首回合${closedVocabularyIssue.field.label}加入了无法从作者事实卡逐字追溯的内容“${closedVocabularyIssue.detail}”，请只使用事实卡中的短语和未完成的判断连接词。`,
+      invalidModelOutputContext.statusCode,
+      'INVALID_MODEL_OUTPUT',
+    )
+  }
+
+  const nonJudgementOption = turn.options.find((option) => !isConfirmedCurveFirstTurnJudgementOption(option.action, request.seed.subject))
+  if (nonJudgementOption) {
+    throw new AppError(
+      `已确认曲线后的首回合选择“${nonJudgementOption.label}”把尚未确认的执行动作写进了剧情；首回合只能提供面对、守住、判断、保留或暂缓作者事实的选择。`,
+      invalidModelOutputContext.statusCode,
+      'INVALID_MODEL_OUTPUT',
+    )
+  }
+
   const introducedFact = getFirstIntroducedConfirmedCurveTurnFact(turn)
   if (introducedFact) {
     throw new AppError(
@@ -5922,6 +6040,100 @@ const genericOpeningOptionLabels = new Set([
 
 const opaqueConfirmedOpeningTextPattern = /(?:暂定[：:]|先回应前项|先看另一端|先明确影响|前项|另一端|上一项|确认后的(?:卡点|起点|阻碍)|当前边界|尚待决定的影响|当前处境|触发取舍|曲线节点|作者(?:事实|原文)?|系统(?:提案|节点|曲线)?)/u
 const confirmedOpeningMetaConsequencePattern = /(?:仍是当前事实|仍是[^。！？；]{0,12}的事实|取舍仍待[^。！？；]{0,12}(?:判断|决定)|围绕[^。！？；]{0,24}的取舍仍待|不再被略过|成为当前判断的一端|成为需要承担的选择)/u
+
+// These are connective judgement words, not story facts. The closed opening
+// contract deliberately permits only this small vocabulary around copied
+// author phrases. It makes an unconfirmed execution or outcome visible to the
+// validator instead of letting a familiar noun disguise it as grounded prose.
+const confirmedCurveFirstTurnJudgementFragments = [
+  '面对', '守住', '判断', '重新判断', '决定', '暂缓', '保留', '明确', '围绕', '比较',
+  '取舍', '优先', '处理', '当前', '此刻', '仍待', '尚待', '继续', '是否', '要不要',
+  '还是', '之间', '另一项', '这一项', '这项', '两项', '一项', '怎样', '哪个', '哪一项',
+  '主角', '他', '她', '它', '先', '再', '不', '不再', '不能', '无法', '仍', '暂', '暂不',
+  '和', '与', '而', '但', '却', '因', '所以', '让', '使', '把', '将', '在', '的', '地', '得', '了',
+  '吗', '呢', '并', '或', '也', '都', '更', '先后', '作为', '形成', '成为', '卡点', '压力', '承认', '改变',
+] as const
+
+const confirmedCurveFirstTurnJudgementActionPattern = /^(?:(?:主角|他|她|它|[\u4e00-\u9fff]{2,4})[，、]?)?(?:(?:先|暂时|先不|重新|仍先))?(?:面对|守住|判断|决定|暂缓|保留|明确|围绕|比较|承认)/u
+
+function findConfirmedCurveFirstTurnClosedVocabularyIssue(
+  request: SystemDraftContinuationRequest,
+  turn: StoryTurn,
+): { field: GeneratedTextField; detail: string } | undefined {
+  const authorSources = getConfirmedCurveOpeningAuthorSourceTexts(request)
+  const authorFragments = getConfirmedCurveOpeningLiteralFragments(authorSources, request.seed.subject)
+  const visibleFields: GeneratedTextField[] = [
+    { label: '当前事件', value: turn.node.event },
+    { label: '推进目的', value: turn.node.purpose },
+    { label: '冲突', value: turn.conflict.conflict },
+    { label: '行动焦点', value: turn.conflict.action },
+    { label: '后果', value: turn.conflict.consequence },
+    ...(turn.question ? [{ label: '问题', value: turn.question }] : []),
+    ...turn.options.flatMap((option, index) => [
+      { label: `第 ${index + 1} 个选择的行动`, value: option.action },
+      { label: `第 ${index + 1} 个选择的当下结果`, value: option.immediateConsequence },
+      { label: `第 ${index + 1} 个选择的后续牵引`, value: option.laterEffect },
+    ]),
+  ]
+
+  for (const field of visibleFields) {
+    const detail = getConfirmedCurveFirstTurnUnsupportedResidue(field.value, authorFragments)
+    if (detail) return { field, detail }
+  }
+
+  return undefined
+}
+
+function getConfirmedCurveOpeningLiteralFragments(
+  sources: readonly string[],
+  subject: string | undefined,
+): string[] {
+  const fragments = new Set<string>()
+  if (subject?.trim()) fragments.add(normalizeOpeningText(subject))
+
+  for (const source of sources) {
+    const normalized = normalizeOpeningText(source)
+    if (!normalized) continue
+    fragments.add(normalized)
+    // Allow direct, author-written excerpts such as "最后一页缺失" while
+    // refusing a newly composed action such as "打包归还". Four characters is
+    // long enough to be traceable without making the model repeat whole cards.
+    const maximumLength = Math.min(24, normalized.length)
+    for (let length = maximumLength; length >= 4; length -= 1) {
+      for (let start = 0; start + length <= normalized.length; start += 1) {
+        fragments.add(normalized.slice(start, start + length))
+      }
+    }
+  }
+
+  return [...fragments]
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length)
+}
+
+function getConfirmedCurveFirstTurnUnsupportedResidue(value: string, authorFragments: readonly string[]): string | undefined {
+  let residue = normalizeOpeningText(value)
+  for (const fragment of authorFragments) {
+    if (fragment.length >= 2) residue = residue.replaceAll(fragment, '')
+  }
+  for (const fragment of confirmedCurveFirstTurnJudgementFragments) {
+    residue = residue.replaceAll(fragment, '')
+  }
+
+  const unsupported = residue.match(/[\u4e00-\u9fffA-Za-z0-9]+/gu)?.join('')
+  return unsupported ? unsupported.slice(0, 24) : undefined
+}
+
+function isConfirmedCurveFirstTurnJudgementOption(action: string, subject: string | undefined): boolean {
+  const normalized = action.trim()
+  if (confirmedCurveFirstTurnJudgementActionPattern.test(normalized)) return true
+  // A user can explicitly name a longer protagonist. Keep the contract about
+  // the verb, rather than forcing a particular name length in model prose.
+  if (subject?.trim() && normalized.startsWith(subject.trim())) {
+    return confirmedCurveFirstTurnJudgementActionPattern.test(normalized.slice(subject.trim().length).replace(/^[，、]/u, ''))
+  }
+  return false
+}
 
 function getConfirmedCurveFirstTurnQualityIssue(
   request: SystemDraftContinuationRequest,
@@ -5997,6 +6209,20 @@ function getConfirmedCurveFirstTurnQualityIssue(
     && normalizedOptionConsequences.some((value) => confirmedOpeningMetaConsequencePattern.test(value))
   ) {
     return '三个选择都套用了“事实仍在、取舍待判断”的元话术，没有形成不同的判断入口'
+  }
+
+  // Do not let three copies of one grammatical shell pass merely because the
+  // model changed the quoted fact.  Keep the priority words in the signature;
+  // a genuinely different first move should therefore remain distinct.
+  const structuralOptionConsequences = turn.options.map((option) => normalizeOpeningTemplate(
+    `${option.immediateConsequence}；${option.laterEffect}`,
+    anchors,
+  ))
+  if (
+    structuralOptionConsequences.length === generatedOptionCount
+    && new Set(structuralOptionConsequences).size === 1
+  ) {
+    return '三个选择在替换事实锚点后仍是同一套即时后果和后续牵引，没有形成实质差异'
   }
 
   const plannedAnchors = getConfirmedCurveOpeningAnchorPlan(request)
@@ -7109,6 +7335,9 @@ function describeStoryTurnValidationFailure(error: unknown): string {
   if (/人物|关系|过去经历|他人状态/iu.test(error.message)) {
     return '上一版加入了未经确认的人物、关系或经历；请回到已确认主体和事实。'
   }
+  if (/作者事实卡逐字追溯|执行动作写进了剧情/iu.test(error.message)) {
+    return '上一版把事实卡外的执行动作或结果写进了首回合；每个字段都先复制作者事实卡短语，只能加面对、守住、判断、保留或暂缓等未完成判断。'
+  }
   if (/模板|重复|抽象|承接任何可核对|暂定|占位|前项|另一端|系统提案|不可审阅/iu.test(error.message)) {
     return '上一版复述了系统提案或使用了模板占位语；请直接说出作者事实中的对象、期限、承诺或关系，让每项形成不同判断。'
   }
@@ -7384,17 +7613,17 @@ const storyTurnSystemPrompt = `你是一位擅长互动短篇故事的中文编�
 生成顺序提示：先写 node 和 conflict，再写 question；非收束时逐个完成每个 option。若本次要求详细状态结构，再补齐每个 option 中的 narrativeAction 和 transition，收束时补齐顶层 narrativeAction 和 transition；若本次要求紧凑叙事结构，则绝不输出这些内部字段。详细状态结构中 transition.introducedFacts 即使为空也必须保留为空数组 []。`
 
 function getConfirmedCurveFirstTurnSystemPrompt(): string {
-  return `你是中文互动故事的开场编辑。现在只生成作者已经确认主线后的第一个可选择情境，必须严格返回 JSON，不要 Markdown、解释或额外字段。
+  return `你是中文互动故事的开场编辑。现在只生成作者确认主线后的第一个可选择情境，必须严格返回 JSON，不要 Markdown、解释或额外字段。
 
-只使用请求中列出的作者原始事实、已确认 foundation、已确认曲线节点和作者已接受的方向。不要写小说段落、未来大纲、高潮、结局或系统审阅说明。不要把任何尚未确认的内容写成当前事实。
+这是一份封闭的作者事实合同，不是自由续写。用户消息会给出作者事实卡。每一个人物、对象、期限、承诺、关系、目标和因果条件都必须能在事实卡中逐字找到；每个可见字段最多组合两张事实卡和少量连接词。只写主角当前还能判断的事，不把任何选择、结果或他人反应说成已经发生。
 
-首回合禁止新增：手机、消息、纸条、门票、快递、钢笔、设备状态、通讯渠道、工作人员、机构流程、地点、柜台、店员、书架、入口、窗口、匿名人物、人物回应或内部状态、过去经历、精确或相对时间、数量、资源、权限、经历和永久后果。也不要使用“决定权”“选择权”“署名权”“共同责任”等作者没有写出的权利或关系结论，也不要使用“暂定：”“前项”“另一端”“已确认条件”等占位或递归提案词。作者事实中已经出现的对象、期限、承诺和关系可以逐字保留，但不得扩写成新的事件。
+首回合只给作者可选的判断，不执行任何事。每个 option.action 必须以“先面对、先守住、先判断、先保留、暂缓、重新判断”之一开始，并紧跟事实卡中的原句；不能写拿起、放下、打包、归还、提交、查看、联系、关掉、走去、等待等实际操作，即使相关对象出现在事实卡中。immediateConsequence 只写判断优先级怎样变化，laterEffect 只写另一项事实仍待判断；不能写压力被解除、物件被取走、失去机会、计划完成或任何外部结果。
 
-这是一个锚点拼装合同，不是自由场景写作：每个 node/conflict/option 字段只能使用请求中列出的主体、目标和作者事实锚点，再加“继续、暂缓、保留、重新判断、承担、面对、决定、是否、还是、尚待处理”等抽象连接词。用户提示里的“三项选择句式”是可直接照抄的输出格式，不要为了避免重复而改写成场景、行动计划或关系推断。任何不在锚点中的具体名词都视为未确认事实，即使它在现实场景中很常见也不能写入。若缺少细节，宁可重复一个较短的作者锚点并说明取舍，也不要补出场所、设施、道具、流程、方案或他人行动。尤其不要把已知人物可能如何回应、计划如何推进、共同记忆或关系结论写进 immediateConsequence 或 laterEffect；这些都还没有被作者确认。
+请使用未完成的判断语气，例如“面对、先、暂缓、保留、继续、判断、决定、取舍、仍待”。不要使用“已、已经、会、将、可能”这类完成或预测语气，除非这个词逐字出现在作者事实卡中。不得使用事实卡外的名词或动作，也不要用“原计划、流程、进程、方案、安排、步骤、处理方式、设备、署名、时限、决定权”等概念词替代作者原句。信息不足时，把句子缩短为现有事实之间尚未决定的取舍；不得用常识补背景、场景、操作、人物状态或后续事件。
 
-node.event 必须用一至两句写出具体当前卡点，包含主体和至少一个作者事实；node.purpose 说明它如何承接曲线并把作者带到尚未决定的取舍。conflict 必须具体写出阻碍、两端和未解决压力。恰好三个 option 必须是不同的主动判断，标题直接说出对象、期限、承诺或关系；每项 action、immediateConsequence、laterEffect 只能使用已确认材料，laterEffect 只能写尚待处理的牵引，不能写已经发生的新事实。紧凑首回合不输出 narrativeAction 或 transition。
+node.event 用一至两句写主体面对的具体卡点；node.purpose 说明这个卡点把哪些作者事实带到尚未决定的取舍。conflict 必须明确阻碍、两端和当前压力。恰好三个 option 必须是不同的主动判断：第一项优先处理一个压力，第二项优先守住另一个约束，第三项直接判断一个对象或目标。每项 action、immediateConsequence、laterEffect 都要用事实卡中不同的短语形成不同的判断顺序：immediateConsequence 只说明当前优先级怎样变化，laterEffect 只留下仍待判断的牵引，不能陈述外部结果。紧凑首回合不输出 narrativeAction 或 transition。
 
-只输出以下结构。options 数组已经展示三项，必须保留恰好三项；不要删掉或合并任何一项：${storyTurnOngoingCompactResponseSchema}`
+ 只输出以下结构。options 数组已经展示三项，必须保留恰好三项；不要删掉或合并任何一项：${storyTurnOngoingCompactResponseSchema}`
 }
 
 const storyTurnOptionRefinementSystemPrompt = `你是一位擅长互动短篇故事的中文编辑。你只修改当前情境中的一个备选行动，绝不改写已经确认的故事路径、当前情境、另外两条选择或预定的故事两端。`
@@ -7961,12 +8190,12 @@ function createRichRepairDirection(
     ? `暂定：${anchor.text}让${goal}停住`
     : index === 1
       ? `暂定：${anchor.text}使继续${goal}必须取舍`
-      : `暂定：${anchor.text}让${subject}需要重新判断${goal}`
+      : `暂定：${anchor.text}让${subject}不能按原样继续${goal}`
   const alternative = index === 0
     ? '暂缓'
     : index === 1
       ? '保留'
-      : '重新判断'
+      : '继续'
   const tradeoff = `${goal}还是${alternative}`
   return { label, mechanismType, premise, tradeoff }
 }
@@ -8623,12 +8852,6 @@ function buildConfirmedCurveFirstTurnPrompt(
   repairMessage?: string,
 ): string {
   const confirmedCurve = request.confirmedCurve
-  const confirmedStructure = confirmedCurve?.beats
-    .filter((beat) => beat.status === 'confirmed')
-    .map((beat) => ({
-      kind: beat.kind,
-      source: beat.source === 'user-edit' ? 'author-edit' : 'confirmed-proposal',
-    })) ?? []
   const sourceFacts = confirmedCurve?.design?.sourceFacts
     .filter((fact) => fact.disposition === 'integrated')
     .map((fact) => fact.text) ?? []
@@ -8640,63 +8863,32 @@ function buildConfirmedCurveFirstTurnPrompt(
       .filter((beat) => beat.status === 'confirmed' && beat.source === 'user-edit')
       .map((beat) => beat.detail) ?? []),
   ])
-  const openingAnchors = [...new Set(openingAuthorSources
-    .flatMap(getOpeningAnchorCandidates))]
-    .filter((anchor) => anchor.length >= 4)
-    .slice(0, 16)
   const openingAnchorPlan = getConfirmedCurveOpeningAnchorPlan(request)
   const subject = request.seed.subject?.trim() || '主角'
   const goal = request.seed.lockedGoal?.trim() || '当前目标'
-  const shortLabel = (value: string): string => value.length > 18 ? `${value.slice(0, 18)}…` : value
-  const distinctAnchor = (anchor: string, ...excluded: string[]): string => (
-    openingAnchorPlan.find((candidate) => (
-      !excluded.some((item) => normalizeOpeningText(item) === normalizeOpeningText(candidate))
-      && normalizeOpeningText(candidate) !== normalizeOpeningText(anchor)
-    ))
-    ?? openingAnchorPlan.find((candidate) => normalizeOpeningText(candidate) !== normalizeOpeningText(anchor))
-    ?? goal
-  )
-  const openingOptionSkeletons = openingAnchorPlan.map((anchor, index) => {
-    const counterpart = index === 2
-      ? distinctAnchor(anchor, goal)
-      : distinctAnchor(anchor)
-    const label = shortLabel(anchor)
-    if (index === 0) {
-      return `${index + 1}. label 直接写“先处理${label}”；action 写“${subject}先处理「${anchor}」，暂不改变「${counterpart}」”；immediateConsequence 写先承担「${anchor}」带来的限制、另一项暂不改变；laterEffect 写之后仍要决定能否在「${counterpart}」下继续处理「${anchor}」。`
-    }
-    if (index === 1) {
-      return `${index + 1}. label 直接写“先守住${label}”；action 写“${subject}先守住「${anchor}」，不让「${counterpart}」替它作决定”；immediateConsequence 写先保留「${anchor}」，同时承认「${counterpart}」仍在牵制；laterEffect 写之后要决定两项能否一起保留。`
-    }
-    return `${index + 1}. label 直接写“先决定${label}”；action 写“${subject}先决定「${anchor}」，再接受「${counterpart}」的牵制”；immediateConsequence 写先把「${anchor}」的选择说清，另一项仍不改变；laterEffect 写之后仍要承担「${counterpart}」带来的取舍。`
+  const authorFactCards = openingAuthorSources.map((text, index) => ({
+    id: `author-fact-${index + 1}`,
+    text,
+  }))
+  const plannedAnchors = openingAnchorPlan.map((anchor, index) => ({ option: index + 1, text: anchor }))
+  const optionJudgementVerbs = ['先面对', '先守住', '先判断']
+  const optionAssignments = openingAnchorPlan.map((anchor, index) => {
+    const counterpart = openingAnchorPlan[(index + 1) % openingAnchorPlan.length] ?? goal
+    return `选择 ${index + 1}：以「${anchor}」为中心，至少再逐字引用「${counterpart}」；action 以“${optionJudgementVerbs[index] ?? '先判断'}”开始，只把它作为判断，不执行任何操作。`
   })
   const repair = repairMessage
-    ? `\n上一版没有通过首回合事实或质量闸门。${repairMessage} 请完整重写，不要沿用上一版的句子。重试时只能逐字使用下列作者事实锚点：${JSON.stringify(openingAnchors)}。不要写“暂定：”、前项、另一端、已确认条件等审阅元语言；不要用“设备”“某人”或“当时”替代缺失事实；三个选项必须分别采取“先处理、先守住、先决定”中的一种不同优先级。`
+    ? `\n上一版未通过事实闭合校验。请完全重写，不要解释原因，不要复用上一版句子；仍然只使用下列作者事实卡。修复规则：${repairMessage}`
     : ''
 
-  return `你是中文互动故事的开场编辑。现在只生成确认主线后的第一个可选择情境；写成作者能直接审阅的短情境，不写小说段落，也不补背景。
+  return `任务：只生成确认主线后的第一个可选择情境。把作者事实转成可审阅的当前判断，不写小说段落，不补背景。
 
-原始想法（只用于核对，不得扩写）：${request.idea}
-已确认 seed：${JSON.stringify({
-    subject: request.seed.subject,
-    lockedGoal: request.seed.lockedGoal,
-    lockedFacts: request.seed.lockedFacts,
-  })}
-已确认曲线的因果顺序（只承接层次，不复述系统提案句）：${JSON.stringify(confirmedStructure)}
-已确认原始事实：${JSON.stringify(sourceFacts)}
-  作者可直接核对的事实锚点（可逐字使用；不要把它们扩写成新事件）：${JSON.stringify(openingAnchors)}
-  三项选择必须分别覆盖的锚点（每项至少使用其中一项，优先逐字照抄）：${JSON.stringify(openingAnchorPlan)}
-  三项选择的可直接照抄句式（必须按此语法组织；只替换锚点，不能为了自然叙事补出细节；三项分别是不同的优先级判断，不是同一句话替换名词）：
-${openingOptionSkeletons.join('\n')}
+主体：${subject}
+当前目标：${goal}
+作者事实卡（唯一具体事实来源）：${JSON.stringify(authorFactCards)}
+三项选择各自优先覆盖的短语：${JSON.stringify(plannedAnchors)}
+${optionAssignments.join('\n')}
 
-硬性边界：除了上面列出的主体、目标和作者事实锚点，不得出现任何新的关键名词、人物回应、物件、设备、通讯、票券、机构流程、方案、过去经历、日期、时刻、数量或永久结果。曲线只提供“当前处境 -> 卡点 -> 取舍 -> 主动判断”的顺序，不能把其中任何系统提案逐句搬进读者界面。下面作者原文中的物件、期限、关系可以原样逐字保留；“今晚”“周五”“展出前”“姐姐”“投影仪”等如出现在锚点中就是允许的事实，不要把它们误删或换成新的时间和物件。未写出的细节必须留为待决定，而不是用常识补齐。不得把任何未来提案写成已经发生。已知人物可以作为主角行动的对象，但不能预言其“可能、会、将”如何回应，也不能写出其新决定、流程、计划、记忆、责任或态度。
-
-质量要求（比套模板更重要）：
-- node.event 用 1 至 2 句写出此刻的具体卡点，必须包含主体和一至两个事实锚点；不要逐字复述整段作者输入，不要只写“确认的阻碍”或“目标停住”。
-- node.purpose 说明这个卡点怎样承接已经确认的因果顺序，并把作者带到尚未决定的取舍；不要写解决结果。
-- conflict.conflict 必须同时承接已确认的阻碍与取舍，conflict.action 必须点出两端，conflict.consequence 只写尚未解决的当下压力。
-  - 三个选项必须是三个不同的当下判断，依次采用“先处理”“先守住”“先决定”三种优先级；每项 action、immediateConsequence、laterEffect 至少逐字承接对应锚点，并再承接一个不同锚点。不能用“她已”“他答应”“截止”等新状态替代作者原句。标题要直接说清对应的对象、期限、承诺或关系，不能写“先回应前项”“先看另一端”“先保留目标”“先明确影响”等占位标题。
-  - immediateConsequence 必须说明这项优先级怎样改变主角当前的判断顺序，但不能补写他人如何反应、某个流程怎样继续、或一项计划怎样改变；禁止使用“仍是当前事实”“不再被略过”“取舍仍待判断”等空转句。laterEffect 只能写尚待主角承担的牵引，不能写成已经发生的新事实；所有 option 的 introducedFacts 由服务端保持为空。
-  不要机械复制同一句目标，不要输出“暂定：”或“已确认条件”等系统审阅元语言；不要把“入口”当作场景地点，也不要写决定权、选择权、署名权等权利词。将已确认曲线转成当前可判断的作者事实，让三个选项分别体现不同的优先级。
+写作检查：每个字段都先从事实卡复制一个连续短语，再添加最少的判断连接词。每项选择必须有不同的优先级和不同的事实组合；不要整句复述任一事实卡，也不要用概念词替代具体短语。可以采用“先面对「事实 A」，暂不改变「事实 B」”“当前先围绕「事实 A」判断”“「事实 B」仍待判断”这样的判断句式，但不要把它扩展成现实操作或结果。已确认曲线只提供“当前处境 -> 卡点 -> 取舍 -> 主动判断”的顺序，不能逐句复述系统提案。
 ${repair}
 
 只输出 JSON，不要 Markdown、解释或额外字段：
