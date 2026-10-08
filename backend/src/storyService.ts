@@ -6282,30 +6282,32 @@ function getConfirmedCurveOpeningAnchorPlan(
   const candidates = [...new Set(sources.flatMap(getOpeningAnchorCandidates))]
     .filter((candidate) => candidate.length >= 4)
   const chosen: string[] = []
-  const pick = (...patterns: RegExp[]) => {
+  const goal = request.seed.lockedGoal?.trim()
+  const goalNormalized = goal ? normalizeOpeningText(goal) : ''
+  const pick = (patterns: RegExp[], avoidGoal = false) => {
     const candidate = candidates.find((value) => (
       patterns.some((pattern) => pattern.test(value))
       && !chosen.some((item) => normalizeOpeningText(item) === normalizeOpeningText(value))
+      && (!avoidGoal || !goalNormalized || normalizeOpeningText(value) !== goalNormalized)
     ))
     if (candidate) chosen.push(candidate)
   }
 
-  const goal = request.seed.lockedGoal?.trim()
   // Keep the three opening choices tied to three different author concerns:
   // one concrete pressure, one commitment/relationship boundary, and the
   // locked goal. This is more useful than selecting three adjacent clauses
   // from one long sentence, and gives the model a small, deterministic menu
   // of legal anchors to choose from.
-  pick(/(?:归还|缺失|卖掉|准备|无法|不能|必须|阻碍|发现|失效|不知道|不知)/u)
-  pick(/(?:答应|承诺|约定|保证|不再|姐姐|朋友|队友|家人|同事|前任|关系)/u)
+  pick([/(?:归还|缺失|卖掉|准备|无法|不能|必须|阻碍|发现|失效|不知道|不知)/u])
+  pick([/(?:按承诺|答应|承诺|约定|保证|不再|姐姐|朋友|队友|家人|同事|前任|关系)/u], true)
   if (goal && goal.length >= 4 && !chosen.some((item) => normalizeOpeningText(item) === normalizeOpeningText(goal))) {
     chosen.push(goal)
   }
   // A goal may already be the first clause in a promise sentence. Fill the
   // remaining slot with a concrete object or deadline rather than repeating
   // that sentence under a different label.
-  pick(/(?:今晚|明天|后天|今天|明早|明晚|周[一二三四五六日天]|月底|展出前|布置前|交接前|期限|截止|之前)/u)
-  pick(/(?:投影仪|短片|作品|名字|书店|手稿|最后一页|出版社|耳环|礼服|报告)/u)
+  pick([/(?:今晚|明天|后天|今天|明早|明晚|周[一二三四五六日天]|月底|展出前|布置前|交接前|期限|截止|之前)/u])
+  pick([/(?:投影仪|短片|作品|名字|书店|手稿|最后一页|出版社|耳环|礼服|报告)/u])
   for (const candidate of candidates) {
     if (chosen.length >= generatedOptionCount) break
     if (!chosen.some((item) => normalizeOpeningText(item) === normalizeOpeningText(candidate))) chosen.push(candidate)
@@ -6340,7 +6342,22 @@ function getOpeningAnchorCandidates(source: string): string[] {
     .split(/[，。！？；、]/u)
     .map((part) => part.trim())
     .filter((part) => part.length >= 4)
+  const derived = clauses.flatMap((clause) => {
+    const candidates: string[] = []
+    const suffixPatterns = [
+      /(?:发现|看到|听见|注意到)(.{4,})$/u,
+      /不知道是否该(.{4,})$/u,
+      /(?:答应|承诺)(?:过)?(.{4,})$/u,
+      /准备(.{4,})$/u,
+    ]
+    for (const pattern of suffixPatterns) {
+      const match = clause.match(pattern)
+      if (match?.[1]?.trim()) candidates.push(match[1].trim())
+    }
+    return candidates
+  })
   return [...new Set([
+    ...derived,
     ...clauses,
     normalized.length <= 48 ? normalized : normalized.slice(0, 48),
   ])]
