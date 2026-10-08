@@ -483,9 +483,9 @@ test('repairs a rich contrast-and-growth curve with directional evidence across 
   ]
   const repairedBeats = [
     { kind: 'current-state', detail: richCurveIdea, sourceFactIds: ['source-fact-1', 'source-fact-2', 'source-fact-3', 'source-fact-4', 'source-fact-5'] },
-    { kind: 'trigger', detail: '暂定：投影仪今晚要归还让在展出前决定要不要删掉自己的名字无法按已确认条件推进', sourceFactIds: ['source-fact-3', 'source-fact-5'] },
+    { kind: 'trigger', detail: '暂定：投影仪今晚要归还让沈乔无法照原计划决定要不要删掉自己的名字', sourceFactIds: ['source-fact-3', 'source-fact-5'] },
     { kind: 'escalation', detail: '暂定：继续删掉自己的名字反而会触碰不再改动作品的承诺', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
-    { kind: 'climax-choice', detail: '暂定：沈乔必须在在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择，不能再按她答应不再改动作品的条件继续', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+    { kind: 'climax-choice', detail: '暂定：沈乔必须在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择，不能再按她答应不再改动作品的条件继续', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
     { kind: 'resolution', detail: '暂定：这次选择调整在展出前决定要不要删掉自己的名字在她答应不再改动作品下的处理方式', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
   ]
   const prompts: string[] = []
@@ -511,7 +511,7 @@ test('repairs a rich contrast-and-growth curve with directional evidence across 
     assert.match(prompts[0] ?? '', /方向层级硬约束/u)
     assert.match(prompts[1] ?? '', /反差|因果层级/u)
     assert.equal(curve.generation?.origin, 'model')
-    assert.match(curve.beats.find((beat) => beat.kind === 'trigger')?.detail ?? '', /投影仪今晚要归还.*在展出前决定要不要删掉自己的名字/u)
+    assert.match(curve.beats.find((beat) => beat.kind === 'trigger')?.detail ?? '', /投影仪今晚要归还.*沈乔.*决定要不要删掉自己的名字/u)
     assert.match(curve.beats.find((beat) => beat.kind === 'climax-choice')?.detail ?? '', /不能再按她答应不再改动作品的条件继续/u)
     assert.match(curve.beats.find((beat) => beat.kind === 'resolution')?.detail ?? '', /调整.*处理方式/u)
   } finally {
@@ -540,23 +540,23 @@ test('model curves keep three creative directions causally distinct on the same 
   }
   const contrastBeats = [
     currentState,
-    { kind: 'trigger', detail: '暂定：投影仪今晚要归还让在展出前决定要不要删掉自己的名字无法按原有安排推进', sourceFactIds: ['source-fact-3', 'source-fact-5'] },
+    { kind: 'trigger', detail: '暂定：投影仪今晚要归还让沈乔无法照原有安排决定要不要删掉自己的名字', sourceFactIds: ['source-fact-3', 'source-fact-5'] },
     { kind: 'escalation', detail: '暂定：继续在展出前决定要不要删掉自己的名字反而会触碰她答应不再改动作品的承诺', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
-    { kind: 'climax-choice', detail: '暂定：沈乔必须在在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择，不能再沿用旧办法', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+    { kind: 'climax-choice', detail: '暂定：沈乔必须在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择，不能再沿用旧办法', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
     { kind: 'resolution', detail: '暂定：这次选择调整在展出前决定要不要删掉自己的名字在她答应不再改动作品下的处理方式', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
   ]
   const costBeats = [
     currentState,
-    { kind: 'trigger', detail: '暂定：投影仪今晚要归还让在展出前决定要不要删掉自己的名字必须承担时间取舍', sourceFactIds: ['source-fact-3', 'source-fact-5'] },
+    { kind: 'trigger', detail: '暂定：投影仪今晚要归还让沈乔决定要不要删掉自己的名字时必须承担时间取舍', sourceFactIds: ['source-fact-3', 'source-fact-5'] },
     { kind: 'escalation', detail: '暂定：继续在展出前决定要不要删掉自己的名字会承担她答应不再改动作品的代价', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
-    { kind: 'climax-choice', detail: '暂定：沈乔必须在在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择，并承担代价', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+    { kind: 'climax-choice', detail: '暂定：沈乔必须在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择，并承担代价', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
     { kind: 'resolution', detail: '暂定：这次选择调整沈乔在展出前决定要不要删掉自己的名字的方式，并承担她答应不再改动作品的代价', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
   ]
   const relationshipBeats = [
     currentState,
     { kind: 'trigger', detail: '暂定：沈乔在借来的投影仪里看到和前队友剪的短片，使她在展出前决定要不要删掉自己的名字不能只按个人安排推进', sourceFactIds: ['source-fact-2', 'source-fact-5'] },
     { kind: 'escalation', detail: '暂定：继续在展出前决定要不要删掉自己的名字会触碰她答应不再改动作品的承诺，前队友关系的分歧因此更明显', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
-    { kind: 'climax-choice', detail: '暂定：沈乔必须在在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择，并回应与前队友的关系', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+    { kind: 'climax-choice', detail: '暂定：沈乔必须在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择，并回应与前队友的关系', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
     { kind: 'resolution', detail: '暂定：这次选择调整沈乔在展出前决定要不要删掉自己的名字的方式，并回应和前队友剪的短片', sourceFactIds: ['source-fact-2', 'source-fact-5'] },
   ]
   const responses = [contrastBeats, costBeats, relationshipBeats]
@@ -671,7 +671,7 @@ test('rejects curve semantics that add value, authority or relationship conclusi
       brief: { tones: ['friendship'], dramaticForces: ['relationship-tension'], allowSystemNamedCharacters: false } as CreativeBrief,
       beats: [
         { kind: 'current-state', detail: relationshipCurveIdea, sourceFactIds: ['source-fact-1', 'source-fact-2', 'source-fact-3'] },
-        { kind: 'trigger', detail: '暂定：答应过不再替姐姐做决定使和姐姐一起保住父亲留下的书店停住', sourceFactIds: ['source-fact-2'] },
+        { kind: 'trigger', detail: '暂定：答应过不再替姐姐做决定使周岚无法照原计划和姐姐一起保住父亲留下的书店', sourceFactIds: ['source-fact-2'] },
         { kind: 'escalation', detail: '暂定：姐姐准备把店卖掉让共同责任成为取舍', sourceFactIds: ['source-fact-3'] },
         { kind: 'climax-choice', detail: '暂定：周岚必须在和姐姐一起保住父亲留下的书店与不再替姐姐做决定之间选择', sourceFactIds: ['source-fact-1', 'source-fact-2'] },
         { kind: 'resolution', detail: '暂定：这次选择改变她对信任边界的理解', sourceFactIds: ['source-fact-2'] },
@@ -683,9 +683,9 @@ test('rejects curve semantics that add value, authority or relationship conclusi
       brief: { tones: ['growth'], dramaticForces: ['cost'], allowSystemNamedCharacters: false } as CreativeBrief,
       beats: [
         { kind: 'current-state', detail: richCurveIdea, sourceFactIds: ['source-fact-1', 'source-fact-2', 'source-fact-3', 'source-fact-4', 'source-fact-5'] },
-        { kind: 'trigger', detail: '暂定：投影仪今晚要归还让在展出前决定要不要删掉自己的名字停住', sourceFactIds: ['source-fact-3', 'source-fact-5'] },
+        { kind: 'trigger', detail: '暂定：投影仪今晚要归还让沈乔无法按原计划决定是否删掉自己的名字', sourceFactIds: ['source-fact-3', 'source-fact-5'] },
         { kind: 'escalation', detail: '暂定：继续在展出前决定要不要删掉自己的名字会承担她答应不再改动作品的取舍', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
-        { kind: 'climax-choice', detail: '暂定：沈乔必须在在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
+        { kind: 'climax-choice', detail: '暂定：沈乔必须在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择', sourceFactIds: ['source-fact-4', 'source-fact-5'] },
         { kind: 'resolution', detail: '暂定：这次选择改变她对署名权的理解', sourceFactIds: ['source-fact-5'] },
       ],
       expected: /权限或自主/u,
@@ -775,9 +775,9 @@ test('allows an author-established authorship right in a model curve', async () 
   const factId = (phrase: string): string => design.sourceFacts.find((fact) => fact.text.includes(phrase))?.id ?? design.sourceFacts[0]!.id
   const beats = [
     { kind: 'current-state', detail: idea, sourceFactIds: design.sourceFacts.map((fact) => fact.id) },
-    { kind: 'trigger', detail: '暂定：投影仪今晚要归还让在展出前决定要不要删掉自己的名字停住', sourceFactIds: [factId('投影仪今晚要归还'), factId('在展出前决定要不要删掉自己的名字')] },
+    { kind: 'trigger', detail: '暂定：投影仪今晚要归还让沈乔无法按原计划决定是否删掉自己的名字', sourceFactIds: [factId('投影仪今晚要归还'), factId('在展出前决定要不要删掉自己的名字')] },
     { kind: 'escalation', detail: '暂定：继续在展出前决定要不要删掉自己的名字会承担她答应不再改动作品的取舍', sourceFactIds: [factId('她答应不再改动作品'), factId('在展出前决定要不要删掉自己的名字')] },
-    { kind: 'climax-choice', detail: '暂定：沈乔必须在在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择', sourceFactIds: [factId('她答应不再改动作品'), factId('在展出前决定要不要删掉自己的名字')] },
+    { kind: 'climax-choice', detail: '暂定：沈乔必须在展出前决定要不要删掉自己的名字与她答应不再改动作品之间选择', sourceFactIds: [factId('她答应不再改动作品'), factId('在展出前决定要不要删掉自己的名字')] },
     { kind: 'resolution', detail: '暂定：这次选择调整在展出前决定要不要删掉自己的名字在署名权必须由她自己决定下的处理方式', sourceFactIds: [factId('在展出前决定要不要删掉自己的名字'), factId('署名权必须由她自己决定')] },
   ]
 
@@ -2698,7 +2698,7 @@ test('rich model directions keep visible author facts and reject new scene hooks
       {
         label: '归还期限',
         mechanismType: 'information-gap',
-        premise: '暂定：投影仪今晚要归还，让在展出前决定要不要删掉自己的名字停住',
+        premise: '暂定：投影仪今晚要归还，让沈乔无法按原计划决定是否删掉自己的名字',
         tradeoff: '先面对投影仪今晚要归还，还是暂缓决定要不要删掉自己的名字',
       },
       {
@@ -2736,6 +2736,16 @@ test('rich model directions keep visible author facts and reject new scene hooks
   assert.throws(
     () => validateSystemConflictCoreDraft(richCurveIdea, seed, observationAsChoice),
     /取舍加入了未由作者原文支持的判断/u,
+  )
+
+  const malformedCausalTemplate = structuredClone(draft)
+  malformedCausalTemplate.directions![0] = {
+    ...malformedCausalTemplate.directions![0]!,
+    premise: '暂定：投影仪今晚要归还让想在展出前决定要不要删掉自己的名字停住',
+  }
+  assert.throws(
+    () => validateSystemConflictCoreDraft(richCurveIdea, seed, malformedCausalTemplate),
+    /模板化因果连接/u,
   )
 })
 

@@ -3914,6 +3914,7 @@ function createSystemDraftDirectionCollector(
     mechanismTypes,
     add: (direction) => {
       if (mechanismTypes.has(direction.mechanismType)) return false
+      if (getSystemDraftDirectionTextQualityIssue(direction, seed.lockedGoal)) return false
       if (getSystemDraftDirectionScopeIssue(
         direction,
         establishedSourceTexts,
@@ -3989,6 +3990,10 @@ function describeSystemDraftGenerationFailure(error: unknown): string {
   // repair shape instead.
   if (/没有保留可核对的作者事实锚点|未由作者原文支持的价值、权限或关系结论/u.test(error.message)) {
     return '信息丰富输入的每条名称、前提和取舍都要各自照抄一个作者原文连续短语；前提只写“暂定：[原文短语]”，取舍只写“[原文短语]还是[另一原文短语或暂缓]”。'
+  }
+
+  if (/重复嵌套锁定目标|模板化因果连接|多个或缺失的二选一|承接本分支前提|反复使用同一事实锚点/u.test(error.message)) {
+    return '删除同一字段里的目标复述，因果句补出明确主体；每条取舍必须承接本分支前提的原文锚点，并且只保留一个“还是”。'
   }
 
   return error.message
@@ -4157,6 +4162,7 @@ function collectSystemDraftMinimalAssumptionIssues(
     ? getRichSystemDraftAuthorAnchors(establishedSourceTexts)
     : []
   const richDirectionEvidence = new Set<string>()
+  const richPremiseAnchors: string[] = []
   for (const [index, direction] of (draft.directions ?? []).entries()) {
     if (draft.origin === 'model' && !requireCreativeHook) {
       for (const field of [
@@ -4176,6 +4182,14 @@ function collectSystemDraftMinimalAssumptionIssues(
       enforceCreativeShape,
     )
     if (scopeIssue) issues.push(`第 ${index + 1} 条分支${scopeIssue}`)
+
+    if (draft.origin === 'model') {
+      const textQualityIssue = getSystemDraftDirectionTextQualityIssue(
+        direction,
+        seed.lockedGoal,
+      )
+      if (textQualityIssue) issues.push(`第 ${index + 1} 条分支${textQualityIssue}`)
+    }
 
     // Detailed author material is already rich enough to supply the causal
     // mechanism. A model direction may abstract those facts, but it must not
@@ -4202,6 +4216,8 @@ function collectSystemDraftMinimalAssumptionIssues(
       if (!tradeoffAnchor) issues.push(`第 ${index + 1} 条分支取舍没有保留可核对的作者事实锚点`)
       if (premiseAnchor) richDirectionEvidence.add(premiseAnchor)
       if (tradeoffAnchor) richDirectionEvidence.add(tradeoffAnchor)
+      if (premiseAnchor) richPremiseAnchors.push(normalizeGoalText(premiseAnchor))
+
 
       const ungroundedLanguage = findRichSystemDraftUngroundedLanguage(
         direction,
@@ -4225,8 +4241,62 @@ function collectSystemDraftMinimalAssumptionIssues(
     issues.push('三条分支没有从至少两项不同的作者事实形成可比较的因果差异')
   }
 
+  if (draft.origin === 'model' && !requireCreativeHook) {
+    const distinctPremiseAnchors = new Set(richPremiseAnchors.filter(Boolean))
+    if (distinctPremiseAnchors.size < Math.min(2, draft.directions?.length ?? 0)) {
+      issues.push('三条分支的前提反复使用同一事实锚点，尚未形成可比较的因果差异')
+    }
+  }
+
   return issues
 }
+
+/**
+ * Models often satisfy the grounding check by concatenating a source clause
+ * with the goal a second time ("事实让想……目标……") or by omitting the
+ * subject after a causal connector. Those strings are technically grounded
+ * but are not reviewable story proposals, so keep them out of origin=model.
+ */
+function getSystemDraftDirectionTextQualityIssue(
+  direction: SystemDraftDirection,
+  lockedGoal: string | null,
+): string | undefined {
+  const normalizedGoal = normalizeGoalText(lockedGoal ?? '')
+  for (const field of [
+    { label: '名称', value: direction.label },
+    { label: '前提', value: direction.premise },
+    { label: '取舍', value: direction.tradeoff },
+  ]) {
+    if (normalizedGoal.length >= 6 && countNormalizedPhraseOccurrences(field.value, normalizedGoal) > 1) {
+      return `${field.label}重复嵌套锁定目标，形成整句复述`
+    }
+    if (field.label === '前提' && /(?:让|使)(?:想|要|希望|准备|不知道|和|与|在)/u.test(field.value)) {
+      return `${field.label}缺少明确主体，出现模板化因果连接`
+    }
+    if (field.label === '取舍' && (field.value.match(/还是/gu)?.length ?? 0) !== 1) {
+      return `${field.label}包含多个或缺失的二选一连接，无法独立审阅`
+    }
+  }
+
+  return undefined
+}
+
+function countNormalizedPhraseOccurrences(value: string, phrase: string): number {
+  const normalizedValue = normalizeGoalText(value)
+  const normalizedPhrase = normalizeGoalText(phrase)
+  if (!normalizedValue || !normalizedPhrase) return 0
+
+  let count = 0
+  let offset = 0
+  while (offset <= normalizedValue.length - normalizedPhrase.length) {
+    const index = normalizedValue.indexOf(normalizedPhrase, offset)
+    if (index < 0) break
+    count += 1
+    offset = index + normalizedPhrase.length
+  }
+  return count
+}
+
 
 /**
  * Rich inputs must remain an author's material ledger, not a second place for
@@ -8034,7 +8104,7 @@ function getSystemDraftSeedScopeInstruction(
 }
 
 function getRichSystemDraftClosedLanguageInstruction(): string {
-  return ' 富输入采用封闭句式：每条 label、premise、tradeoff 都必须各自照抄一个两字以上的作者连续短语；premise 写成“暂定：[原文短语]”，tradeoff 写成“[原文短语]还是[另一原文短语或暂缓/保留]”。除“让、使、继续、暂缓、保留、重新判断、承担、取舍、选择、改变、期限、承诺”等连接语外，不写任何原文没有的意图、权利、评价、归属或关系结论；只有作者明确写出期限时才可使用“期限、时限、窗口、倒计时”等时间语义。'
+  return ' 富输入采用封闭句式：每条 label、premise、tradeoff 都必须各自照抄一个两字以上的作者连续短语；premise 写成“暂定：[原文短语]”，tradeoff 写成“[本分支原文短语]还是[另一原文短语或暂缓/保留]”。同一字段内锁定目标只能出现一次，禁止把原文整句接上同一个目标再重复一遍；禁止“让想、使想、让要、使要、让和、使和、让在、使在”等缺少主体的连接，因果句必须明确写出主角或主体。除“让、使、继续、暂缓、保留、重新判断、承担、取舍、选择、改变、期限、承诺”等连接语外，不写任何原文没有的意图、权利、评价、归属或关系结论；只有作者明确写出期限时才可使用“期限、时限、窗口、倒计时”等时间语义。'
 }
 
 function buildSystemDraftDirectionRecoveryPrompt(
@@ -8131,7 +8201,7 @@ function buildRichSystemConflictCoreDraftRepairPrompt(
     '你是故事结构修复器。只输出严格 JSON，不要 Markdown、解释或额外字段。',
     '这是信息丰富输入，作者原文是唯一事实源。上一版没有通过事实边界；不要重复失败词，也不要自行换成价值、意义、归属、权限、责任或关系结论。',
     '三条方向必须恰好存在，mechanismType 互不相同。每条 premise 必须以“暂定：”开头；每条 tradeoff 必须只由两个短语组成“甲还是乙”。除作者锚点和“暂定、让、使、停住、继续、必须、取舍、选择、调整、处理方式、暂缓、保留、重新判断”外，不要加入任何词。',
-    '每个作者锚点必须逐字复制；不要补写场景、物件、人物意图、权限、时间语义或结果。若模板的同一目标出现在多条方向中，只是共享目标，不是新增事实。',
+    '每个作者锚点必须逐字复制；不要补写场景、物件、人物意图、权限、时间语义或结果。若模板的同一目标出现在多条方向中，只是共享目标，不是新增事实。同一字段不得把目标重复嵌套；不要输出“让想、使想、让和、使在”等缺少主体的句式。每条 tradeoff 必须承接自己 premise 中的事实锚点，不能只写“目标还是暂缓”。',
     `上一轮修复状态：${repairMessage}`,
     `用户原始念头（只用于核对锚点）：${idea}`,
     `锁定目标与事实（只能逐字复制）：${JSON.stringify({ goal: seed.lockedGoal, facts: seed.lockedFacts })}`,
