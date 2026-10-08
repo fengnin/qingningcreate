@@ -2763,7 +2763,7 @@ test('rejects rich model directions that hide new value or authority conclusions
         label: '周五交稿',
         mechanismType: 'window-pressure',
         premise: '暂定：林澈答应在周五前把祖母的手稿交给出版社',
-        tradeoff: '在周五前把祖母的手稿交给出版社，还是暂缓提交',
+        tradeoff: '在周五前把祖母的手稿交给出版社，还是暂缓处理最后一页缺失',
       },
       {
         label: '最后一页缺失',
@@ -2861,7 +2861,7 @@ test('rejects rich model directions that hide new value or authority conclusions
   abstractTradeoffSides.directions = abstractTradeoffSides.directions!.map((direction, index) => ({
     ...direction,
     tradeoff: [
-      '和姐姐一起保住父亲留下的书店，还是暂缓行动',
+      '和姐姐一起保住父亲留下的书店，还是姐姐准备把店卖掉',
       '保留承诺，还是和姐姐一起保住父亲留下的书店',
       '重新判断，还是姐姐准备把店卖掉',
     ][index]!,

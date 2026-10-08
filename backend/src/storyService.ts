@@ -3993,7 +3993,7 @@ function describeSystemDraftGenerationFailure(error: unknown): string {
   }
 
   if (/重复嵌套锁定目标|模板化因果连接|多个或缺失的二选一|承接本分支前提|反复使用同一事实锚点/u.test(error.message)) {
-    return '删除同一字段里的目标复述，因果句补出明确主体；每条取舍必须承接本分支前提的原文锚点，并且只保留一个“还是”。'
+    return '删除同一字段里的目标复述，因果句补出明确主体；每条取舍必须承接本分支前提的原文锚点，并且只保留一个“还是”，不能只写“目标还是暂缓”。'
   }
 
   return error.message
@@ -4187,6 +4187,7 @@ function collectSystemDraftMinimalAssumptionIssues(
       const textQualityIssue = getSystemDraftDirectionTextQualityIssue(
         direction,
         seed.lockedGoal,
+        !requireCreativeHook,
       )
       if (textQualityIssue) issues.push(`第 ${index + 1} 条分支${textQualityIssue}`)
     }
@@ -4260,6 +4261,7 @@ function collectSystemDraftMinimalAssumptionIssues(
 function getSystemDraftDirectionTextQualityIssue(
   direction: SystemDraftDirection,
   lockedGoal: string | null,
+  richInput = false,
 ): string | undefined {
   const normalizedGoal = normalizeGoalText(lockedGoal ?? '')
   for (const field of [
@@ -4276,9 +4278,25 @@ function getSystemDraftDirectionTextQualityIssue(
     if (field.label === '取舍' && (field.value.match(/还是/gu)?.length ?? 0) !== 1) {
       return `${field.label}包含多个或缺失的二选一连接，无法独立审阅`
     }
+    if (field.label === '取舍' && richInput && isGoalVersusGenericTradeoff(field.value, normalizedGoal)) {
+      return `${field.label}只重复目标并配上泛化暂缓，尚未形成具体两端`
+    }
   }
 
   return undefined
+}
+
+function isGoalVersusGenericTradeoff(value: string, normalizedGoal: string): boolean {
+  if (!normalizedGoal) return false
+  const parts = value
+    .replace(/^暂定[：:]?/u, '')
+    .split('还是')
+    .map((part) => normalizeGoalText(part))
+    .filter(Boolean)
+  if (parts.length !== 2) return false
+  const generic = /^(?:暂缓|暂不|继续|保留|放弃)(?:决定|行动|目标|处理|提交)?$/u
+  return parts.some((part) => part.includes(normalizedGoal))
+    && parts.some((part) => generic.test(part))
 }
 
 function countNormalizedPhraseOccurrences(value: string, phrase: string): number {

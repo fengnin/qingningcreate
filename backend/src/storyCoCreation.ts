@@ -422,6 +422,9 @@ function buildCurveModelRepairInstruction(error: AppError): string {
   if (/sourceFactIds|原文锚点/u.test(reason)) {
     return '逐条核对事实 ID：每个节点只列 detail 中逐字出现的作者短语对应的 ID；没有照抄锚点的材料不要列入该节点。'
   }
+  if (/重复嵌套锁定目标|模板化因果连接|重复拼接了时间前缀|递归包成理解结论/u.test(reason)) {
+    return '每个节点内目标只出现一次；不要把“想、要、在”重新拼进目标，也不要输出“在在、让在、使在、让想、使想”。因果句必须写出主体并直接承接作者锚点。'
+  }
   if (/戏剧力量「反差」.*trigger\/escalation/u.test(reason)) {
     return '反差早期节点必须把两个作者锚点组成事实因果句：例如“[条件]让[目标]无法按已确认条件推进”或“[条件]反而让[目标]停住”。不要只写孤立的“原有安排/失效”，不要新增场景。'
   }
@@ -4052,11 +4055,12 @@ function buildCompactCurveRepairPrompt(
   const escalation = getCompactCurveRepairAnchor(slots.escalation)
   const subject = seed.subject?.trim() || '主角'
   const usesContrast = brief.dramaticForces.includes('contrast')
+  const goalForSentence = goal.replace(/^在(?=(?:周|今晚|明|展出|仪式|布置|交接))/u, '')
   const triggerDetail = usesContrast
-    ? `暂定：${trigger}让${subject}无法按已确认条件推进${goal}`
-    : `暂定：${trigger}使${subject}停住，仍需处理${goal}`
+    ? `暂定：${trigger}让${subject}无法按已确认条件推进${goalForSentence}`
+    : `暂定：${trigger}使${subject}停住，仍需处理${goalForSentence}`
   const escalationDetail = `暂定：继续${goal}要承担${escalation}的取舍`
-  const climaxDetail = `暂定：${subject}必须${goal.startsWith('在') ? '' : '在'}${goal}与${escalation}之间选择`
+  const climaxDetail = `暂定：${subject}必须在${goalForSentence}与${escalation}之间选择`
   const resolutionDetail = `暂定：这次选择调整${goal}在${escalation}下的处理方式`
   const sourceFacts = design.sourceFacts
     .filter((fact) => fact.disposition !== 'parked')
