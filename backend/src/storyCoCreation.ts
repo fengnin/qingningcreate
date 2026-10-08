@@ -342,6 +342,25 @@ export async function generateProvisionalCurve(
   excludedProposalDetails: readonly string[] = [],
 ): Promise<ProvisionalCurve> {
   const design = createStoryDesignRecord(idea, seed)
+  // A rich author premise needs a goal plus two genuinely different pressures
+  // before an online model can make a meaningful structural choice. Do this
+  // before spending retries so a sparse premise gets an actionable author
+  // question instead of a synthetic seven-beat answer.
+  if (!isModelDisabled()) {
+    const contract = getModelFactRoleCurveContract(design, seed, brief)
+    const readinessFailure = getModelFactRoleCurveReadinessFailure(contract)
+    if (readinessFailure) {
+      throw new AppError(
+        `${readinessFailure}请补充一项会让目标停住的具体条件，以及另一项需要承担的期限、承诺、关系或选择。`,
+        422,
+        'STORY_CURVE_NEEDS_AUTHOR_DETAIL',
+        undefined,
+        undefined,
+        undefined,
+        { stage: 'curve-generation-contract', reason: readinessFailure },
+      )
+    }
+  }
   let repairMessage: string | undefined
   let lastFailure: AppError | undefined
   let lastFailureDescription: string | undefined
@@ -356,7 +375,10 @@ export async function generateProvisionalCurve(
         // shared foundation only after every beat has passed grounding and
         // causal checks. A smaller response is less likely to drift into a
         // scene or invent a second schema.
-        maxTokens: 2_400,
+        // The contract is five identifiers and one enum. Limiting the answer
+        // prevents qwen-plus from ignoring the contract and expanding back
+        // into a five-beat prose draft.
+        maxTokens: 360,
         diagnosticStage: 'curve-generation',
       })
       return parseModelCurve(modelOutput, idea, seed, brief, design, excludedProposalDetails)
@@ -1993,6 +2015,28 @@ function parseModelCurve(
   design: StoryDesignRecord,
   excludedProposalDetails: readonly string[] = [],
 ): ProvisionalCurve {
+  // A free-text five-beat response lets qwen-plus keep re-splicing a deadline
+  // or a decision wrapper into every sentence ("在在周五前", "让想...").
+  // The normal production contract therefore asks the model to choose the
+  // factual roles and an ending tendency from a closed ledger. The server then
+  // renders those exact choices into reader-facing, still-provisional beats.
+  // This is not a fallback: an invalid role plan is rejected exactly like an
+  // invalid free-text curve, and only a valid model plan can retain origin=model.
+  if (isRecord(value) && value.curvePlan !== undefined) {
+    try {
+      const payload = buildModelFactRoleCurvePayload(value, idea, seed, brief, design)
+      return parseModelCurve(payload, idea, seed, brief, design, excludedProposalDetails)
+    } catch (error) {
+      if (error instanceof AppError) {
+        throw withModelDiagnostic(error, {
+          stage: 'curve-plan-validation',
+          reason: error.modelDiagnostic?.reason ?? error.message,
+          response: summarizeModelResponse(value),
+        })
+      }
+      throw error
+    }
+  }
   if (!isRecord(value) || !Array.isArray(value.beats)) {
     throwCurveModelValidationFailure('缺少 beats 数组', value)
   }
@@ -2002,6 +2046,14 @@ function parseModelCurve(
   const title = `${getShortIdeaLabel(idea)}的暂定主线`
   const parsedBeats: CurveBeat[] = []
   const seenKinds = new Set<CurveBeatKind>()
+
+  if (process.env.STORY_CURVE_DEBUG?.trim().toLowerCase() === 'true' && isRecord(value)) {
+    console.warn(`[curve-debug] candidate=${JSON.stringify({
+      beats: Array.isArray(value.beats)
+        ? value.beats.map((item) => isRecord(item) ? { kind: item.kind, detail: item.detail, sourceFactIds: item.sourceFactIds } : { shape: typeof item })
+        : { shape: typeof value.beats },
+    })}`)
+  }
 
   for (const item of value.beats) {
     if (!isRecord(item) || typeof item.kind !== 'string' || !isCurveBeatKind(item.kind)) {
@@ -2629,10 +2681,14 @@ function getCreativeDirectionEvidenceRequirements(brief: CreativeBrief): Creativ
         requirements.push({
           label: '戏剧力量「关系拉扯」',
           earlyKinds: earlyPressureKinds,
-          earlyPattern: /承诺|约定|关系|信任|分歧|边界|姐姐|姐妹|哥哥|弟弟|妹妹|队友|伙伴/u,
+           // Treat the author's concrete commitment/relationship wording as
+           // evidence too. Requiring only abstract labels such as "承诺" or
+           // "关系" rejected valid model sentences like "她答应不再改动作品"
+           // even though the source fact was copied verbatim.
+           earlyPattern: /承诺|答应|约定|保证|不再|关系|信任|分歧|边界|前队友|姐姐|姐妹|哥哥|弟弟|妹妹|队友|伙伴/u,
           earlyInstruction: '承诺、关系、信任、分歧、边界或已确认关系对象之一，说明目标受到的牵制',
           lateKinds: lateChoiceKinds,
-          latePattern: /承诺|约定|关系|信任|回应|分歧|边界|共同|姐姐|姐妹|哥哥|弟弟|妹妹|队友|伙伴/u,
+           latePattern: /承诺|答应|约定|保证|不再|关系|信任|回应|分歧|边界|前队友|共同|姐姐|姐妹|哥哥|弟弟|妹妹|队友|伙伴/u,
           lateInstruction: '回应、关系、信任、分歧、边界、共同或已确认关系对象之一，说明选择如何承担关系后果',
         })
         break
@@ -2967,7 +3023,10 @@ function getModelGoalAnchor(value: string): string {
     .replace(/^在[^，。！？；\n]{1,24}前(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择|判断))/u, '')
     .replace(/^于[^，。！？；\n]{1,24}(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择|判断))/u, '')
   const decision = normalized.match(/(?:决定|选择|判断|确认)(?:要不要|是否)(.+)$/u)
-  if (decision?.[1]?.trim()) return `要不要${decision[1].trim()}`
+  // The deadline/decision wrapper belongs to the source fact.  The compact
+  // handle is only the action that can be embedded after a causal verb; keeping
+  // “要不要” here made models produce awkward forms such as “推进要不要删…”.
+  if (decision?.[1]?.trim()) return decision[1].trim()
   return normalized || value.trim()
 }
 
@@ -3933,25 +3992,20 @@ const curveGenerationRepairSystemPrompt = `你是故事结构校验修复器，�
 // combined beat/foundation schema. The server derives the shared foundation
 // from these validated beats below, so the model never gets a second design
 // map that could drift from the reviewed curve.
-const compactCurveGenerationSystemPrompt = `你是故事共创编辑，只负责提出可审阅的抽象故事结构，不写小说。
+const compactCurveGenerationSystemPrompt = `你是故事共创编辑，只负责从作者已经写出的事实中选择一条可审阅的因果结构，不写小说，也不写曲线文案。
 
-只输出一个 JSON 对象，不能有 Markdown、解释或额外键。对象只有 title 和 beats；beats 必须恰好 5 项，顺序固定为 current-state、trigger、escalation、climax-choice、resolution。每项只能有 kind、detail、sourceFactIds 三个键；sourceFactIds 只能使用用户材料中给出的真实 ID，不能创造 ID。服务端会补充节点标题、依赖关系、因果锚点和共享 foundation，不要输出 foundation。
+只输出一个 JSON 对象，不能有 Markdown、解释或额外键。对象必须严格是：{"curvePlan":{"triggerFactId":"source-fact ID","escalationFactId":"source-fact ID","choiceFactId":"source-fact ID","resolutionMode":"allowed mode"}}。不要输出 title、beats、foundation、自然语言句子或任何作者未写出的故事内容。即使无法判断，也必须返回 curvePlan 这个对象，绝不能返回 beats。
 
-current-state 只能概括用户已写出的当前处境。其余四项必须以“暂定：”开头，各写一个不超过 90 字、可被作者逐字审阅的抽象因果句：trigger 只说明一个已确认条件怎样使目标停住；escalation 使用不同的已确认条件，说明继续目标要承担什么取舍；climax-choice 写出主体在两端之间的主动选择；resolution 必须同时写出一个原文目标和另一项原文期限、承诺或关系，说明这个目标在该条件下需要怎样调整或不能继续。只用用户材料中的目标、期限、承诺、关系和对象；不要新增场景动作、对白、未经确认的设备操作、文件流程、人物姓名、精确数字、确定的他人回应或已经发生的结果。作者已明确的物件、期限和关系可以作为条件逐字保留，不能为了抽象而换成“某个安排”后继续声称承接原事实。事实锚点后不得附加作者未写出的价值、意义、归属、权限、关系边界、责任或修复结论，除非该概念逐字出现在作者材料中。禁止使用“已经完成、已经解决、最终得到、终于、结果是”等既成结果写法；每一项都必须保持尚待作者确认。
+你要做的是可审核的结构选择：triggerFactId 和 escalationFactId 必须是两个不同的、已存在的作者事实，前者是让目标停住的直接条件，后者是继续目标时必须面对的另一项条件；choiceFactId 必须是作者明确目标所在的事实。resolutionMode 只能从用户消息列出的 allowed modes 中选一个。不要用同一个事实填两个压力槽位，不要把目标本身误当作两项压力，也不要因为常识补写人物意图、价值、权限、关系结论、场景、结果或新物件。
 
-避免模板化：不要把同一整句目标复制到四个节点。每个节点都要有不同的因果动词和不同的事实锚点；resolution 不能只把“选择”换成“重新理解”，而要明确说明一个原文目标如何受另一项原文条件影响。不要写“使提交目标停住”“承担某事实的取舍”这种脱离主体和两端的空壳句；把作者原文中的主体、对象或承诺放回句子中。
+服务端会把你选中的原文锚点呈现为“暂定”的系统提案，并独立校验事实追溯、因果差异和作者已选方向。任何不在允许列表中的 ID、模式或重复角色都会被拒绝；无法诚实选择时，仍只返回上述 JSON 形状。`
 
-方向要求：严格遵守用户请求中列出的“方向层级硬约束”。每个所选方向都要先改变目标受阻或取舍升级，再改变后续的主动选择或变化；方向词只能作为抽象因果连接，不能代替作者事实，也不能在任意节点机械重复。反差的早期节点必须写成“[作者条件]让[作者目标]无法按已确认条件推进”或“[作者条件]反而让[作者目标]停住”这类事实因果句；后期节点必须把两项作者事实写成“[作者目标]不能再按[作者条件]继续”或“调整[作者目标]在[作者条件]下的处理方式”。不要只孤立写“原有安排”“失效”“不再足够”，也不要把作者的问题再包成“重新理解……要不要……”；这些句式会把模板结论误当成故事事实。关系方向只能复用作者原句（例如“答应过不再替姐姐做决定”“姐姐准备把店卖掉”），禁止新增“决定权、署名权、信任边界、共同责任、共同署名、共同创作”等抽象结论。成长必须在 climax-choice 出现“选择、承担、承认、放下、接受、重新”之一，并在 resolution 出现“改变、成长、理解、学会、调整、重新”之一。严格按这个最小形状输出：{"title":"暂定主线","beats":[{"kind":"current-state","detail":"用户当前处境","sourceFactIds":["source-fact-1"]},{"kind":"trigger","detail":"暂定：主体的已确认条件使目标停住","sourceFactIds":["source-fact-2"]},{"kind":"escalation","detail":"暂定：另一条已确认承诺使继续目标必须承担取舍","sourceFactIds":["source-fact-3"]},{"kind":"climax-choice","detail":"暂定：主体必须在目标的一端与承诺的另一端之间选择","sourceFactIds":["source-fact-3"]},{"kind":"resolution","detail":"暂定：这次选择调整原文目标在原文承诺下的处理方式","sourceFactIds":["source-fact-2"]}]}`
+const compactCurveGenerationRepairSystemPrompt = `你是故事结构修复器。上一版的自然语言曲线未通过事实或因果校验；本轮不要改写句子，也不要解释失败原因。只重新选择作者事实角色。
 
-const compactCurveGenerationRepairSystemPrompt = `你是故事结构修复器。只输出一个 JSON 对象，不能有 Markdown、解释或额外键；对象只有 title 和 beats。beats 必须恰好 5 项，顺序固定为 current-state、trigger、escalation、climax-choice、resolution；每项只能有 kind、detail、sourceFactIds 三个键，sourceFactIds 只能复制输入中的真实 ID。不要输出 foundation、title 以外的节点字段或任何场景化内容。current-state 保留用户事实；其余 detail 以“暂定：”开头，每项只写一个抽象因果关系，并分别推进目标受阻、取舍升级、主动选择和选择后的变化。每个节点内锁定目标只能出现一次；不得使用“在在、让在、使在、让想、使想”等模板拼接，因果句必须明确写出主体。
+只输出一个 JSON 对象，不能有 Markdown、解释或额外键。对象必须严格是：{"curvePlan":{"triggerFactId":"source-fact ID","escalationFactId":"source-fact ID","choiceFactId":"source-fact ID","resolutionMode":"allowed mode"}}。不得输出 title、beats、foundation 或任何自然语言故事内容。上一版若输出 beats，本轮必须改为 curvePlan。
 
-事实追溯是硬约束：单个 beat 只能列出 detail 中可逐字核对的 sourceFactIds；每个所列 ID 都必须在 detail 中照抄其原文的一个有区分度连续短语，至少三个字。没有写进 detail 的材料不要列 ID；不要为了凑覆盖而把“原有安排”“既有条件”“当前问题”等泛化句挂到一个事实 ID。事实锚点后不得附加作者未写出的价值、意义、归属、权限、关系边界、责任或修复结论，除非该概念逐字出现在对应作者材料中。current-state 可以保留全部作者事实，其他节点只列自己实际使用的事实。
+triggerFactId 和 escalationFactId 必须是两个不同的允许压力事实；choiceFactId 必须来自允许目标事实；resolutionMode 必须来自 allowed modes。只根据用户消息中提供的逐字原文锚点选择，不得新增人物意图、价值、权限、关系结论、场景、结果、物件或时间。`
 
-禁止把任何未列在作者材料中的具体名词、人物状态、过往信息、操作步骤、精确量化或既成结果写进曲线。已由作者明确写出的期限、承诺、关系、物件或目标动作可以逐字作为条件保留，但不能扩写成场景或操作。
-
-方向词必须以用户请求中的“方向层级硬约束”为准；只可作为紧贴原文锚点的抽象连接，不能自行套用未选择的反差、成长或其他题材词。反差早期只用“[作者条件]让[作者目标]无法按已确认条件推进/反而让目标停住”，后期只用“[作者目标]不能再按[作者条件]继续/调整[作者目标]在[作者条件]下的处理方式”；不要把“失效、不再足够、重新理解……要不要……”单独写成结论。关系方向只能照抄作者的承诺和关系事实，不能写决定权、署名权、信任边界、共同责任或共同创作。成长的选择节点必须写“选择、承担、承认、放下、接受或重新”之一，变化节点必须写“改变、成长、理解、学会、调整或重新”之一。严格遵守上一轮失败原因，整条曲线重新写，不要复制上一版句子。
-
-安全句式是：trigger=“暂定：[原文期限/承诺/关系]使[原文目标]停住”；escalation=“暂定：继续[原文目标]会承担[原文承诺/关系/条件]的取舍”；climax-choice=“暂定：[主体]必须在[原文目标]与[原文承诺/关系]之间选择”；resolution=“暂定：这次选择调整[原文目标]在[原文期限/承诺/关系]下的处理方式”。方括号必须替换为输入中的短语，不能新增名词。`
 
 function buildCurveGenerationPrompt(
   idea: string,
@@ -3984,39 +4038,23 @@ function buildCompactCurveGenerationPrompt(
     return buildCompactCurveRepairPrompt(idea, seed, brief, design, excludedProposalDetails, repairMessage)
   }
 
-  const sourceFacts = design.sourceFacts.map((fact) => ({
-    id: fact.id,
-    text: fact.text,
-    anchor: getModelCurveFactAnchor(fact.text),
-  }))
-  const goalAnchor = getModelGoalAnchor(seed.lockedGoal ?? '')
-  const directionTerms = [
-    ...brief.dramaticForces.map((force) => dramaticForceLabels[force]),
-    ...brief.tones.map((tone) => creativeToneLabels[tone]),
-  ]
-  const directionRequirements = getModelDirectionRequirements(brief)
-  const sourceFactIds = sourceFacts.map((fact) => fact.id)
+  const contract = getModelFactRoleCurveContract(design, seed, brief)
   return [
-    '只输出 JSON：对象只能有 title、beats；beats 恰好 5 项，每项只能有 kind、detail、sourceFactIds。',
-    'kind 顺序固定：current-state、trigger、escalation、climax-choice、resolution。不要输出 foundation、dependsOn、causalAnchor、title 或其他键。',
-    'current-state 只保留作者原文；其他四项以“暂定：”开头，每项是一句抽象因果，不写场景、动作、对白、未经确认的道具、数字或既成结果。作者原文已明确的期限、承诺、关系、人物或物件可以作为条件直接保留，不能用泛化词替换后又声称保留了该事实。',
-    `作者选择的方向：${directionTerms.join('、') || '开放方向'}；每个所选方向都必须先影响目标受阻或取舍升级，再影响主动选择或结局变化，并让每项推进不同因果。`,
-    `方向层级硬约束（列出的词是允许的抽象连接，不是新增事实）：${directionRequirements || '保持抽象因果并避免模板重复。'}`,
-    `方向节点最低可审阅形状：${getModelDirectionMarkerInstruction(brief)}`,
-    `安全结构：trigger=主体+一个已确认条件+目标为什么停住；escalation=不同的已确认条件+继续目标要承担的取舍；climax-choice=主体在两端之间的主动选择；resolution=这次选择如何调整一个原文目标在另一项原文期限、承诺或关系下的处理方式。四个节点必须各有不同的因果动词，不得把同一整句目标复制到每个节点。同一节点内锁定目标最多出现一次。可嵌入句子的目标动作锚点是“${goalAnchor || '作者目标'}”；不要把完整锁定目标的期限前缀再次拼到这个锚点前，不得生成“在在、让在、使在、让想、使想”，因果连接必须明确写出主体。`,
-    `用户原始想法：${idea}`,
-    `原始材料（sourceFactIds 只能从这里复制；anchor 是可逐字核对的原文短语）：${JSON.stringify(sourceFacts)}`,
-    `事实覆盖清单：整条曲线（current-state 可承接背景）必须覆盖每个 ID：${sourceFactIds.join('、') || '无'}。sourceFactIds 是可审阅的事实声明：单个提案节点只列 detail 中实际出现的事实 ID；每个 ID 都必须在 detail 中保留其 anchor 或原文的另一个有区分度连续短语（至少三个字）。没有写进 detail 的材料不要列 ID；不能把“原有安排”“既有条件”“当前问题”等泛化句挂到任何未出现的事实 ID。`,
-    buildModelCurveFactAnchoringContract(design, seed),
-    `已确认的原始信息：${JSON.stringify({ subject: seed.subject, activeSituation: seed.activeSituation, lockedGoal: seed.lockedGoal, goalAnchor, lockedFacts: seed.lockedFacts })}`,
-    `创意方向：${JSON.stringify(brief)}`,
-    ...(excludedProposalDetails.length ? [`已拒绝提案，不能重现：${JSON.stringify(excludedProposalDetails)}`] : []),
-    ...(repairMessage ? [
-      `本轮修复要求：${repairMessage}`,
-      `本轮只允许复用这些作者原文锚点：${JSON.stringify({ goal: seed.lockedGoal, goalAnchor, facts: seed.lockedFacts })}。目标动作只使用 goalAnchor 一次，不要重新拼接 lockedGoal 的期限前缀。方向层级硬约束中列出的抽象词可以作为连接词，但必须紧贴这些锚点，不能独立变成新事实。请整条重写，只输出上述 5 个 beat；不要从亲属、身份、物件或常识推断额外背景、人物意图、具体场景或结果，也不要沿用上一轮句子。`,
-      buildModelFactRepairMap(design),
-    ] : []),
-    `严格按示例形状输出：{"title":"暂定主线","beats":[{"kind":"current-state","detail":"作者当前处境","sourceFactIds":["source-fact-1"]},{"kind":"trigger","detail":"暂定：主体的已确认条件使${goalAnchor || '作者目标'}停住","sourceFactIds":["source-fact-2"]},{"kind":"escalation","detail":"暂定：继续${goalAnchor || '作者目标'}必须承担另一条已确认条件的取舍","sourceFactIds":["source-fact-3"]},{"kind":"climax-choice","detail":"暂定：主体必须在${goalAnchor || '作者目标'}与已确认承诺之间选择","sourceFactIds":["source-fact-3"]},{"kind":"resolution","detail":"暂定：这次选择调整${goalAnchor || '作者目标'}在已确认承诺下的处理方式","sourceFactIds":["source-fact-2"]}]}`,
+    '只输出 curvePlan JSON；不要输出任何自然语言曲线、title、beats、foundation 或其他键。',
+    '事实审阅规则：按以下事实锚点写入角色选择（按以下事实锚点写）；单个提案节点只列它实际承接的作者事实。服务端会根据已选 ID 生成可审阅句子，不能由模型补写新事实。',
+    '方向层级硬约束：触发和升级必须使用不同压力；高潮选择和结局必须同时承接目标与升级压力。所选方向必须改变至少三个因果节点，不能只替换形容词。',
+    `用户原始想法（仅供核对，不要复述）：${idea}`,
+    `作者材料（只能选择这里的 ID，anchor 是逐字原文）：${JSON.stringify(contract.sourceFacts)}`,
+    `选择合同：${JSON.stringify({
+      allowedTriggerFactIds: contract.pressureFactIds,
+      allowedEscalationFactIds: contract.pressureFactIds,
+      allowedChoiceFactIds: contract.choiceFactIds,
+      allowedResolutionModes: contract.resolutionModes,
+      required: 'triggerFactId 与 escalationFactId 必须不同；二者都不能等于 choiceFactId，除非只有一个作者事实且合同明确允许。',
+    })}`,
+    `作者选择的方向：${[...brief.dramaticForces.map((force) => dramaticForceLabels[force]), ...brief.tones.map((tone) => creativeToneLabels[tone])].join('、') || '开放方向'}。选择要优先让不同的作者压力进入不同层级，而不是重复同一目标。`,
+    ...(excludedProposalDetails.length ? [`已拒绝提案，不能选择会重现它们的处理方式：${JSON.stringify(excludedProposalDetails)}`] : []),
+    '严格输出形状：{"curvePlan":{"triggerFactId":"source-fact-2","escalationFactId":"source-fact-3","choiceFactId":"source-fact-1","resolutionMode":"adjust-goal-under-constraint"}}',
   ].join('\n')
 }
 
@@ -4037,10 +4075,14 @@ function getCompactCurveRepairSlots(
   if (!goal) return undefined
 
   const trigger = sourceFacts.find((fact) => (
-    /(?:今晚|明早|明天|周[一二三四五六日天]|归还|截止|期限|倒数|必须在[^，。！？；]{0,24}前|要在[^，。！？；]{0,24}前)/u.test(fact.text)
-  )) ?? sourceFacts.find((fact) => /(?:答应|承诺|约定|保证|不再|缺失|卖掉|无法|不能|冲突|分歧)/u.test(fact.text))
+    fact.id !== goal?.id
+      && /(?:今晚|明早|明天|周[一二三四五六日天]|归还|截止|期限|倒数|必须在[^，。！？；]{0,24}前|要在[^，。！？；]{0,24}前)/u.test(fact.text)
+  )) ?? sourceFacts.find((fact) => (
+    fact.id !== goal?.id
+      && /(?:答应|承诺|约定|保证|不再|缺失|卖掉|无法|不能|冲突|分歧)/u.test(fact.text)
+  )) ?? sourceFacts.find((fact) => fact.id !== goal?.id)
   const escalation = sourceFacts.find((fact) => (
-    fact.id !== trigger?.id && /(?:缺失|卖掉|无法|不能|冲突|分歧|答应|承诺|约定|保证|不再|关系|姐姐|朋友|队友|家人)/u.test(fact.text)
+    fact.id !== trigger?.id && /(?:缺失|卖掉|无法|不能|冲突|分歧|答应|承诺|约定|保证|不再|关系|姐姐|朋友|队友|家人|不知道|是否|按承诺)/u.test(fact.text)
   )) ?? sourceFacts.find((fact) => fact.id !== trigger?.id) ?? trigger
   if (!trigger || !escalation) return undefined
   return { trigger, escalation, goal }
@@ -4058,53 +4100,23 @@ function buildCompactCurveRepairPrompt(
   excludedProposalDetails: readonly string[],
   repairMessage: string,
 ): string {
-  const slots = getCompactCurveRepairSlots(design, seed)
-  if (!slots) {
-    return [
-      '只输出 JSON：对象只能有 title、beats；beats 恰好 5 项，每项只能有 kind、detail、sourceFactIds。',
-      `上一轮未通过校验：${repairMessage}。只使用作者原文，不要新增价值、意义、归属、权限、关系、人物意图、场景或结果。`,
-      `用户原始想法：${idea}`,
-      `作者材料：${JSON.stringify(design.sourceFacts.filter((fact) => fact.disposition !== 'parked').map((fact) => ({ id: fact.id, text: fact.text })))}`,
-      'current-state 保留原始处境；其余节点分别写目标受阻、取舍升级、主动选择和处理方式调整。',
-    ].join('\n')
-  }
-
-  // Use the action-only goal handle in repair templates.  Copying the full
-  // deadline-bearing lockedGoal here is what produced "在在" and repeated
-  // decision clauses in otherwise grounded repairs.
-  const goal = getModelGoalAnchor(seed.lockedGoal ?? '') || getCompactCurveRepairAnchor(slots.goal)
-  const trigger = getCompactCurveRepairAnchor(slots.trigger)
-  const escalation = getCompactCurveRepairAnchor(slots.escalation)
-  const subject = seed.subject?.trim() || '主角'
-  const usesContrast = brief.dramaticForces.includes('contrast')
-  const goalForSentence = goal
-  const triggerDetail = usesContrast
-    ? `暂定：${trigger}让${subject}无法按已确认条件推进${goalForSentence}`
-    : `暂定：${trigger}使${subject}停住，仍需处理${goalForSentence}`
-  const escalationDetail = `暂定：继续${goal}要承担${escalation}的取舍`
-  const climaxDetail = `暂定：${subject}必须在${goalForSentence}与${escalation}之间选择`
-  const resolutionDetail = `暂定：这次选择调整${goal}在${escalation}下的处理方式`
-  const sourceFacts = design.sourceFacts
-    .filter((fact) => fact.disposition !== 'parked')
-    .map((fact) => ({ id: fact.id, text: fact.text, anchor: getCompactCurveRepairAnchor(fact) }))
-  const template = {
-    title: '暂定主线',
-    beats: [
-      { kind: 'current-state', detail: seed.activeSituation, sourceFactIds: sourceFacts.map((fact) => fact.id) },
-      { kind: 'trigger', detail: triggerDetail, sourceFactIds: [slots.trigger.id] },
-      { kind: 'escalation', detail: escalationDetail, sourceFactIds: [slots.escalation.id] },
-      { kind: 'climax-choice', detail: climaxDetail, sourceFactIds: [slots.goal.id, slots.escalation.id] },
-      { kind: 'resolution', detail: resolutionDetail, sourceFactIds: [slots.goal.id, slots.escalation.id] },
-    ],
-  }
-
+  const contract = getModelFactRoleCurveContract(design, seed, brief)
   return [
-    '只输出 JSON，不要 Markdown、解释或额外键。不要写小说。',
-    `上一轮未通过校验：${repairMessage}。这次不要自行换词或补写语义；只复制下方模板中的作者锚点。`,
-    `硬规则：除模板中的逐字作者原文锚点和“暂定、让、使、主角、无法按已确认条件推进、停住、继续、要承担、取舍、必须、与、之间、选择、这次选择、调整、在、下、处理方式”外，不得加入任何词。目标动作锚点是“${goalForSentence}”，不要把完整锁定目标的期限前缀重新拼回去；禁止“在在、让在、使在、让想、使想”。因果句必须先写主角，尤其不能写价值、意义、归属、完整、遗愿、权利、关系结论、流程、场景或结果。`,
-    `作者材料（只可从这里核对）：${JSON.stringify(sourceFacts)}`,
-    `严格复制这个结构并只返回它：${JSON.stringify(template)}`,
-    ...(excludedProposalDetails.length ? [`已拒绝提案不能重现：${JSON.stringify(excludedProposalDetails)}`] : []),
+    '只输出 curvePlan JSON：不得输出 beats、template、title、foundation、解释或任何自然语言故事内容。',
+    '事实审阅规则：按以下事实锚点写入角色选择（按以下事实锚点写）；单个提案节点只列它实际承接的作者事实。不要补写句子。',
+    '方向层级硬约束：触发和升级必须使用不同压力；高潮选择和结局必须同时承接目标与升级压力。',
+    `本轮校验摘要（只用于避开同类错误，不得复述到结果）：${repairMessage}`,
+    `用户原始想法（仅供核对）：${idea}`,
+    `逐字原文锚点（只能从这里选择 ID）：${JSON.stringify(contract.sourceFacts)}`,
+    `选择合同：${JSON.stringify({
+      allowedTriggerFactIds: contract.pressureFactIds,
+      allowedEscalationFactIds: contract.pressureFactIds,
+      allowedChoiceFactIds: contract.choiceFactIds,
+      allowedResolutionModes: contract.resolutionModes,
+      required: 'triggerFactId 与 escalationFactId 必须不同，且不得把 choiceFactId 重复当作压力事实。',
+    })}`,
+    ...(excludedProposalDetails.length ? ['作者已经拒绝的提案不得通过选择同一事实角色或处理方式重新出现。'] : []),
+    '严格输出形状：{"curvePlan":{"triggerFactId":"source-fact-2","escalationFactId":"source-fact-3","choiceFactId":"source-fact-1","resolutionMode":"adjust-goal-under-constraint"}}',
   ].join('\n')
 }
 
@@ -4122,6 +4134,353 @@ function getModelCurveFactAnchor(value: string): string {
     ?? value.trim().replace(/^(?:却|但|同时|并且|她|他|我|我们)\s*/u, '')
   if (selected.length <= 42) return selected
   return selected.slice(0, 42)
+}
+
+const modelCurveResolutionModes = [
+  'adjust-goal-under-constraint',
+  'address-pressure-before-goal',
+  'keep-goal-open-under-pressure',
+] as const
+
+type ModelCurveResolutionMode = typeof modelCurveResolutionModes[number]
+
+interface ModelFactRoleCurveContract {
+  sourceFacts: Array<{ id: string, text: string, anchor: string }>
+  pressureFactIds: string[]
+  choiceFactIds: string[]
+  resolutionModes: ModelCurveResolutionMode[]
+}
+
+/**
+ * The model chooses roles from a closed author ledger. It is deliberately not
+ * a deterministic curve plan: it has to distinguish two different pressures,
+ * identify the fact carrying the author's goal, and choose how the ending
+ * holds that pressure open. The server only renders those validated choices
+ * so a malformed free-text answer cannot become a fabricated story fact.
+ */
+function getModelFactRoleCurveContract(
+  design: StoryDesignRecord,
+  seed: StorySeed,
+  brief: CreativeBrief,
+): ModelFactRoleCurveContract {
+  const facts = design.sourceFacts.filter((fact) => fact.disposition !== 'parked')
+  const choiceFacts = facts.filter((fact) => (
+    Boolean(seed.lockedGoal)
+      && hasModelSourceFactEvidence(seed.lockedGoal!, fact.text)
+  ))
+  // createStoryDesignRecord adds the locked goal to its ledger when it is not
+  // already represented by a richer author clause. Keep the fallback narrow
+  // for legacy records only; a plan still has to show the selected goal fact.
+  const resolvedChoiceFacts = choiceFacts.length
+    ? choiceFacts
+    : facts.filter((fact) => Boolean(seed.lockedGoal) && normalizeCurveEvidence(fact.text).includes(normalizeCurveEvidence(seed.lockedGoal!)))
+  const choiceFactIds = resolvedChoiceFacts.map((fact) => fact.id)
+  const nonGoalFacts = facts.filter((fact) => !choiceFactIds.includes(fact.id))
+  // A date-only backdrop or a generic opening observation cannot honestly be
+  // promoted into a conflict simply because it is in the ledger. Prefer facts
+  // that actually establish a deadline, a promise, a relationship tension, an
+  // information gap, or a stated obstruction. If fewer than two exist, the
+  // caller asks the author for another concrete condition.
+  const pressureFacts = nonGoalFacts.filter(isModelCurvePressureFact)
+
+  const preferredModes: ModelCurveResolutionMode[] = brief.dramaticForces.includes('relationship-tension')
+    ? ['address-pressure-before-goal', 'adjust-goal-under-constraint']
+    : brief.dramaticForces.includes('cost')
+      ? ['adjust-goal-under-constraint', 'address-pressure-before-goal']
+      : brief.dramaticForces.includes('contrast')
+        ? ['adjust-goal-under-constraint', 'keep-goal-open-under-pressure']
+        : [...modelCurveResolutionModes]
+
+  return {
+    sourceFacts: facts.map((fact) => ({
+      id: fact.id,
+      text: fact.text,
+      anchor: getModelCurveFactAnchor(fact.text),
+    })),
+    pressureFactIds: pressureFacts.map((fact) => fact.id),
+    choiceFactIds,
+    resolutionModes: preferredModes,
+  }
+}
+
+function getModelFactRoleCurveReadinessFailure(contract: ModelFactRoleCurveContract): string | undefined {
+  if (!contract.choiceFactIds.length) {
+    return '当前想法还没有一条可逐字追溯的主角目标。'
+  }
+  if (contract.pressureFactIds.length < 2) {
+    return '当前想法还缺少两项可区分的阻碍、期限、承诺、关系或待决定条件。'
+  }
+  return undefined
+}
+
+function isModelCurvePressureFact(fact: StorySourceFact): boolean {
+  if (/(?:今晚|明早|明天|后天|今天|周[一二三四五六日天]|截止|期限|归还|必须在[^，。！？；]{0,24}前|要在[^，。！？；]{0,24}前|答应|承诺|约定|保证|不再|缺失|卖掉|无法|不能|不得|冲突|分歧|关系|姐姐|哥哥|弟弟|妹妹|队友|朋友|家人|不知道|不确定|犹豫|是否|要不要)/u.test(fact.text)) {
+    return true
+  }
+  // “看到/发现” alone is an observation, not a pressure. Promote it only
+  // when the same author clause also states a concrete absence, disagreement,
+  // or unresolved decision that can actually constrain the goal.
+  return /(?:发现|看到)/u.test(fact.text)
+    && /(?:缺失|卖掉|无法|不能|冲突|分歧|不知道|不确定|犹豫|是否|要不要)/u.test(fact.text)
+}
+
+function buildModelFactRoleCurvePayload(
+  value: Record<string, unknown>,
+  idea: string,
+  seed: StorySeed,
+  brief: CreativeBrief,
+  design: StoryDesignRecord,
+): Record<string, unknown> {
+  if (Object.keys(value).some((key) => key !== 'curvePlan')) {
+    throwCurveModelValidationFailure('curvePlan 模型合同不允许顶层额外字段', value)
+  }
+  const rawPlan = value.curvePlan
+  if (!isRecord(rawPlan)) {
+    throwCurveModelValidationFailure('curvePlan 必须是对象', value)
+  }
+  const allowedKeys = new Set(['triggerFactId', 'escalationFactId', 'choiceFactId', 'resolutionMode'])
+  if (Object.keys(rawPlan).some((key) => !allowedKeys.has(key))) {
+    throwCurveModelValidationFailure('curvePlan 包含不支持的字段', value)
+  }
+  const triggerFactId = rawPlan.triggerFactId
+  const escalationFactId = rawPlan.escalationFactId
+  const choiceFactId = rawPlan.choiceFactId
+  const resolutionMode = rawPlan.resolutionMode
+  if (
+    typeof triggerFactId !== 'string'
+    || typeof escalationFactId !== 'string'
+    || typeof choiceFactId !== 'string'
+    || typeof resolutionMode !== 'string'
+  ) {
+    throwCurveModelValidationFailure('curvePlan 缺少字符串事实角色或处理方式', value)
+  }
+
+  const contract = getModelFactRoleCurveContract(design, seed, brief)
+  const readinessFailure = getModelFactRoleCurveReadinessFailure(contract)
+  if (readinessFailure) throwCurveModelValidationFailure(readinessFailure, value)
+  if (!contract.pressureFactIds.includes(triggerFactId)) {
+    throwCurveModelValidationFailure(`curvePlan 的 triggerFactId 不是允许的压力事实“${triggerFactId}”`, value)
+  }
+  if (!contract.pressureFactIds.includes(escalationFactId)) {
+    throwCurveModelValidationFailure(`curvePlan 的 escalationFactId 不是允许的压力事实“${escalationFactId}”`, value)
+  }
+  if (!contract.choiceFactIds.includes(choiceFactId)) {
+    throwCurveModelValidationFailure(`curvePlan 的 choiceFactId 不是作者锁定目标事实“${choiceFactId}”`, value)
+  }
+  if (triggerFactId === escalationFactId) {
+    throwCurveModelValidationFailure('curvePlan 把同一条作者事实同时用作触发和升级，缺少因果差异', value)
+  }
+  if (!contract.resolutionModes.includes(resolutionMode as ModelCurveResolutionMode)) {
+    throwCurveModelValidationFailure(`curvePlan 的 resolutionMode 不在当前方向允许范围“${resolutionMode}”`, value)
+  }
+
+  const triggerFact = design.sourceFacts.find((fact) => fact.id === triggerFactId)
+  const escalationFact = design.sourceFacts.find((fact) => fact.id === escalationFactId)
+  const choiceFact = design.sourceFacts.find((fact) => fact.id === choiceFactId)
+  if (!triggerFact || !escalationFact || !choiceFact) {
+    throwCurveModelValidationFailure('curvePlan 引用了不存在的作者事实', value)
+  }
+
+  const goal = getCurvePlanGoalPhrase(seed, choiceFact)
+  const trigger = getCurvePlanPressurePhrase(triggerFact)
+  const escalation = getCurvePlanPressurePhrase(escalationFact)
+  if (!goal || !trigger || !escalation) {
+    throwCurveModelValidationFailure('curvePlan 没有提供可逐字承接的目标或压力锚点', value)
+  }
+
+  const subject = getStorySubject(seed)
+  const direction = getCurvePlanDirectionLanguage(brief)
+  const decision = getCurvePlanDecisionPhrase(goal)
+  const triggerDetail = `暂定：${trigger}让${subject}${direction.trigger}${decision}`
+  const escalationDetail = `暂定：若${subject}继续考虑${decision}，${direction.escalation}${escalation}`
+  const choiceDetail = getCurvePlanChoiceDetail(
+    subject,
+    goal,
+    escalation,
+    resolutionMode as ModelCurveResolutionMode,
+    direction.choiceSuffix,
+  )
+  const resolutionDetail = getCurvePlanResolutionDetail(
+    subject,
+    goal,
+    escalation,
+    resolutionMode as ModelCurveResolutionMode,
+    direction.resolutionSuffix,
+  )
+  const facts = design.sourceFacts.filter((fact) => fact.disposition !== 'parked')
+
+  return {
+    beats: [
+      {
+        kind: 'current-state',
+        detail: getCurrentState(seed, idea),
+        sourceFactIds: facts.map((fact) => fact.id),
+      },
+      { kind: 'trigger', detail: triggerDetail, sourceFactIds: [triggerFact.id, choiceFact.id] },
+      // Keep the pressure fact first so the derived foundation anchor remains
+      // the escalation condition instead of accidentally selecting the goal
+      // fact merely because it is also cited by this beat.
+      { kind: 'escalation', detail: escalationDetail, sourceFactIds: [escalationFact.id, choiceFact.id] },
+      {
+        kind: 'climax-choice',
+        detail: choiceDetail,
+        sourceFactIds: [escalationFact.id, choiceFact.id],
+      },
+      {
+        kind: 'resolution',
+        detail: resolutionDetail,
+        sourceFactIds: [escalationFact.id, choiceFact.id],
+      },
+    ],
+  }
+}
+
+function getCurvePlanGoalPhrase(seed: StorySeed, choiceFact: StorySourceFact): string {
+  const lockedGoal = seed.lockedGoal?.trim()
+  const source = lockedGoal && hasModelSourceFactEvidence(lockedGoal, choiceFact.text)
+    ? lockedGoal
+    : getModelCurveFactAnchor(choiceFact.text)
+  let normalized = source
+    .trim()
+    .replace(/^(?:当前(?:目标|想法)[：:]\s*)/u, '')
+    .replace(/^(?:想要|想|希望|打算|准备|计划)\s*/u, '')
+
+  // Keep the action/object that the author can review, while leaving the
+  // deadline and the decision wrapper to the surrounding sentence. This is
+  // what prevents forms such as “在在周五前” and “继续要不要删名”.
+  normalized = normalized
+    .replace(/^在[^，。！？；\n]{1,24}前(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择|判断))/u, '')
+    .replace(/^于[^，。！？；\n]{1,24}(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择|判断))/u, '')
+    .trim()
+  const decision = normalized.match(/(?:决定|选择|判断|确认)(?:要不要|是否)(.+)$/u)
+  if (decision?.[1]?.trim()) return decision[1].trim()
+  const intentionDecision = normalized.match(/(?:在[^，。！？；\n]{0,24})?(?:决定|选择|判断|确认)(?:要不要|是否)(.+)$/u)
+  if (intentionDecision?.[1]?.trim()) return intentionDecision[1].trim()
+  return normalized || source.trim()
+}
+
+function getCurvePlanPressurePhrase(fact: StorySourceFact): string {
+  const text = fact.text
+    .trim()
+    .replace(/^(?:却|但|同时|并且|然后|随后)\s*/u, '')
+  const explicitCommitmentDecision = text.match(/((?:按|依照|按照)(?:原有)?承诺[^，。！？；\n]{0,20})/u)
+  if (explicitCommitmentDecision?.[1]?.trim()) return explicitCommitmentDecision[1].trim()
+  const commitment = text.match(/(?:答应过|答应|承诺|约定|保证)(.+)$/u)
+  if (commitment?.[1]?.trim()) {
+    const marker = text.match(/(?:答应过|答应|承诺|约定|保证)/u)?.[0] ?? '承诺'
+    return `${marker}${commitment[1].trim()}`
+  }
+  const decision = text.match(/(?:不知道|不确定|犹豫)?(?:是否|要不要)(.+)$/u)
+  if (decision?.[1]?.trim()) return decision[1].trim().replace(/^该/u, '')
+  // Keep the object before a deadline marker. Returning only “今晚要归还”
+  // loses the actual pressure carrier and makes different facts look alike.
+  if (/(?:今晚|明早|明天|后天|今天|周[一二三四五六日天]|本周|下周|月底|月末|截止|期限|归还|必须在[^，。！？；]{0,24}前|要在[^，。！？；]{0,24}前)/u.test(text)) {
+    return text
+      .replace(/^(?:他|她|我|我们|林澈|沈乔|周岚)\s*/u, '')
+      .trim()
+  }
+  const discovery = text.match(/(?:发现|看到)(.+)$/u)
+  if (discovery?.[1]?.trim()) return discovery[1].trim()
+  const relation = text.match(/((?:姐姐|哥哥|弟弟|妹妹|朋友|队友|家人|同事|伴侣)[^，。！？；\n]{0,28})/u)
+  if (relation?.[1]?.trim()) return relation[1].trim()
+  return text
+    .replace(/^(?:他|她|我|我们)\s*/u, '')
+    .trim()
+}
+
+function getCurvePlanChoicePressure(
+  pressure: string,
+  mode: ModelCurveResolutionMode,
+): string {
+  if (mode === 'address-pressure-before-goal') return `先处理${pressure}`
+  if (mode === 'keep-goal-open-under-pressure') return `暂缓处理${pressure}`
+  return `面对${pressure}`
+}
+
+function getCurvePlanDecisionPhrase(goal: string): string {
+  const normalized = goal.trim()
+  if (/^(?:是否|要不要)/u.test(normalized)) return normalized
+  return `是否${normalized}`
+}
+
+function getCurvePlanChoiceDetail(
+  subject: string,
+  goal: string,
+  pressure: string,
+  mode: ModelCurveResolutionMode,
+  suffix: string,
+): string {
+  const pressureSide = getCurvePlanChoicePressure(pressure, mode)
+  const decision = getCurvePlanDecisionPhrase(goal)
+  // The goal is represented as one compact decision phrase. The pressure side
+  // is an unfinished handling choice, so the beat never turns either side into
+  // an already-executed result.
+  return `暂定：${subject}必须在${goal}与${pressureSide}之间作出选择${suffix}`
+}
+
+function getCurvePlanDirectionLanguage(brief: CreativeBrief): {
+  trigger: string
+  escalation: string
+  choiceSuffix: string
+  resolutionSuffix: string
+} {
+  const hasContrast = brief.dramaticForces.includes('contrast')
+  const hasCost = brief.dramaticForces.includes('cost')
+  const hasSurprise = brief.dramaticForces.includes('surprise')
+  const hasMisunderstanding = brief.dramaticForces.includes('misunderstanding')
+  const hasGrowth = brief.tones.includes('growth')
+  const hasMystery = brief.tones.includes('mystery')
+  const hasRelationship = brief.dramaticForces.includes('relationship-tension')
+  const choiceMarkers = [
+    hasContrast ? '不能再按原有条件继续' : '',
+    hasRelationship ? '需要在这段关系中作出选择' : '',
+    hasCost ? '需要承担这项取舍' : '',
+    hasGrowth ? '并承担这项选择' : '',
+  ].filter(Boolean)
+  const resolutionMarkers = [
+    hasContrast ? '不再照原有条件推进' : '',
+    hasRelationship ? '不替作者预设对方回应' : '',
+    hasCost ? '取舍仍待作者确认' : '',
+  ].filter(Boolean)
+
+  return {
+    trigger: hasContrast
+      ? '无法按已确认条件继续考虑'
+      : hasSurprise
+        ? '原有安排被这个变化打断，仍需推进'
+        : hasMisunderstanding || hasMystery
+          ? '需要先面对其中的信息疑问，才能继续考虑'
+          : '无法按原有条件继续考虑',
+    escalation: hasRelationship
+      ? '还要面对'
+      : hasCost
+        ? '还要承担'
+        : '还要面对',
+    choiceSuffix: choiceMarkers.length ? `，${choiceMarkers.join('，')}` : '',
+    resolutionSuffix: hasMystery
+      ? '，信息疑问仍待作者确认'
+      : resolutionMarkers.length
+        ? `，${resolutionMarkers.join('，')}`
+        : '',
+  }
+}
+
+function getCurvePlanResolutionDetail(
+  subject: string,
+  goal: string,
+  pressure: string,
+  mode: ModelCurveResolutionMode,
+  suffix: string,
+): string {
+  const decision = getCurvePlanDecisionPhrase(goal)
+  switch (mode) {
+    case 'address-pressure-before-goal':
+      return `暂定：这次选择让${subject}面对${pressure}并调整${decision}${suffix}`
+    case 'keep-goal-open-under-pressure':
+      return `暂定：这次选择让${subject}暂缓${decision}，同时面对${pressure}${suffix}`
+    case 'adjust-goal-under-constraint':
+      return `暂定：这次选择让${subject}调整${decision}，同时面对${pressure}${suffix}`
+  }
 }
 
 function buildModelCurveFactAnchoringContract(
@@ -4155,12 +4514,22 @@ function buildModelCurveFactAnchoringContract(
   const pickFirst = (...groups: Array<readonly StorySourceFact[]>): StorySourceFact | undefined => (
     groups.flat().find((fact) => Boolean(fact))
   )
+  const nonGoalUrgencyFacts = urgencyFacts.filter((fact) => fact.id !== goalFact?.id)
+  const nonGoalCommitmentFacts = commitmentFacts.filter((fact) => fact.id !== goalFact?.id)
+  const nonGoalBlockingFacts = blockingFacts.filter((fact) => fact.id !== goalFact?.id)
+  const nonGoalRelationshipFacts = relationshipFacts.filter((fact) => fact.id !== goalFact?.id)
   const triggerFact = pickFirst(
+    nonGoalUrgencyFacts,
+    nonGoalBlockingFacts,
+    nonGoalCommitmentFacts,
+    nonGoalRelationshipFacts,
+    nonSceneFacts.filter((fact) => fact.id !== goalFact?.id),
+    // A single source fact is valid for sparse material; rich material should
+    // reach this branch only when the author supplied no second constraint.
     urgencyFacts,
     commitmentFacts,
     blockingFacts,
     relationshipFacts,
-    nonSceneFacts.filter((fact) => fact.id !== goalFact?.id),
     nonSceneFacts,
   )
   const escalationFact = pickFirst(

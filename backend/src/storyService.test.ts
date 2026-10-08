@@ -598,6 +598,125 @@ test('model curves keep three creative directions causally distinct on the same 
   }
 })
 
+test('closed curve plans preserve model provenance and reject malformed plans without fallback', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  const previousApiKey = process.env.DASHSCOPE_API_KEY
+  const previousBaseUrl = process.env.DASHSCOPE_BASE_URL
+  const previousFetch = globalThis.fetch
+  const idea = richCurveIdea
+  const seed = createDirectCoCreationSeed(idea)
+  assert.ok(seed)
+  const brief: CreativeBrief = {
+    tones: ['growth'],
+    dramaticForces: ['contrast'],
+    allowSystemNamedCharacters: false,
+  }
+  let calls = 0
+  process.env.STORY_DISABLE_MODEL = 'false'
+  process.env.DASHSCOPE_API_KEY = 'test-only-key'
+  process.env.DASHSCOPE_BASE_URL = 'https://model.test.invalid'
+  try {
+    globalThis.fetch = async () => {
+      calls += 1
+      return createCurveModelResponse({
+        curvePlan: {
+          triggerFactId: 'source-fact-3',
+          escalationFactId: 'source-fact-4',
+          choiceFactId: 'source-fact-5',
+          resolutionMode: 'adjust-goal-under-constraint',
+        },
+      })
+    }
+    const curve = await generateProvisionalCurve(idea, seed, brief)
+    assert.equal(curve.generation?.origin, 'model')
+    assert.equal(calls, 1)
+    const proposalDetails = curve.beats.filter((beat) => beat.kind !== 'current-state').map((beat) => beat.detail)
+    assert.equal(proposalDetails.some((detail) => /在在|让想|让在|使想|使在|因为沈乔因为|手机|门票|陌生人物/u.test(detail)), false)
+    assert.equal(proposalDetails.some((detail) => /投影仪今晚要归还/u.test(detail)), true)
+    assert.equal(proposalDetails.some((detail) => /答应不再改动作品/u.test(detail)), true)
+    assert.equal(proposalDetails.some((detail) => /判断投影仪|判断答应|处理方式/u.test(detail)), false)
+    assert.equal(proposalDetails.filter((detail) => (detail.match(/删掉自己的名字/gu) ?? []).length > 1).length, 0)
+    assert.equal(new Set(curve.beats.filter((beat) => beat.kind !== 'current-state').map((beat) => beat.detail)).size, 4)
+
+    calls = 0
+    globalThis.fetch = async () => {
+      calls += 1
+      return createCurveModelResponse({
+        curvePlan: {
+          triggerFactId: 'source-fact-3',
+          escalationFactId: 'source-fact-3',
+          choiceFactId: 'source-fact-5',
+          resolutionMode: 'adjust-goal-under-constraint',
+        },
+      })
+    }
+    await assert.rejects(
+      () => generateProvisionalCurve(idea, seed, brief),
+      (error: unknown) => error instanceof AppError
+        && error.code === 'STORY_CURVE_MODEL_GENERATION_FAILED'
+        && error.modelDiagnostic?.stage === 'curve-plan-validation'
+        && error.modelDiagnostic?.attempt === 3
+        && /同一条作者事实|不同压力/u.test(error.modelDiagnostic?.reason ?? ''),
+    )
+    assert.equal(calls, 3)
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+    if (previousApiKey === undefined) delete process.env.DASHSCOPE_API_KEY
+    else process.env.DASHSCOPE_API_KEY = previousApiKey
+    if (previousBaseUrl === undefined) delete process.env.DASHSCOPE_BASE_URL
+    else process.env.DASHSCOPE_BASE_URL = previousBaseUrl
+  }
+})
+
+test('renders closed curve plans as distinct short causal phrases across rich fact shapes', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  const previousApiKey = process.env.DASHSCOPE_API_KEY
+  const previousBaseUrl = process.env.DASHSCOPE_BASE_URL
+  const previousFetch = globalThis.fetch
+  const cases = [
+    {
+      idea: '林澈答应在周五前把祖母的手稿交给出版社，但他发现最后一页缺失，不知道是否该按承诺提交。',
+      brief: { tones: ['growth'], dramaticForces: ['cost'], allowSystemNamedCharacters: false } as CreativeBrief,
+      plan: { triggerFactId: 'source-fact-2', escalationFactId: 'source-fact-3', choiceFactId: 'source-fact-1', resolutionMode: 'adjust-goal-under-constraint' },
+      required: [/最后一页缺失/u, /按承诺提交/u],
+    },
+    {
+      idea: relationshipCurveIdea,
+      brief: { tones: ['friendship'], dramaticForces: ['relationship-tension'], allowSystemNamedCharacters: false } as CreativeBrief,
+      plan: { triggerFactId: 'source-fact-2', escalationFactId: 'source-fact-3', choiceFactId: 'source-fact-1', resolutionMode: 'address-pressure-before-goal' },
+      required: [/答应过不再替姐姐做决定/u, /姐姐准备把店卖掉/u],
+    },
+  ]
+
+  process.env.STORY_DISABLE_MODEL = 'false'
+  process.env.DASHSCOPE_API_KEY = 'test-only-key'
+  process.env.DASHSCOPE_BASE_URL = 'https://model.test.invalid'
+  try {
+    for (const testCase of cases) {
+      globalThis.fetch = async () => createCurveModelResponse({ curvePlan: testCase.plan })
+      const seed = createDirectCoCreationSeed(testCase.idea)
+      assert.ok(seed)
+      const curve = await generateProvisionalCurve(testCase.idea, seed, testCase.brief)
+      assert.equal(curve.generation?.origin, 'model')
+      const details = curve.beats.filter((beat) => beat.kind !== 'current-state').map((beat) => beat.detail)
+      for (const phrase of testCase.required) assert.equal(details.some((detail) => phrase.test(detail)), true, phrase.source)
+      assert.equal(details.some((detail) => /在在|让想|让在|使想|使在|因为(?:林澈|周岚)因为|判断(?:最后一页|答应|姐姐)|目标在.*目标/u.test(detail)), false)
+      assert.equal(new Set(details).size, details.length)
+      assert.equal(details.every((detail) => (detail.match(/(?:删掉自己的名字|按承诺提交|保住父亲留下的书店)/gu) ?? []).length <= 1), true)
+    }
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+    if (previousApiKey === undefined) delete process.env.DASHSCOPE_API_KEY
+    else process.env.DASHSCOPE_API_KEY = previousApiKey
+    if (previousBaseUrl === undefined) delete process.env.DASHSCOPE_BASE_URL
+    else process.env.DASHSCOPE_BASE_URL = previousBaseUrl
+  }
+})
+
 test('rejects a model source-fact claim when the proposal has no visible author anchor', async () => {
   const previousDisableModel = process.env.STORY_DISABLE_MODEL
   const previousApiKey = process.env.DASHSCOPE_API_KEY

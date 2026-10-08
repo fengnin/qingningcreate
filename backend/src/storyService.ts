@@ -8336,7 +8336,10 @@ function getSystemDraftGoalAnchor(value: string): string {
     .replace(/^在[^，。！？；\n]{1,24}前(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择|判断))/u, '')
     .replace(/^于[^，。！？；\n]{1,24}(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择|判断))/u, '')
   const decision = normalized.match(/(?:决定|选择|判断|确认)(?:要不要|是否)(.+)$/u)
-  if (decision?.[1]?.trim()) return `要不要${decision[1].trim()}`
+  // Keep only the action fragment in compact direction templates. The
+  // decision wrapper is already represented by the surrounding choice text;
+  // retaining “要不要” here caused nested phrases such as “继续要不要…”.
+  if (decision?.[1]?.trim()) return decision[1].trim()
   return normalized || value.trim()
 }
 
