@@ -3357,6 +3357,18 @@ function inferChineseIdeaSubject(idea: string, intentionIndex: number): string |
   const candidate = namedMatches.at(-1)?.[1]?.trim()
   if (candidate) return candidate
 
+  // Rich premises often put the subject in an earlier clause, for example
+  // “沈乔在借来的投影仪里看到……却想在展出前……”.  The sentence-boundary
+  // pattern above deliberately avoids guessing from arbitrary nouns, but it
+  // also misses this common, still explicit, subject+“在” construction. Keep
+  // the recovery narrow: only take a short Chinese span immediately followed
+  // by 在/正在, and only from the text before the intention verb.
+  const inlineNamedMatches = [...prefix.matchAll(/([\u4e00-\u9fff]{2,4})(?=(?:在|正|正在))/gu)]
+  const inlineCandidate = inlineNamedMatches.at(-1)?.[1]?.trim()
+  if (inlineCandidate && !/^(?:现在|正在|已经|仍在|就在|所以|因为|但却|却想)$/u.test(inlineCandidate)) {
+    return inlineCandidate
+  }
+
   // A short pronoun is still useful when the sentence explicitly names who
   // is making the decision; do not guess a longer noun phrase from context.
   const pronounMatches = [...prefix.matchAll(/(我|你|他|她|我们|你们|他们|她们)[^。！？；，]{0,20}(?=(?:想要|想|希望|打算|准备|决定)\s*)/gu)]
@@ -8284,6 +8296,7 @@ function createRichRepairDirection(
   subject: string,
   index: number,
 ): SystemDraftDirection {
+  const goalAnchor = getSystemDraftGoalAnchor(goal)
   const mechanismType: ConflictCoreMechanismType = anchor.kind === 'time'
     ? 'window-pressure'
     : anchor.kind === 'commitment'
@@ -8299,17 +8312,32 @@ function createRichRepairDirection(
               : 'resource-constraint'
   const label = getRichRepairLabel(anchor.text)
   const premise = index === 0
-    ? `暂定：${anchor.text}让${goal}停住`
+    ? `暂定：${anchor.text}让${subject}无法按原样继续${goalAnchor}`
     : index === 1
-      ? `暂定：${anchor.text}使继续${goal}必须取舍`
-      : `暂定：${anchor.text}让${subject}不能按原样继续${goal}`
+      ? `暂定：${anchor.text}使${subject}继续${goalAnchor}必须取舍`
+      : `暂定：${anchor.text}让${subject}不能按原样继续${goalAnchor}`
   const alternative = index === 0
-    ? '暂缓'
+    ? `暂缓${goalAnchor}`
     : index === 1
-      ? '保留'
-      : '继续'
-  const tradeoff = `${goal}还是${alternative}`
+      ? `保留${anchor.text}`
+      : `继续${goalAnchor}`
+  const tradeoff = index === 1
+    ? `${goalAnchor}还是${alternative}`
+    : `${goalAnchor}还是${alternative}`
   return { label, mechanismType, premise, tradeoff }
+}
+
+/** Keep the rich-input repair template from nesting a deadline in every side. */
+function getSystemDraftGoalAnchor(value: string): string {
+  let normalized = value
+    .trim()
+    .replace(/^(?:当前(?:目标|想法)[：:]\s*)/u, '')
+    .replace(/^(?:想要|想|希望|打算|准备|计划)\s*/u, '')
+    .replace(/^在[^，。！？；\n]{1,24}前(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择|判断))/u, '')
+    .replace(/^于[^，。！？；\n]{1,24}(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择|判断))/u, '')
+  const decision = normalized.match(/(?:决定|选择|判断|确认)(?:要不要|是否)(.+)$/u)
+  if (decision?.[1]?.trim()) return `要不要${decision[1].trim()}`
+  return normalized || value.trim()
 }
 
 function getRichRepairLabel(value: string): string {

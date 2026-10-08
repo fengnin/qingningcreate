@@ -2916,7 +2916,11 @@ function getModelCurveTextQualityIssue(
   seed: Pick<StorySeed, 'lockedGoal'>,
 ): string | undefined {
   const normalizedGoal = normalizeCausalText(seed.lockedGoal ?? '')
-  if (normalizedGoal.length >= 6 && countCausalPhraseOccurrences(detail, normalizedGoal) > 1) {
+  const goalAnchor = getModelGoalAnchor(seed.lockedGoal ?? '')
+  if (
+    (normalizedGoal.length >= 6 && countCausalPhraseOccurrences(detail, normalizedGoal) > 1)
+    || (goalAnchor.length >= 6 && countCausalPhraseOccurrences(detail, goalAnchor) > 1)
+  ) {
     return '重复嵌套锁定目标，形成整句复述；请只保留一次目标锚点'
   }
 
@@ -2951,6 +2955,20 @@ function countCausalPhraseOccurrences(value: string, phrase: string): number {
     offset = index + normalizedPhrase.length
   }
   return count
+}
+
+/** Return a contiguous action fragment without the goal's deadline wrapper. */
+function getModelGoalAnchor(value: string): string {
+  let normalized = value
+    .trim()
+    .replace(/^(?:当前(?:目标|想法)[：:]\s*)/u, '')
+    .replace(/^(?:想要|想|希望|打算|准备|计划)\s*/u, '')
+  normalized = normalized
+    .replace(/^在[^，。！？；\n]{1,24}前(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择|判断))/u, '')
+    .replace(/^于[^，。！？；\n]{1,24}(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择|判断))/u, '')
+  const decision = normalized.match(/(?:决定|选择|判断|确认)(?:要不要|是否)(.+)$/u)
+  if (decision?.[1]?.trim()) return `要不要${decision[1].trim()}`
+  return normalized || value.trim()
 }
 
 function repeatsRejectedProposal(detail: string, curve: ProvisionalCurve): boolean {
@@ -3971,6 +3989,7 @@ function buildCompactCurveGenerationPrompt(
     text: fact.text,
     anchor: getModelCurveFactAnchor(fact.text),
   }))
+  const goalAnchor = getModelGoalAnchor(seed.lockedGoal ?? '')
   const directionTerms = [
     ...brief.dramaticForces.map((force) => dramaticForceLabels[force]),
     ...brief.tones.map((tone) => creativeToneLabels[tone]),
@@ -3984,20 +4003,20 @@ function buildCompactCurveGenerationPrompt(
     `作者选择的方向：${directionTerms.join('、') || '开放方向'}；每个所选方向都必须先影响目标受阻或取舍升级，再影响主动选择或结局变化，并让每项推进不同因果。`,
     `方向层级硬约束（列出的词是允许的抽象连接，不是新增事实）：${directionRequirements || '保持抽象因果并避免模板重复。'}`,
     `方向节点最低可审阅形状：${getModelDirectionMarkerInstruction(brief)}`,
-    '安全结构：trigger=主体+一个已确认条件+目标为什么停住；escalation=不同的已确认条件+继续目标要承担的取舍；climax-choice=主体在两端之间的主动选择；resolution=这次选择如何调整一个原文目标在另一项原文期限、承诺或关系下的处理方式。四个节点必须各有不同的因果动词，不得把同一整句目标复制到每个节点。同一节点内锁定目标最多出现一次；目标若以“在”开头，不得拼出“必须在在”，也不得写“让在、使在、让想、使想”，因果连接必须明确写出主体。',
+    `安全结构：trigger=主体+一个已确认条件+目标为什么停住；escalation=不同的已确认条件+继续目标要承担的取舍；climax-choice=主体在两端之间的主动选择；resolution=这次选择如何调整一个原文目标在另一项原文期限、承诺或关系下的处理方式。四个节点必须各有不同的因果动词，不得把同一整句目标复制到每个节点。同一节点内锁定目标最多出现一次。可嵌入句子的目标动作锚点是“${goalAnchor || '作者目标'}”；不要把完整锁定目标的期限前缀再次拼到这个锚点前，不得生成“在在、让在、使在、让想、使想”，因果连接必须明确写出主体。`,
     `用户原始想法：${idea}`,
     `原始材料（sourceFactIds 只能从这里复制；anchor 是可逐字核对的原文短语）：${JSON.stringify(sourceFacts)}`,
     `事实覆盖清单：整条曲线（current-state 可承接背景）必须覆盖每个 ID：${sourceFactIds.join('、') || '无'}。sourceFactIds 是可审阅的事实声明：单个提案节点只列 detail 中实际出现的事实 ID；每个 ID 都必须在 detail 中保留其 anchor 或原文的另一个有区分度连续短语（至少三个字）。没有写进 detail 的材料不要列 ID；不能把“原有安排”“既有条件”“当前问题”等泛化句挂到任何未出现的事实 ID。`,
     buildModelCurveFactAnchoringContract(design, seed),
-    `已确认的原始信息：${JSON.stringify({ subject: seed.subject, activeSituation: seed.activeSituation, lockedGoal: seed.lockedGoal, lockedFacts: seed.lockedFacts })}`,
+    `已确认的原始信息：${JSON.stringify({ subject: seed.subject, activeSituation: seed.activeSituation, lockedGoal: seed.lockedGoal, goalAnchor, lockedFacts: seed.lockedFacts })}`,
     `创意方向：${JSON.stringify(brief)}`,
     ...(excludedProposalDetails.length ? [`已拒绝提案，不能重现：${JSON.stringify(excludedProposalDetails)}`] : []),
     ...(repairMessage ? [
       `本轮修复要求：${repairMessage}`,
-      `本轮只允许复用这些作者原文锚点：${JSON.stringify({ goal: seed.lockedGoal, facts: seed.lockedFacts })}。方向层级硬约束中列出的抽象词可以作为连接词，但必须紧贴这些锚点，不能独立变成新事实。请整条重写，只输出上述 5 个 beat；不要从亲属、身份、物件或常识推断额外背景、人物意图、具体场景或结果，也不要沿用上一轮句子。`,
+      `本轮只允许复用这些作者原文锚点：${JSON.stringify({ goal: seed.lockedGoal, goalAnchor, facts: seed.lockedFacts })}。目标动作只使用 goalAnchor 一次，不要重新拼接 lockedGoal 的期限前缀。方向层级硬约束中列出的抽象词可以作为连接词，但必须紧贴这些锚点，不能独立变成新事实。请整条重写，只输出上述 5 个 beat；不要从亲属、身份、物件或常识推断额外背景、人物意图、具体场景或结果，也不要沿用上一轮句子。`,
       buildModelFactRepairMap(design),
     ] : []),
-    '严格按示例形状输出：{"title":"暂定主线","beats":[{"kind":"current-state","detail":"作者当前处境","sourceFactIds":["source-fact-1"]},{"kind":"trigger","detail":"暂定：主体的已确认条件使目标停住","sourceFactIds":["source-fact-2"]},{"kind":"escalation","detail":"暂定：另一条已确认承诺使继续目标必须承担取舍","sourceFactIds":["source-fact-3"]},{"kind":"climax-choice","detail":"暂定：主体必须在目标的一端与承诺的另一端之间选择","sourceFactIds":["source-fact-3"]},{"kind":"resolution","detail":"暂定：这次选择调整原文目标在原文承诺下的处理方式","sourceFactIds":["source-fact-2"]}]}',
+    `严格按示例形状输出：{"title":"暂定主线","beats":[{"kind":"current-state","detail":"作者当前处境","sourceFactIds":["source-fact-1"]},{"kind":"trigger","detail":"暂定：主体的已确认条件使${goalAnchor || '作者目标'}停住","sourceFactIds":["source-fact-2"]},{"kind":"escalation","detail":"暂定：继续${goalAnchor || '作者目标'}必须承担另一条已确认条件的取舍","sourceFactIds":["source-fact-3"]},{"kind":"climax-choice","detail":"暂定：主体必须在${goalAnchor || '作者目标'}与已确认承诺之间选择","sourceFactIds":["source-fact-3"]},{"kind":"resolution","detail":"暂定：这次选择调整${goalAnchor || '作者目标'}在已确认承诺下的处理方式","sourceFactIds":["source-fact-2"]}]}`,
   ].join('\n')
 }
 
@@ -4050,12 +4069,15 @@ function buildCompactCurveRepairPrompt(
     ].join('\n')
   }
 
-  const goal = getCompactCurveRepairAnchor(slots.goal)
+  // Use the action-only goal handle in repair templates.  Copying the full
+  // deadline-bearing lockedGoal here is what produced "在在" and repeated
+  // decision clauses in otherwise grounded repairs.
+  const goal = getModelGoalAnchor(seed.lockedGoal ?? '') || getCompactCurveRepairAnchor(slots.goal)
   const trigger = getCompactCurveRepairAnchor(slots.trigger)
   const escalation = getCompactCurveRepairAnchor(slots.escalation)
   const subject = seed.subject?.trim() || '主角'
   const usesContrast = brief.dramaticForces.includes('contrast')
-  const goalForSentence = goal.replace(/^在(?=(?:周|今晚|明|展出|仪式|布置|交接))/u, '')
+  const goalForSentence = goal
   const triggerDetail = usesContrast
     ? `暂定：${trigger}让${subject}无法按已确认条件推进${goalForSentence}`
     : `暂定：${trigger}使${subject}停住，仍需处理${goalForSentence}`
@@ -4079,7 +4101,7 @@ function buildCompactCurveRepairPrompt(
   return [
     '只输出 JSON，不要 Markdown、解释或额外键。不要写小说。',
     `上一轮未通过校验：${repairMessage}。这次不要自行换词或补写语义；只复制下方模板中的作者锚点。`,
-    '硬规则：除模板中的逐字作者原文锚点和“暂定、让、使、主角、无法按已确认条件推进、停住、继续、要承担、取舍、必须、与、之间、选择、这次选择、调整、在、下、处理方式”外，不得加入任何词。目标若以“在”开头，禁止再拼“必须在在”；因果句必须先写主角，禁止“让在、使在、让想、使想”。尤其不能写价值、意义、归属、完整、遗愿、权利、关系结论、流程、场景或结果。',
+    `硬规则：除模板中的逐字作者原文锚点和“暂定、让、使、主角、无法按已确认条件推进、停住、继续、要承担、取舍、必须、与、之间、选择、这次选择、调整、在、下、处理方式”外，不得加入任何词。目标动作锚点是“${goalForSentence}”，不要把完整锁定目标的期限前缀重新拼回去；禁止“在在、让在、使在、让想、使想”。因果句必须先写主角，尤其不能写价值、意义、归属、完整、遗愿、权利、关系结论、流程、场景或结果。`,
     `作者材料（只可从这里核对）：${JSON.stringify(sourceFacts)}`,
     `严格复制这个结构并只返回它：${JSON.stringify(template)}`,
     ...(excludedProposalDetails.length ? [`已拒绝提案不能重现：${JSON.stringify(excludedProposalDetails)}`] : []),
