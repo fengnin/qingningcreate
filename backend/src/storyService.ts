@@ -1568,7 +1568,7 @@ async function generatePredicamentForCore(
   let lastGenerationError: AppError | undefined
   const seed = getStorySeedForConflictCore(session.seed, core)
 
-  if (usesSelectedSystemDraftDirection(seed)) {
+  if (usesSelectedSystemDraftDirection(seed) && isExplicitLocalModelMode()) {
     return createValidatedCoreAnchoredPredicament(session.idea, seed, core)
   }
 
@@ -1601,7 +1601,7 @@ async function generatePredicamentForCore(
     }
   }
 
-  if (hadModelOutputFailure) {
+  if (hadModelOutputFailure && isExplicitLocalModelMode()) {
     const fallback = createValidatedCoreAnchoredPredicament(session.idea, seed, core)
     console.warn(`Predicament generation used the core-anchored fallback: ${lastGenerationError?.code ?? 'INVALID_MODEL_OUTPUT'}`)
     return fallback
@@ -5453,8 +5453,16 @@ function applyLegacyConclusionTransition(
 
 export async function generateHeadTailOptions(request: StoryHeadTailRequest): Promise<StoryHeadTailOptions> {
   let repairContext: HeadTailRepairContext | undefined
-  let hadRecoverableGenerationFailure = false
   const state = narrativeState.createInitialState(request.seed, request.predicament)
+  if (isExplicitLocalModelMode() && usesSelectedSystemDraftDirection(request.seed)) {
+    const fallback = createSystemDraftHeadTailFallback(request)
+    validateHeadTailContinuationDetails(request, fallback)
+    for (const option of fallback) {
+      narrativeState.validateExpectedTransition(state, option.transition, option.climaxActionId, invalidModelOutputContext, '头尾方案的状态变更不成立，请重新生成。')
+    }
+    console.warn('Head-tail generation used the selected-system-draft fallback (model disabled).')
+    return fallback
+  }
   const maximumAttempts = usesSelectedSystemDraftDirection(request.seed)
     ? 1
     : maxHeadTailGenerationAttempts
@@ -5473,23 +5481,16 @@ export async function generateHeadTailOptions(request: StoryHeadTailRequest): Pr
 
       repairContext = { violations }
     } catch (error) {
-      if (!(error instanceof AppError) || error.statusCode !== invalidModelOutputContext.statusCode) throw error
-      hadRecoverableGenerationFailure = true
+      if (!(error instanceof AppError) || !(
+        retryableModelOutputErrorCodes.has(error.code)
+        || error.code === 'INVALID_HEAD_TAIL_OUTPUT'
+        || error.code === 'INVALID_HEAD_TAIL_REVIEW'
+      )) throw error
       if (shouldLogHeadTailDiagnostics) {
         console.warn(`Head-tail generation rejected (attempt ${attempt + 1}): ${error.code}: ${error.message}`)
       }
       repairContext = { violations: [error.message] }
     }
-  }
-
-  if (usesSelectedSystemDraftDirection(request.seed) && hadRecoverableGenerationFailure) {
-    const fallback = createSystemDraftHeadTailFallback(request)
-    validateHeadTailContinuationDetails(request, fallback)
-    for (const option of fallback) {
-      narrativeState.validateExpectedTransition(state, option.transition, option.climaxActionId, invalidModelOutputContext, '头尾方案的状态变更不成立，请重新生成。')
-    }
-    console.warn('Head-tail generation used the selected-system-draft fallback.')
-    return fallback
   }
 
   throw new AppError(
