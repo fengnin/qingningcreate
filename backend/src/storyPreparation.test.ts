@@ -12,6 +12,62 @@ const candidate = { id: 'count', action: '方屿逐项计数并核对书单。',
 const brief = { tones: ['growth' as const], dramaticForces: [], allowSystemNamedCharacters: false }
 const code = (name: string) => (e: unknown) => e instanceof AppError && e.code === name
 
+test('quote validation distinguishes absent source from verbatim drift without normalizing evidence', () => {
+  const sources = [{ id: 's', text: '甲有两件物品，没有期限。' }]
+  const item = { id: 'm', role: 'fact', sourceId: 's', quote: '甲有两件物品。' }
+  for (const quote of [item.quote, '甲有三件物品', '甲有物品', '甲有两件物品没有期限', '甲有两件物品\u200b']) {
+    assert.throws(() => parsePreparationMaterial({ material: [{ ...item, quote }] }, sources),
+      (e: unknown) => e instanceof AppError && e.message.includes('material[0].quote'))
+  }
+  assert.throws(() => parsePreparationMaterial({ material: [{ ...item, sourceId: 'missing' }] }, sources),
+    (e: unknown) => e instanceof AppError && e.message.includes('material[0].sourceId'))
+})
+
+test('one model quote recovery revalidates all material and never repairs or falls back', async () => {
+  const originalFetch = globalThis.fetch
+  const env = { key: process.env.DASHSCOPE_API_KEY, disable: process.env.STORY_DISABLE_MODEL }
+  process.env.DASHSCOPE_API_KEY = 'stub'; process.env.STORY_DISABLE_MODEL = 'false'
+  let calls = 0
+  const wrong = { material: material.map((m, i) => i === 0 ? { ...m, quote: m.quote + '。' } : m) }
+  let first: unknown = wrong, second: unknown = { material }
+  let transportFailure = false
+  globalThis.fetch = async (_url, init) => {
+    calls++
+    const input = JSON.parse(String(init?.body))
+    const user = JSON.parse(input.messages[1].content)
+    if (user.validationFailure) {
+      assert.deepEqual(user.sources, [source])
+      assert.deepEqual(user.previousOutput, wrong)
+      assert.deepEqual(user.validationFailure, { reason: 'quote-not-verbatim', path: 'material[0].quote' })
+      if (transportFailure) return new Response(JSON.stringify({ error: { message: 'invalid request' } }), { status: 400 })
+    }
+    const output = input.messages[0].content.includes('最小行动候选') ? { candidates: [candidate], questions: [] } : user.validationFailure ? second : first
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(output) } }] }), { status: 200 })
+  }
+  try {
+    const before = structuredClone(wrong)
+    const curve = await generateStoryPreparation(source.text, brief)
+    assert.equal(calls, 3)
+    assert.deepEqual(curve.preparation!.material, material)
+    assert.deepEqual(wrong, before)
+    for (const output of [wrong, { material: material.slice(0, 2) }, { material: material.map(m => ({ ...m, sourceId: 'missing' })) }]) {
+      calls = 0; second = output
+      await assert.rejects(() => generateStoryPreparation(source.text, brief), code('STORY_PREPARATION_INVALID_OUTPUT'))
+      assert.equal(calls, 2)
+    }
+    calls = 0; first = { material: material.map(m => ({ ...m, sourceId: 'missing' })) }
+    await assert.rejects(() => generateStoryPreparation(source.text, brief), code('STORY_PREPARATION_INVALID_OUTPUT'))
+    assert.equal(calls, 1)
+    calls = 0; first = wrong; transportFailure = true
+    await assert.rejects(() => generateStoryPreparation(source.text, brief), (e: unknown) => e instanceof AppError && e.code !== 'STORY_PREPARATION_INVALID_OUTPUT')
+    assert.equal(calls, 2)
+  } finally {
+    globalThis.fetch = originalFetch
+    if (env.key === undefined) delete process.env.DASHSCOPE_API_KEY; else process.env.DASHSCOPE_API_KEY = env.key
+    if (env.disable === undefined) delete process.env.STORY_DISABLE_MODEL; else process.env.STORY_DISABLE_MODEL = env.disable
+  }
+})
+
 test('extraction preserves conditions, negative wording and unknowns; rejects invented or omitted source material', () => {
   assert.deepEqual(parsePreparationMaterial({ material }, [source]), material)
   assert.throws(() => parsePreparationMaterial({ material: material.slice(0, 3) }, [source]), code('STORY_PREPARATION_INVALID_OUTPUT'))

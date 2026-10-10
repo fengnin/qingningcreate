@@ -7,6 +7,11 @@ import type { StoryReasoningProposal } from '../../shared/story-reasoning-contra
 import type { CreativeBrief, ProvisionalCurve, StoryDesignRecord } from '../../shared/story-contract.js'
 
 const invalid = (message: string): never => { throw new AppError(message, 502, 'STORY_PREPARATION_INVALID_OUTPUT') }
+class PreparationQuoteError extends AppError {
+  constructor(readonly materialIndex: number) {
+    super(`material[${materialIndex}].quote：原文引用不是连续逐字内容；不能补写依据。`, 502, 'STORY_PREPARATION_INVALID_OUTPUT')
+  }
+}
 function object(value: unknown, keys: string[]): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) invalid('输出必须是对象。')
   const r = value as Record<string, unknown>
@@ -45,12 +50,13 @@ export const preparationCandidatesPrompt = `你只设计曲线之前的最小行
 
 export function parsePreparationMaterial(value: unknown, sources: StoryPreparation['sources']): StoryPreparationItem[] {
   const r = object(value, ['material'])
-  const material = list(r.material).map(v => {
+  const material = list(r.material).map((v, index) => {
     const m = object(v, ['id', 'role', 'sourceId', 'quote'])
     if (!['fact', 'condition', 'goal', 'unknown'].includes(String(m.role))) invalid('原文分类不合法。')
     const item = { id: text(m.id, 80), role: m.role as StoryPreparationItem['role'], sourceId: text(m.sourceId, 80), quote: text(m.quote) }
     const source = sources.find(s => s.id === item.sourceId)
-    if (!source?.text.includes(item.quote)) invalid('原文引用不存在；不能补写依据。')
+    if (!source) return invalid(`material[${index}].sourceId：材料来源 ID 不存在；不能补写依据。`)
+    if (!source.text.includes(item.quote)) throw new PreparationQuoteError(index)
     return item
   })
   unique(material)
@@ -65,7 +71,7 @@ export function parsePreparationMaterial(value: unknown, sources: StoryPreparati
     }
     let offset = 0
     for (const c of source.text) {
-      if (!/[\p{P}\p{Z}\s]/u.test(c) && !covered.has(offset)) invalid('材料整理遗漏原文，请重新提取；不是作者资料不足。')
+      if (!/[\p{P}\p{Z}\s]/u.test(c) && !covered.has(offset)) invalid(`sources 的覆盖校验失败（字符位置 ${offset}）：材料整理遗漏原文，请重新提取；不是作者资料不足。`)
       offset += c.length
     }
   }
@@ -99,8 +105,19 @@ export function parsePreparationCandidates(value: unknown, material: StoryPrepar
 
 export async function generateStoryPreparation(idea: string, brief: CreativeBrief): Promise<ProvisionalCurve> {
   const sources = [{ id: 'author-input', text: idea }]
-  const extracted = await requestQwenJson({ systemPrompt: preparationExtractionPrompt, userPrompt: JSON.stringify({ sources }), temperature: 0.1, maxTokens: 2400, diagnosticStage: 'preparation-extraction' })
-  const material = parsePreparationMaterial(extracted, sources)
+  let extracted = await requestQwenJson({ systemPrompt: preparationExtractionPrompt, userPrompt: JSON.stringify({ sources }), temperature: 0.1, maxTokens: 2400, diagnosticStage: 'preparation-extraction' })
+  let material: StoryPreparationItem[]
+  try {
+    material = parsePreparationMaterial(extracted, sources)
+  } catch (error) {
+    if (!(error instanceof PreparationQuoteError)) throw error
+    extracted = await requestQwenJson({
+      systemPrompt: `${preparationExtractionPrompt}\n上一份输出未通过逐字引用校验。请重新提取；quote 必须直接复制 sources 中的连续字符，连标点也不能替换或改写。不要近似匹配、删除标点、补写或合并文本。`,
+      userPrompt: JSON.stringify({ sources, previousOutput: extracted, validationFailure: { reason: 'quote-not-verbatim', path: `material[${error.materialIndex}].quote` } }),
+      temperature: 0.1, maxTokens: 2400, diagnosticStage: 'preparation-extraction-retry',
+    })
+    material = parsePreparationMaterial(extracted, sources)
+  }
   const output = await requestQwenJson({ systemPrompt: preparationCandidatesPrompt, userPrompt: JSON.stringify({ sources, material, brief, referenceContract: preparationReferenceContract(material) }), temperature: 0.25, maxTokens: 3000, diagnosticStage: 'preparation-candidates' })
   const candidates = parsePreparationCandidates(output, material)
   const now = Date.now()
