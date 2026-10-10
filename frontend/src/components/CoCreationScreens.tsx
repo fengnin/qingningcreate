@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent } from 'react'
 import { Archive, ArrowLeft, ArrowRight, Check, CircleAlert, History, PencilLine, RefreshCcw, Sparkles, Trash2 } from 'lucide-react'
-import type { CreativeBrief, CreativeTone, CurveBeat, DramaticForce, StoryCurveVersion, StorySourceFact, StoryCurveRegenerationDecision } from '../story/types'
+import type { CreativeBrief, CreativeTone, CurveBeat, DramaticForce, StoryAuthorClarification, StoryAuthorClarificationAction, StoryCurveVersion, StorySourceFact, StoryCurveRegenerationDecision } from '../story/types'
 import type { StorySession } from '../story/useStorySession'
 import {
   getMissingStoryDesignSectionLabels,
@@ -199,6 +199,7 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
   const staleAuthorBeats = useMemo(() => staleBeats.filter((beat) => beat.source === 'user-edit'), [staleBeats])
   const sourceFacts = curve?.design?.sourceFacts ?? []
   const unresolvedFacts = sourceFacts.filter((fact) => fact.disposition === 'needs-author-decision')
+  const unresolvedClarifications = curve?.clarifications?.filter((item) => !item.resolution) ?? []
   const hasStartedStoryPath = Boolean(session.currentTurn)
   const missingDesignSections = getMissingStoryDesignSectionLabels(
     curve?.design,
@@ -296,6 +297,7 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
   const canConfirm = !isLoading
     && staleBeats.length === 0
     && unresolvedFacts.length === 0
+    && unresolvedClarifications.length === 0
     && missingDesignSections.length === 0
     && !session.confirmedCurve
 
@@ -321,6 +323,8 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
               beat={beat}
               index={index}
               sourceFacts={sourceFacts}
+              clarifications={curve.clarifications?.filter((item) => item.dependency.beatIds.includes(beat.id)) ?? []}
+              onClarification={(action, fields) => session.changeCurveClarification(action, { targetBeatId: beat.id, ...fields })}
               isLoading={isLoading || isSavingBeat}
               isConfirmed={Boolean(session.confirmedCurve)}
               editingBeatId={editingBeatId}
@@ -428,6 +432,10 @@ interface CurveBeatCardProps {
   beat: CurveBeat
   index: number
   sourceFacts: StorySourceFact[]
+  clarifications: StoryAuthorClarification[]
+  onClarification: (action: StoryAuthorClarificationAction, fields?: {
+    clarificationId?: string; prompt?: string; causalGap?: string; answerText?: string
+  }) => Promise<boolean>
   isLoading: boolean
   isConfirmed: boolean
   editingBeatId: string | undefined
@@ -456,6 +464,8 @@ function CurveBeatCard({
   beat,
   index,
   sourceFacts,
+  clarifications,
+  onClarification,
   isLoading,
   isConfirmed,
   editingBeatId,
@@ -507,6 +517,14 @@ function CurveBeatCard({
           </div>
         ) : <p>{beat.detail}</p>}
         {sourceFactText && <p className="curve-beat-facts"><Archive size={13} /> 原始材料：{sourceFactText}</p>}
+        {(beat.status !== 'rejected' || clarifications.length > 0) && <CurveClarificationReview
+          beat={beat}
+          clarifications={clarifications}
+          disabled={isLoading}
+          isConfirmed={isConfirmed}
+          onClarification={onClarification}
+          onRegenerate={onRegenerate}
+        />}
         {!isEditing && !isConfirmed && beat.status !== 'rejected' && (
           <div className="curve-beat-actions">
             <button className="text-action" type="button" onClick={() => onBeginEdit(beat)} disabled={isLoading}><PencilLine size={14} /> {beat.status === 'stale' && beat.source === 'user-edit' ? '编辑我的版本' : '编辑节点'}</button>
@@ -544,6 +562,62 @@ function CurveBeatCard({
       </div>
     </article>
   )
+}
+
+function CurveClarificationReview({ beat, clarifications, disabled, isConfirmed, onClarification, onRegenerate }: {
+  beat: CurveBeat
+  clarifications: StoryAuthorClarification[]
+  disabled: boolean
+  isConfirmed: boolean
+  onClarification: (action: StoryAuthorClarificationAction, fields?: {
+    clarificationId?: string; prompt?: string; causalGap?: string; answerText?: string
+  }) => Promise<boolean>
+  onRegenerate: (beatId: string) => void
+}) {
+  const [isAdding, setIsAdding] = useState(false)
+  const [causalGap, setCausalGap] = useState('')
+  const [question, setQuestion] = useState('')
+  const [answers, setAnswers] = useState<Record<string, string>>({})
+  const submitQuestion = async () => {
+    if (!beat.detail.includes(causalGap.trim()) || !question.trim()) return
+    if (!await onClarification('create', { causalGap: causalGap.trim(), prompt: question.trim() })) return
+    setIsAdding(false)
+    setCausalGap('')
+    setQuestion('')
+  }
+  return <div className="curve-clarifications">
+    {clarifications.map((item) => {
+      const answer = answers[item.id] ?? item.answerText ?? ''
+      return <section className="curve-clarification" key={item.id} aria-label="节点因果问题">
+      <div className="curve-clarification-heading"><strong>{item.prompt}</strong><span>{item.resolution ? '已处理' : item.status === 'unanswered' ? '尚未回答' : item.status === 'author-unknown' ? '作者未确定' : item.status === 'needs-review' ? '等待作者确认' : '回答已确认'}</span></div>
+      <p>针对：{item.dependency.causalGap}</p>
+      {item.answerText && <blockquote>{item.answerText}</blockquote>}
+      {item.sourceFactId && <small>已进入事实账本 · {item.sourceFactId}</small>}
+      {!item.resolution && !isConfirmed && <div className="curve-clarification-actions">
+        {item.status !== 'confirmed' && <>
+          <label><span>作者回答原文</span><textarea value={answer} onChange={(event) => setAnswers((current) => ({ ...current, [item.id]: event.target.value }))} maxLength={240} disabled={disabled} placeholder="只写已经确定的事实" /></label>
+          <button className="text-action" type="button" disabled={disabled || !answer.trim()} onClick={() => void onClarification('save-answer', { clarificationId: item.id, answerText: answer })}>保存待审回答</button>
+          {item.status === 'needs-review' && <button className="text-action" type="button" disabled={disabled || answer !== item.answerText} onClick={() => void onClarification('confirm-answer', { clarificationId: item.id })}><Check size={14} /> 确认已保存原文进入事实账本</button>}
+          {item.status === 'needs-review' && answer !== item.answerText && <small>请先保存修改后的回答，再确认。</small>}
+          <button className="text-action" type="button" disabled={disabled} onClick={() => void onClarification('declare-unknown', { clarificationId: item.id, ...(answer.trim() ? { answerText: answer } : {}) })}>明确未确定</button>
+        </>}
+        {item.status === 'author-unknown' && <>
+          <button className="text-action" type="button" disabled={disabled} onClick={() => void onClarification('keep-unknown', { clarificationId: item.id })}>保留未知</button>
+          <button className="text-action" type="button" disabled={disabled} onClick={() => void onClarification('request-independent-proposal', { clarificationId: item.id })}>请求独立提案</button>
+          {item.unknownHandling === 'request-independent-proposal' && beat.source === 'system-proposal' && <button className="text-action" type="button" disabled={disabled} onClick={() => onRegenerate(beat.id)}><RefreshCcw size={14} /> 生成替代预览</button>}
+          {beat.source === 'system-proposal' && <button className="text-action danger-action" type="button" disabled={disabled} onClick={() => void onClarification('abandon-dependent-proposal', { clarificationId: item.id })}><Trash2 size={14} /> 放弃这条提案</button>}
+        </>}
+        {item.status === 'confirmed' && beat.source === 'system-proposal' && <button className="text-action" type="button" disabled={disabled} onClick={() => onRegenerate(beat.id)}><RefreshCcw size={14} /> 用已确认回答生成替代预览</button>}
+      </div>}
+    </section>})}
+    {beat.status !== 'rejected' && beat.source !== 'user-input' && (isAdding
+      ? <div className="curve-clarification-entry">
+        <label><span>节点中的待核对原句</span><input value={causalGap} onChange={(event) => setCausalGap(event.target.value)} maxLength={180} disabled={disabled} /></label>
+        <label><span>向作者询问</span><input value={question} onChange={(event) => setQuestion(event.target.value)} maxLength={180} disabled={disabled} /></label>
+        <div><button className="text-action" type="button" onClick={() => setIsAdding(false)}>取消</button><button className="text-action" type="button" disabled={disabled || !causalGap.trim() || !beat.detail.includes(causalGap.trim()) || !question.trim()} onClick={() => void submitQuestion()}>记录问题</button></div>
+      </div>
+      : <button className="text-action" type="button" disabled={disabled} onClick={() => setIsAdding(true)}>{isConfirmed ? '保留旧版并标记待核对前提' : '标记待核对前提'}</button>)}
+  </div>
 }
 
 function CurveDesignSummary({ curve }: { curve: NonNullable<StorySession['provisionalCurve']> }) {

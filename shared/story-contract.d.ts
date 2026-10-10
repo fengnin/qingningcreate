@@ -100,13 +100,53 @@ export type CurveBeatStatus = 'proposed' | 'edited' | 'confirmed' | 'stale' | 'r
 export interface StorySourceFact {
   id: string
   text: string
-  source: 'user-input'
+  source: 'user-input' | 'author-supplement'
+  /** The clarification whose verbatim answer created this fact, if any. */
+  clarificationId?: string
   /**
    * A fact may only be parked after the author explicitly chooses not to use
    * it in this version. A pending fact blocks curve confirmation.
    */
   disposition: 'integrated' | 'needs-author-decision' | 'parked'
   coveredByBeatIds: string[]
+}
+
+export type StoryAuthorClarificationStatus =
+  | 'unanswered'
+  | 'author-unknown'
+  | 'needs-review'
+  | 'confirmed'
+
+export type StoryAuthorUnknownHandling =
+  | 'keep-unknown'
+  | 'request-independent-proposal'
+  | 'abandon-dependent-proposal'
+
+export type StoryClarificationRequirement = 'review-beat' | 'confirm-curve'
+
+export interface StoryClarificationDependency {
+  beatIds: string[]
+  causalGap: string
+  requiredFor: StoryClarificationRequirement[]
+}
+
+/**
+ * A review question is not a story fact. Its answer becomes a source fact
+ * only after the author explicitly confirms it.
+ */
+export interface StoryAuthorClarification {
+  id: string
+  prompt: string
+  status: StoryAuthorClarificationStatus
+  answerText?: string
+  unknownHandling?: StoryAuthorUnknownHandling
+  dependency: StoryClarificationDependency
+  source: 'author-review'
+  sourceFactId?: string
+  resolution?: 'answer-applied' | 'independent-proposal-accepted' | 'proposal-abandoned'
+  createdAt: number
+  updatedAt: number
+  confirmedAt?: number
 }
 
 /**
@@ -243,6 +283,7 @@ export interface ProvisionalCurve {
    */
   rejectedProposals?: CurveBeat[]
   instructions: AuthorInstruction[]
+  clarifications?: StoryAuthorClarification[]
   design?: StoryDesignRecord
   /** Concrete foundation assembled before confirmation; legacy sessions may omit it. */
   foundation?: StoryCurveFoundation
@@ -258,6 +299,7 @@ export interface ConfirmedCurve {
   brief: CreativeBrief
   beats: CurveBeat[]
   rejectedProposals?: CurveBeat[]
+  clarifications?: StoryAuthorClarification[]
   design?: StoryDesignRecord
   /** Frozen design foundation reviewed with the provisional curve. */
   foundation?: StoryCurveFoundation
@@ -568,6 +610,26 @@ export interface StoryCurveBeatUpdateRequest extends StorySessionVersion {
   operationId?: string
 }
 
+export type StoryAuthorClarificationAction =
+  | 'create'
+  | 'save-answer'
+  | 'declare-unknown'
+  | 'keep-unknown'
+  | 'request-independent-proposal'
+  | 'abandon-dependent-proposal'
+  | 'confirm-answer'
+
+export interface StoryAuthorClarificationRequest extends StorySessionVersion {
+  curveId: string
+  versionMode?: 'new-version'
+  clarificationId?: string
+  action: StoryAuthorClarificationAction
+  targetBeatId?: string
+  prompt?: string
+  causalGap?: string
+  answerText?: string
+}
+
 export interface StoryCurveBeatRegenerationRequest extends StorySessionVersion {
   curveId: string
   beatId: string
@@ -604,6 +666,7 @@ export interface StoryCurveRegenerationPreview {
   id: string
   curveId: string
   items: StoryCurveRegenerationPreviewItem[]
+  generation?: CurveGenerationMetadata
   createdAt: number
 }
 

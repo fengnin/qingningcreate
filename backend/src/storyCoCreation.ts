@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { getClarificationGroundingFacts, getClarificationsForBeat, getUnresolvedClarifications, markClarificationsResolved, reviewClarificationReplacement } from './storyClarification.js'
 import { AppError, requestQwenJson, summarizeModelResponse, withModelDiagnostic } from './qwen.js'
 import {
   createStoryDesignRecord,
@@ -1064,11 +1065,14 @@ export async function previewAffectedCurveBeats(
   for (const beatId of affectedBeatIds) {
     const target = working.beats.find((beat) => beat.id === beatId)
     if (!target || target.source !== 'system-proposal') continue
+    const blocking = getClarificationsForBeat(working, beatId)
+    if (blocking.some((item) => !item.resolution && item.status !== 'confirmed' && item.unknownHandling !== 'request-independent-proposal')) continue
     const previous = structuredClone(target)
-    const result = await regenerateCurveBeat(idea, seed, working, beatId, feedback)
+    const result = await regenerateCurveBeat(idea, seed, working, beatId, getClarificationFeedback(feedback, blocking))
     working = result.curve
     const proposed = working.beats.find((beat) => beat.id === beatId)
     if (!proposed) continue
+    for (const clarification of blocking) await reviewClarificationReplacement(curve, clarification, proposed)
     items.push({
       id: `regen-preview-item-${randomUUID()}`,
       beatId,
@@ -1087,6 +1091,55 @@ export async function previewAffectedCurveBeats(
       id: `regen-preview-${randomUUID()}`,
       curveId: curve.id,
       items,
+      ...(working.generation ? { generation: working.generation } : {}),
+      createdAt: Date.now(),
+    },
+  }
+}
+
+function getClarificationFeedback(
+  feedback: string | undefined,
+  clarifications: readonly import('../../shared/story-contract.js').StoryAuthorClarification[],
+): string | undefined {
+  if (!clarifications.length) return feedback
+  return [feedback, '不得依赖未确定前提'].filter(Boolean).join('；').slice(0, maximumCurveInstructionLength)
+}
+
+export async function previewClarificationCurveBeat(
+  idea: string,
+  seed: StorySeed,
+  curve: ProvisionalCurve,
+  beatId: string,
+  feedback?: string,
+): Promise<CurveRegenerationPreviewResult> {
+  const target = requireCurveBeat(curve, beatId, '重推')
+  assertDraftCurve(curve)
+  if (target.source !== 'system-proposal' || target.status === 'rejected') {
+    throw new AppError('只有有效的系统提案可以生成替代预览。', 409, 'STORY_CLARIFICATION_AUTHOR_EDIT')
+  }
+  const blocking = getClarificationsForBeat(curve, beatId)
+  if (!blocking.length || blocking.some((item) => !item.resolution && item.status !== 'confirmed' && item.unknownHandling !== 'request-independent-proposal')) {
+    throw new AppError('请先标记未知并选择生成独立提案。', 409, 'STORY_CLARIFICATION_REVIEW_REQUIRED')
+  }
+  const result = await regenerateCurveBeat(idea, seed, curve, beatId, getClarificationFeedback(feedback, blocking))
+  const replacement = result.curve.beats.find((beat) => beat.id === beatId)!
+  for (const clarification of blocking) await reviewClarificationReplacement(curve, clarification, replacement)
+  return {
+    affectedBeatIds: [beatId, ...result.affectedBeatIds],
+    preview: {
+      id: `regen-preview-${randomUUID()}`,
+      curveId: curve.id,
+      ...(result.curve.generation ? { generation: result.curve.generation } : {}),
+      items: [{
+        id: `regen-preview-item-${randomUUID()}`,
+        beatId,
+        title: target.title,
+        kind: target.kind,
+        oldDetail: target.detail,
+        newDetail: replacement.detail,
+        newSourceFactIds: [...(replacement.sourceFactIds ?? [])],
+        ...(replacement.causalAnchor ? { newCausalAnchor: replacement.causalAnchor } : {}),
+      }],
       createdAt: Date.now(),
     },
   }
@@ -1160,13 +1213,19 @@ export function resolveAffectedCurveBeats(
     'regenerate',
     '作者逐项审阅了受影响节点的重推提案。',
   )
+  const acceptedClarificationBeatIds = [...acceptedBeatIds].filter((beatId) => {
+    const original = curve.beats.find((beat) => beat.id === beatId)
+    const replacement = beats.find((beat) => beat.id === beatId)
+    return original?.detail !== replacement?.detail && replacement?.status === 'proposed'
+  })
   return {
-    curve: finalizeCurveMutation(curve, beats, instruction, {
+    curve: markClarificationsResolved(finalizeCurveMutation(curve, beats, instruction, {
+      ...(acceptedClarificationBeatIds.length && preview.generation ? { generation: preview.generation } : {}),
       rejectedProposals: [
         ...(curve.rejectedProposals ?? []),
         ...rejectedPreviewProposals,
       ],
-    }),
+    }), acceptedClarificationBeatIds),
     affectedBeatIds: preview.items.map((item) => item.beatId),
   }
 }
@@ -1283,6 +1342,7 @@ export function confirmProvisionalCurve(curve: ProvisionalCurve): {
       brief: confirmed.brief,
       beats: confirmed.beats,
       ...(confirmed.design ? { design: confirmed.design } : {}),
+      ...(confirmed.clarifications ? { clarifications: structuredClone(confirmed.clarifications) } : {}),
       foundation,
       ...(confirmed.generation ? { generation: confirmed.generation } : {}),
       confirmedAt,
@@ -1291,6 +1351,9 @@ export function confirmProvisionalCurve(curve: ProvisionalCurve): {
 }
 
 function validateCurveForConfirmation(curve: ProvisionalCurve): StoryDesignRecord | undefined {
+  if (getUnresolvedClarifications(curve).length) {
+    throw new AppError('还有节点依赖未确认的因果前提，请确认作者回答、审阅独立提案或放弃旧提案。', 400, 'STORY_CURVE_CLARIFICATIONS_UNRESOLVED')
+  }
   if (curve.status !== 'draft') {
     throw new AppError('这条主线已经不是可确认的草案，请刷新后重试。', 409, 'STORY_CURVE_NOT_DRAFT')
   }
@@ -4610,15 +4673,18 @@ function buildCurveBeatRegenerationPrompt(
   target: CurveBeat,
   feedback: string | undefined,
 ): string {
+  const clarificationContext = getClarificationsForBeat(curve, target.id)
+  const blockedBeatIds = new Set(curve.beats.filter((beat) => getClarificationsForBeat(curve, beat.id)
+    .some((item) => !item.resolution)).map((beat) => beat.id))
   const activeBeats = curve.beats
-    .filter((beat) => beat.status !== 'rejected')
+    .filter((beat) => beat.status !== 'rejected' && !blockedBeatIds.has(beat.id))
     .map((beat) => ({ id: beat.id, kind: beat.kind, detail: beat.detail, status: beat.status, sourceFactIds: beat.sourceFactIds }))
   const upstream = curve.beats
-    .filter((beat) => target.dependsOn.includes(beat.id) && beat.status !== 'rejected')
+    .filter((beat) => target.dependsOn.includes(beat.id) && beat.status !== 'rejected' && !blockedBeatIds.has(beat.id))
     .map((beat) => ({ id: beat.id, detail: beat.detail }))
   const rejectedProposals = curve.beats
     .filter((beat) => beat.status === 'rejected' && beat.source === 'system-proposal')
     .map((beat) => ({ id: beat.id, detail: beat.detail }))
   const rejectedHistory = (curve.rejectedProposals ?? []).map((beat) => ({ id: beat.id, detail: beat.detail }))
-  return `用户原始想法：${idea}\n原始信息：${JSON.stringify({ subject: seed.subject, lockedGoal: seed.lockedGoal, lockedFacts: seed.lockedFacts })}\n不可丢失的原始材料：${JSON.stringify(curve.design?.sourceFacts.filter((fact) => fact.disposition !== 'parked').map((fact) => ({ id: fact.id, text: fact.text })) ?? [])}\n创意方向：${JSON.stringify(curve.brief)}\n戏剧机制：${getDramaticMechanism(curve.brief)}\n当前有效曲线：${JSON.stringify(activeBeats)}\n目标节点的上游依据：${JSON.stringify(upstream)}\n已拒绝、不可重用的系统提案：${JSON.stringify([...rejectedProposals, ...rejectedHistory])}\n\n只重写目标节点：${JSON.stringify({ id: target.id, kind: target.kind, title: target.title, detail: target.detail })}${feedback ? `\n作者说明：${feedback}` : ''}\n重写必须具体承接上游依据或作者说明；只保留核心后果并推进新的因果，不得复制上游整句或使用嵌套引号；不得重新使用已拒绝内容，也不得用“更重要的事”“承担代价”等无对象的泛化句代替因果。`
+  return `用户原始想法：${idea}\n原始信息：${JSON.stringify({ subject: seed.subject, lockedGoal: seed.lockedGoal, lockedFacts: seed.lockedFacts })}\n不可丢失的原始材料：${JSON.stringify(getClarificationGroundingFacts(curve).map((fact) => ({ id: fact.id, text: fact.text })))}\n创意方向：${JSON.stringify(curve.brief)}\n戏剧机制：${getDramaticMechanism(curve.brief)}\n当前有效曲线：${JSON.stringify(activeBeats)}\n目标节点的上游依据：${JSON.stringify(upstream)}\n已拒绝、不可重用的系统提案：${JSON.stringify([...rejectedProposals, ...rejectedHistory])}\n${clarificationContext.length ? `因果问题与确认状态（缺口本身不是事实；只能使用已确认回答，其他前提必须排除）：${JSON.stringify(clarificationContext.map((item) => ({ question: item.prompt, gap: item.dependency.causalGap, status: item.status, answer: item.status === 'confirmed' ? item.answerText : null })))}\n` : ''}\n只重写目标节点：${JSON.stringify({ id: target.id, kind: target.kind, title: target.title, detail: clarificationContext.length ? '旧提案正在因果审阅，不得复用；按已确认事实重新提案' : target.detail })}${feedback ? `\n作者说明：${feedback}` : ''}\n重写必须具体承接上游依据或作者说明；只保留核心后果并推进新的因果，不得复制上游整句或使用嵌套引号；不得重新使用已拒绝内容，也不得用“更重要的事”“承担代价”等无对象的泛化句代替因果。`
 }

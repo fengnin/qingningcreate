@@ -10,10 +10,20 @@ import {
   previewAffectedCurveBeats,
   resolveAffectedCurveBeats,
   regenerateCurveBeat,
+  previewClarificationCurveBeat,
   rejectCurveBeat,
   updateCurveSourceFactDisposition,
   updateCurveBeat,
 } from './storyCoCreation.js'
+import {
+  changeCurveClarification,
+  confirmCurveClarification,
+  getClarificationsAffectingBeat,
+  getClarificationsForBeat,
+  getUnresolvedClarifications,
+  markClarificationsResolved,
+  reviewClarificationReplacement,
+} from './storyClarification.js'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
@@ -85,6 +95,7 @@ import type {
   StoryCurveVersionSelectionRequest,
   StorySessionSnapshot,
   StoryAuthorInstructionRequest,
+  StoryAuthorClarificationRequest,
   StoryActionProposal,
   StoryActionProposalConfirmRequest,
   StoryActionProposalRequest,
@@ -893,6 +904,32 @@ export function parseStoryCurveConfirmRequest(body: unknown): StoryCurveConfirmR
     ...parseStorySessionReference(record),
     curveId: readIdentifier(record, 'curveId', '暂定故事曲线不完整，请刷新后重试。', invalidRequestContext),
   }
+}
+
+export function parseStoryAuthorClarificationRequest(body: unknown): StoryAuthorClarificationRequest {
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'versionMode', 'clarificationId', 'action', 'targetBeatId', 'prompt', 'causalGap', 'answerText'])
+  const actions = new Set(['create', 'save-answer', 'declare-unknown', 'keep-unknown', 'request-independent-proposal', 'abandon-dependent-proposal', 'confirm-answer'])
+  if (!actions.has(record.action as string) || (record.versionMode !== undefined && record.versionMode !== 'new-version')) {
+    throw new AppError('补充事实的操作不合法。', 400, 'INVALID_REQUEST')
+  }
+  return {
+    ...parseStorySessionReference(record),
+    curveId: readIdentifier(record, 'curveId', '暂定主线不存在。', invalidRequestContext),
+    action: record.action as StoryAuthorClarificationRequest['action'],
+    ...(record.versionMode ? { versionMode: 'new-version' as const } : {}),
+    ...(record.clarificationId ? { clarificationId: readIdentifier(record, 'clarificationId', '要处理的问题不存在。', invalidRequestContext) } : {}),
+    ...(record.targetBeatId ? { targetBeatId: readIdentifier(record, 'targetBeatId', '请选择要审阅的节点。', invalidRequestContext) } : {}),
+    ...(record.prompt !== undefined ? { prompt: readText(record, 'prompt', '请填写作者问题。', 180, invalidRequestContext) } : {}),
+    ...(record.causalGap !== undefined ? { causalGap: readText(record, 'causalGap', '请标记缺失的因果依据。', 180, invalidRequestContext) } : {}),
+    ...(record.answerText !== undefined ? { answerText: readVerbatimClarificationAnswer(record.answerText) } : {}),
+  }
+}
+
+function readVerbatimClarificationAnswer(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > 240) {
+    throw new AppError('请填写不超过 240 字的作者回答。', 400, 'INVALID_REQUEST')
+  }
+  return value
 }
 
 export function parseStoryCurveStartSpineRequest(body: unknown): StoryCurveStartSpineRequest {
@@ -2737,10 +2774,25 @@ async function updateSessionCurveBeatInternal(
   const session = getStorySession(request.storyId, request.revision)
   const curve = requireDraftCurve(session, request.curveId)
   const result = updateCurveBeat(curve, request.beatId, request.detail)
-  session.provisionalCurve = result.curve
-  session.pendingCurveRegeneration = undefined
-  commitStorySessionChanges(session)
-  const response = createCurveMutationResponse(session, result)
+  const previouslyBlocked = getClarificationsForBeat(curve, request.beatId)
+  if (previouslyBlocked.length) {
+    if (previouslyBlocked.some((item) => !item.resolution && item.status !== 'confirmed' && item.unknownHandling !== 'request-independent-proposal')) {
+      throw new AppError('旧提案依赖未确认前提，请先选择独立替代提案。', 409, 'STORY_CLARIFICATION_REVIEW_REQUIRED')
+    }
+    const replacement = result.curve.beats.find((beat) => beat.id === request.beatId)!
+    for (const clarification of previouslyBlocked) await reviewClarificationReplacement(curve, clarification, replacement)
+    assertStorySessionRevision(session, request.revision)
+    result.curve = markClarificationsResolved(result.curve, [request.beatId])
+  }
+  let saved = session
+  if (curve.clarifications?.length) {
+    saved = commitClarificationSessionChanges(session, { ...structuredClone(session), provisionalCurve: result.curve, pendingCurveRegeneration: undefined })
+  } else {
+    session.provisionalCurve = result.curve
+    session.pendingCurveRegeneration = undefined
+    commitStorySessionChanges(session)
+  }
+  const response = createCurveMutationResponse(saved, result)
   writeCachedStoryOperation(completedCurveBeatUpdates, operationKey, response)
   return response
 }
@@ -2750,6 +2802,13 @@ export async function regenerateSessionCurveBeat(
 ): Promise<StoryCurveMutationResponse> {
   const session = getStorySession(request.storyId, request.revision)
   const curve = requireDraftCurve(session, request.curveId)
+  const blocked = getClarificationsAffectingBeat(curve, request.beatId)
+  if (blocked.length) {
+    const result = await previewClarificationCurveBeat(session.idea, session.seed, curve, request.beatId, request.feedback)
+    assertStorySessionRevision(session, request.revision)
+    const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), pendingCurveRegeneration: result.preview })
+    return { ...createCurveMutationResponse(saved, { curve, affectedBeatIds: result.affectedBeatIds }), pendingCurveRegeneration: result.preview }
+  }
   const result = await regenerateCurveBeat(
     session.idea,
     session.seed,
@@ -2758,7 +2817,15 @@ export async function regenerateSessionCurveBeat(
     request.feedback,
     request.replaceRejected === true,
   )
+  const replacement = result.curve.beats.find((beat) => beat.id === request.beatId)!
+  for (const clarification of getClarificationsForBeat(curve, request.beatId)) {
+    await reviewClarificationReplacement(curve, clarification, replacement)
+  }
   assertStorySessionRevision(session, request.revision)
+  if (curve.clarifications?.length) {
+    const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), provisionalCurve: result.curve, pendingCurveRegeneration: undefined })
+    return createCurveMutationResponse(saved, result)
+  }
   session.provisionalCurve = result.curve
   session.pendingCurveRegeneration = undefined
   commitStorySessionChanges(session)
@@ -2784,10 +2851,15 @@ export async function regenerateSessionCurveDependencies(
   const curve = requireDraftCurve(session, request.curveId)
   const result = await previewAffectedCurveBeats(session.idea, session.seed, curve, request.feedback)
   assertStorySessionRevision(session, request.revision)
-  session.pendingCurveRegeneration = result.preview
-  commitStorySessionChanges(session)
+  let saved = session
+  if (curve.clarifications?.length) {
+    saved = commitClarificationSessionChanges(session, { ...structuredClone(session), pendingCurveRegeneration: result.preview })
+  } else {
+    session.pendingCurveRegeneration = result.preview
+    commitStorySessionChanges(session)
+  }
   return {
-    ...createCurveMutationResponse(session, { curve, affectedBeatIds: result.affectedBeatIds }),
+    ...createCurveMutationResponse(saved, { curve, affectedBeatIds: result.affectedBeatIds }),
     pendingCurveRegeneration: result.preview,
   }
 }
@@ -2801,7 +2873,31 @@ export async function resolveSessionCurveDependencies(
   if (!preview || preview.id !== request.previewId) {
     throw new AppError('批量重推预览已经失效，请重新生成预览。', 409, 'STORY_CURVE_REGENERATION_PREVIEW_NOT_FOUND')
   }
+  for (const item of preview.items) {
+    if (request.decisions[item.id] !== 'accept') continue
+    const clarifications = getClarificationsForBeat(curve, item.beatId)
+    const original = curve.beats.find((beat) => beat.id === item.beatId)
+    if (original?.source !== 'system-proposal') {
+      throw new AppError('作者编辑的节点不能由系统覆盖。', 409, 'STORY_CLARIFICATION_AUTHOR_EDIT')
+    }
+    for (const clarification of clarifications) {
+      if (!clarification.resolution && clarification.status !== 'confirmed' && clarification.unknownHandling !== 'request-independent-proposal') {
+        throw new AppError('旧提案仍依赖未确认前提，不能接受。', 409, 'STORY_CLARIFICATION_REVIEW_REQUIRED')
+      }
+      await reviewClarificationReplacement(curve, clarification, {
+        ...original!,
+        detail: item.newDetail,
+        sourceFactIds: item.newSourceFactIds,
+        ...(item.newCausalAnchor ? { causalAnchor: item.newCausalAnchor } : { causalAnchor: undefined }),
+      })
+    }
+  }
+  assertStorySessionRevision(session, request.revision)
   const result = resolveAffectedCurveBeats(curve, preview, request.decisions)
+  if (curve.clarifications?.length) {
+    const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), provisionalCurve: result.curve, pendingCurveRegeneration: undefined })
+    return createCurveMutationResponse(saved, result)
+  }
   session.provisionalCurve = result.curve
   session.pendingCurveRegeneration = undefined
   commitStorySessionChanges(session)
@@ -2820,12 +2916,91 @@ export async function updateSessionSourceFactDisposition(
   return createCurveMutationResponse(session, result)
 }
 
+export async function updateSessionCurveClarification(
+  request: StoryAuthorClarificationRequest,
+): Promise<StoryCurveMutationResponse> {
+  const session = getStorySession(request.storyId, request.revision)
+  if (session.workflow !== 'co-creation' || session.provisionalCurve?.id !== request.curveId) {
+    throw new AppError('暂定主线已经变化，请刷新后重试。', 409, 'STORY_SESSION_CONFLICT')
+  }
+  const next = structuredClone(session)
+  if (next.confirmedCurve || next.provisionalCurve!.status !== 'draft' || next.currentTurn || next.history.length || next.state) {
+    if (request.versionMode !== 'new-version') {
+      throw new AppError('已确认的主线不能原地改写，请明确创建新版本。', 409, 'STORY_VERSION_PRESERVATION_REQUIRED')
+    }
+    syncActiveCurveVersion(next)
+    const now = Date.now()
+    const draft: ProvisionalCurve = {
+      ...structuredClone(next.provisionalCurve!),
+      id: `curve-${randomUUID()}`,
+      status: 'draft',
+      beats: next.provisionalCurve!.beats.map((beat) => ({
+        ...structuredClone(beat),
+        status: beat.status === 'rejected' ? 'rejected'
+          : beat.source === 'user-input' ? 'confirmed' : beat.source === 'user-edit' ? 'edited' : 'proposed',
+      })),
+      createdAt: now,
+      updatedAt: now,
+    }
+    next.provisionalCurve = draft
+    next.confirmedCurve = undefined
+    const version = createCurveVersion(draft, getNextCurveVersionLabel(next.curveVersions))
+    next.curveVersions = [...(next.curveVersions ?? []), version]
+    next.activeCurveVersionId = version.id
+    clearCoCreationStoryPath(next)
+  } else if (request.versionMode) {
+    throw new AppError('当前主线仍是草案，不需要创建新版本。', 409, 'STORY_VERSION_DECISION_REQUIRED')
+  }
+  const curve = requireDraftCurve(next, next.provisionalCurve!.id)
+  const result = request.action === 'confirm-answer'
+    ? confirmCurveClarification(curve, request.clarificationId)
+    : changeCurveClarification(curve, request)
+  next.provisionalCurve = result.curve
+  next.pendingCurveRegeneration = undefined
+  const saved = commitClarificationSessionChanges(session, next)
+  return createCurveMutationResponse(saved, result)
+}
+
+/** Publish the detached draft only after its whole session has been saved. */
+function commitClarificationSessionChanges(current: StorySessionRecord, next: StorySessionRecord): StorySessionRecord {
+  assertStorySessionRevision(current, next.revision)
+  syncActiveCurveVersion(next)
+  next.revision += 1
+  next.updatedAt = Date.now()
+  persistStorySessions(next)
+  storySessions.set(next.id, next)
+  return next
+}
+
 export async function confirmSessionCurve(
   request: StoryCurveConfirmRequest,
 ): Promise<StoryCurveConfirmationResponse> {
   const session = getStorySession(request.storyId, request.revision)
   const curve = requireDraftCurve(session, request.curveId)
+  if (getUnresolvedClarifications(curve).length) {
+    throw new AppError('仍有节点依赖未确认的因果前提。', 400, 'STORY_CURVE_CLARIFICATIONS_UNRESOLVED')
+  }
   const result = confirmProvisionalCurve(curve)
+  for (const clarification of curve.clarifications ?? []) {
+    const affected = curve.beats.filter((beat) => beat.status !== 'rejected'
+      && getClarificationsForBeat(curve, beat.id).some((item) => item.id === clarification.id))
+    if (!affected.length) continue
+    await reviewClarificationReplacement(curve, clarification, {
+      ...affected[0]!,
+      detail: affected.map((beat) => beat.detail).join('\n'),
+      causalAnchor: affected.map((beat) => beat.causalAnchor ?? '').join('\n'),
+      sourceFactIds: [...new Set(affected.flatMap((beat) => beat.sourceFactIds ?? []))],
+    })
+  }
+  assertStorySessionRevision(session, request.revision)
+  if (curve.clarifications?.length) {
+    const saved = commitClarificationSessionChanges(session, {
+      ...structuredClone(session), provisionalCurve: result.curve, confirmedCurve: result.confirmedCurve,
+      pendingCurveRegeneration: undefined, seed: { ...session.seed, creativeBrief: result.confirmedCurve.brief },
+    })
+    return { storyId: saved.id, revision: saved.revision, ...result,
+      curveVersions: saved.curveVersions, activeCurveVersionId: saved.activeCurveVersionId }
+  }
   session.provisionalCurve = result.curve
   session.confirmedCurve = result.confirmedCurve
   session.pendingCurveRegeneration = undefined
@@ -7266,10 +7441,10 @@ function loadPersistedStorySessions(): Map<string, StorySessionRecord> {
   }
 }
 
-function persistStorySessions() {
+function persistStorySessions(candidate?: StorySessionRecord) {
   const store: PersistedStorySessionStore = {
     version: 1,
-    sessions: [...storySessions.values()],
+    sessions: [...storySessions.values()].map((session) => session.id === candidate?.id ? candidate : session),
   }
   const temporaryPath = `${storySessionStorePath}.tmp`
 
@@ -7279,6 +7454,7 @@ function persistStorySessions() {
     renameSync(temporaryPath, storySessionStorePath)
   } catch (error) {
     console.error(`Story session store could not be saved: ${getErrorIdentifier(error)}`)
+    if (candidate) throw new AppError('作者补充未保存，请重试；主线和 revision 均未改变。', 503, 'STORY_SESSION_PERSIST_FAILED')
   }
 }
 

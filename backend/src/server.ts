@@ -21,6 +21,7 @@ import {
   regenerateSessionCurveDependencies,
   resolveSessionCurveDependencies,
   updateSessionSourceFactDisposition,
+  updateSessionCurveClarification,
   confirmSessionCurve,
   startSessionStorySpineFromCurve,
   getStorySessionSnapshot,
@@ -35,6 +36,7 @@ import {
   parseStoryCurveDependenciesRegenerationRequest,
   parseStoryCurveRegenerationResolutionRequest,
   parseStorySourceFactDispositionRequest,
+  parseStoryAuthorClarificationRequest,
   parseStoryCurveConfirmRequest,
   parseStoryCurveStartSpineRequest,
   parseStoryCurveVersionSelectionRequest,
@@ -139,6 +141,13 @@ registerStoryStage(
   '/api/story/curve/source-fact',
   parseStorySourceFactDispositionRequest,
   updateSessionSourceFactDisposition,
+  (result) => result satisfies StoryCurveMutationResponse,
+)
+
+registerStoryStage(
+  '/api/story/curve/clarification',
+  parseStoryAuthorClarificationRequest,
+  updateSessionCurveClarification,
   (result) => result satisfies StoryCurveMutationResponse,
 )
 

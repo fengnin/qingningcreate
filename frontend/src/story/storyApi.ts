@@ -53,6 +53,8 @@ import type {
   StoryCurveVersionSelectionRequest,
   StorySessionSnapshot,
   StoryAuthorInstructionRequest,
+  StoryAuthorClarification,
+  StoryAuthorClarificationRequest,
   StoryActionProposalRequest,
   StoryActionProposalConfirmRequest,
   StoryActionProposalResponse,
@@ -112,6 +114,12 @@ export function requestSourceFactDisposition(
   request: StorySourceFactDispositionRequest,
 ): Promise<StoryCurveMutationResponse> {
   return postJson('/api/story/curve/source-fact', request, parseStoryCurveMutationResponse)
+}
+
+export function requestCurveClarification(
+  request: StoryAuthorClarificationRequest,
+): Promise<StoryCurveMutationResponse> {
+  return postJson('/api/story/curve/clarification', request, parseStoryCurveMutationResponse)
 }
 
 export function requestCurveConfirmation(request: StoryCurveConfirmRequest): Promise<StoryCurveConfirmationResponse> {
@@ -314,6 +322,7 @@ function parseCurveRegenerationPreview(value: unknown): StoryCurveRegenerationPr
         ...(itemRecord.newCausalAnchor === undefined ? {} : { newCausalAnchor: readText(itemRecord, 'newCausalAnchor') }),
       }
     }),
+    ...(record.generation === undefined ? {} : { generation: parseCurveGenerationMetadata(record.generation) }),
     createdAt: readTimestamp(record, 'createdAt'),
   }
 }
@@ -581,7 +590,7 @@ function parseConfirmedCurve(value: unknown): ConfirmedCurve {
 
 type ParsedCurveFields = Pick<
   ProvisionalCurve,
-  'id' | 'title' | 'brief' | 'beats' | 'rejectedProposals' | 'design' | 'foundation' | 'generation'
+  'id' | 'title' | 'brief' | 'beats' | 'rejectedProposals' | 'design' | 'foundation' | 'generation' | 'clarifications'
 >
 
 function parseCurveFields(record: Record<string, unknown>): ParsedCurveFields {
@@ -597,7 +606,43 @@ function parseCurveFields(record: Record<string, unknown>): ParsedCurveFields {
     ...(record.design === undefined ? {} : { design: parseStoryDesignRecord(record.design) }),
     ...(record.foundation === undefined ? {} : { foundation: parseStoryCurveFoundation(record.foundation) }),
     ...(record.generation === undefined ? {} : { generation: parseCurveGenerationMetadata(record.generation) }),
+    ...(record.clarifications === undefined ? {} : { clarifications: parseClarifications(record.clarifications) }),
   }
+}
+
+function parseClarifications(value: unknown): StoryAuthorClarification[] {
+  if (!Array.isArray(value)) throwInvalidResponse()
+  return value.map((item) => {
+    const record = expectRecord(item)
+    const status = record.status
+    if (status !== 'unanswered' && status !== 'author-unknown' && status !== 'needs-review' && status !== 'confirmed') throwInvalidResponse()
+    const unknownHandling = record.unknownHandling
+    if (unknownHandling !== undefined && unknownHandling !== 'keep-unknown' && unknownHandling !== 'request-independent-proposal' && unknownHandling !== 'abandon-dependent-proposal') throwInvalidResponse()
+    const resolution = record.resolution
+    if (resolution !== undefined && resolution !== 'answer-applied' && resolution !== 'independent-proposal-accepted' && resolution !== 'proposal-abandoned') throwInvalidResponse()
+    const dependency = expectRecord(record.dependency)
+    const requiredFor = dependency.requiredFor
+    if (!Array.isArray(requiredFor) || requiredFor.some((value) => value !== 'review-beat' && value !== 'confirm-curve')) throwInvalidResponse()
+    if (record.source !== 'author-review') throwInvalidResponse()
+    return {
+      id: readIdentifier(record, 'id'),
+      prompt: readText(record, 'prompt'),
+      status,
+      ...(record.answerText === undefined ? {} : { answerText: readVerbatimAnswer(record.answerText) }),
+      ...(unknownHandling === undefined ? {} : { unknownHandling }),
+      dependency: {
+        beatIds: readIdentifierList(dependency, 'beatIds'),
+        causalGap: readText(dependency, 'causalGap'),
+        requiredFor,
+      },
+      source: 'author-review',
+      ...(record.sourceFactId === undefined ? {} : { sourceFactId: readIdentifier(record, 'sourceFactId') }),
+      ...(resolution === undefined ? {} : { resolution }),
+      createdAt: readTimestamp(record, 'createdAt'),
+      updatedAt: readTimestamp(record, 'updatedAt'),
+      ...(record.confirmedAt === undefined ? {} : { confirmedAt: readTimestamp(record, 'confirmedAt') }),
+    }
+  })
 }
 
 function parseStoryCurveFoundation(value: unknown): StoryCurveFoundation {
@@ -688,10 +733,13 @@ function parseStoryDesignRecord(value: unknown): NonNullable<ProvisionalCurve['d
       const fact = expectRecord(item)
       const disposition = fact.disposition
       if (disposition !== 'integrated' && disposition !== 'needs-author-decision' && disposition !== 'parked') throwInvalidResponse()
+      const source = fact.source
+      if (source !== 'user-input' && source !== 'author-supplement') throwInvalidResponse()
       return {
         id: readIdentifier(fact, 'id'),
-        text: readText(fact, 'text'),
-        source: 'user-input' as const,
+        text: source === 'author-supplement' ? readVerbatimAnswer(fact.text) : readText(fact, 'text'),
+        source,
+        ...(fact.clarificationId === undefined ? {} : { clarificationId: readIdentifier(fact, 'clarificationId') }),
         disposition,
         coveredByBeatIds: readIdentifierList(fact, 'coveredByBeatIds'),
       }
@@ -1200,6 +1248,11 @@ function readText(record: Record<string, unknown>, field: string): string {
   const value = record[field]
   if (typeof value !== 'string' || !value.trim()) throwInvalidResponse()
   return value.trim()
+}
+
+function readVerbatimAnswer(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim()) throwInvalidResponse()
+  return value
 }
 
 function readOptionalGeneratedText(value: unknown, maximumLength: number): string | undefined {

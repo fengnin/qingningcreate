@@ -12,6 +12,7 @@ import {
   requestAffectedCurveRegeneration,
   requestCurveRegenerationResolution,
   requestSourceFactDisposition,
+  requestCurveClarification,
   requestCurveConfirmation,
   requestCurveStorySpine,
   requestStorySession,
@@ -37,6 +38,7 @@ import type {
   StoryTurnResponse,
   StoryView,
   StoryCurveVersion,
+  StoryAuthorClarificationAction,
   StoryCurveMutationResponse,
   StoryCurveRegenerationDecision,
 } from './types'
@@ -74,6 +76,9 @@ export interface StorySessionActions {
   regenerateAffectedCurveBeats: (feedback?: string) => Promise<void>
   resolveAffectedCurveBeats: (decisions: Record<string, StoryCurveRegenerationDecision>) => Promise<void>
   setSourceFactDisposition: (factId: string, disposition: 'parked' | 'integrated') => Promise<void>
+  changeCurveClarification: (action: StoryAuthorClarificationAction, fields?: {
+    clarificationId?: string; targetBeatId?: string; prompt?: string; causalGap?: string; answerText?: string
+  }) => Promise<boolean>
   confirmProvisionalCurve: () => Promise<void>
   startStorySpineFromCurve: () => Promise<void>
   showDifferentConflictCores: () => Promise<void>
@@ -155,6 +160,7 @@ function createCoCreationActions(
   | 'regenerateAffectedCurveBeats'
   | 'resolveAffectedCurveBeats'
   | 'setSourceFactDisposition'
+  | 'changeCurveClarification'
   | 'confirmProvisionalCurve'
   | 'startStorySpineFromCurve'
 > {
@@ -265,6 +271,29 @@ function createCoCreationActions(
     ))
   }
 
+  const changeCurveClarification: StorySessionActions['changeCurveClarification'] = async (action, fields = {}) => {
+    const confirmed = Boolean(state.confirmedCurve)
+    const curve = state.provisionalCurve
+    if (!curve || !state.storyId) return false
+    let saved = false
+    await runStorySessionStageRequest(state, stage,
+      () => requestCurveClarification({
+        storyId: state.storyId!, revision: state.revision, curveId: curve.id, action, ...fields,
+        ...(confirmed ? { versionMode: 'new-version' as const } : {}),
+      }),
+      (result) => {
+        applyCurveMutationState(state, result)
+        saved = true
+        if (confirmed) {
+          state.setConfirmedCurve(undefined)
+          state.resetPlanAfter('conflict-core')
+          state.setView('provisional-curve')
+        }
+      },
+    )
+    return saved
+  }
+
   const confirmProvisionalCurve = async () => {
     const curve = state.provisionalCurve
     if (!curve || !state.storyId || state.confirmedCurve) return
@@ -320,6 +349,7 @@ function createCoCreationActions(
     regenerateAffectedCurveBeats,
     resolveAffectedCurveBeats,
     setSourceFactDisposition,
+    changeCurveClarification,
     confirmProvisionalCurve,
     startStorySpineFromCurve,
   }

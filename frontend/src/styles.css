@@ -1440,6 +1440,53 @@ textarea:focus-visible {
   font-size: 10px;
 }
 
+.curve-clarifications {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.curve-clarification,
+.curve-clarification-entry {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-left: 2px solid #cc9275;
+  background: #24231f;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.curve-clarification-heading,
+.curve-clarification-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.curve-clarification-heading { justify-content: space-between; }
+.curve-clarification-heading span,
+.curve-clarification small { color: #dfad88; }
+.curve-clarification p { margin: 0; color: #acb6aa; overflow-wrap: anywhere; }
+.curve-clarification blockquote { margin: 0; padding-left: 10px; border-left: 1px solid #819685; white-space: pre-wrap; overflow-wrap: anywhere; }
+.curve-clarification-actions label,
+.curve-clarification-entry label { display: grid; gap: 6px; flex-basis: 100%; }
+.curve-clarification-actions input,
+.curve-clarification-actions textarea,
+.curve-clarification-entry input {
+  width: 100%;
+  min-height: 36px;
+  padding: 8px;
+  border: 1px solid #657364;
+  border-radius: 4px;
+  background: #18221c;
+  color: #f0f2eb;
+  font: inherit;
+}
+.curve-clarification-actions textarea { min-height: 72px; resize: vertical; }
+.curve-clarification-entry > div { display: flex; justify-content: flex-end; gap: 8px; }
+
 .curve-version-bar {
   margin: 22px 0 0 60px;
   padding-top: 14px;
