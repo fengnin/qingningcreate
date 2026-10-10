@@ -120,12 +120,18 @@ export function buildStoryCurveFoundation(
       climax.detail,
       resolution.causalAnchor ?? '选择会改变目标和关系',
     )
-  const plausibleCost = ensureConcreteFoundationCost(extractedCost, tradeoff, decisionLabel)
+  // A pair of proposed actions does not establish a specific narrative cost.
+  const reviewedDecision = climax.detail.match(/需要选择(.+?)(?:，[^；]*)?；既有约束：(.+?)；代价：(.+)$/u)
+  const plausibleCost = reviewedDecision?.[3]
+    ? shortenFoundationLabel(reviewedDecision[3])
+    : ensureConcreteFoundationCost(extractedCost, tradeoff, decisionLabel)
   const openingClue = triggerAnchor
   const opening = current.detail.trim()
   const middleEscalation = escalationAnchor
   const midpointPressure = midpointAnchor
-  const choice = buildFoundationChoice(tradeoff, decisionLabel, urgency, climax.detail)
+  const choice = reviewedDecision?.[1]
+    ? shortenFoundationLabel(`选择${reviewedDecision[1]}；约束：${reviewedDecision[2]}`)
+    : buildFoundationChoice(tradeoff, decisionLabel, urgency, climax.detail)
   const climaxPressure = buildClimaxPressure(choice, plausibleCost)
   const predicamentObstacle = buildPredicamentObstacle(
     triggerAnchor,

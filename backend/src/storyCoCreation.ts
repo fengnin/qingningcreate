@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { getAuthorDecisionMaterial, renderAuthorDecisionChoice } from './storyDecision.js'
 import { getClarificationGroundingFacts, getClarificationsForBeat, getUnresolvedClarifications, markClarificationsResolved, reviewClarificationReplacement } from './storyClarification.js'
 import { AppError, requestQwenJson, summarizeModelResponse, withModelDiagnostic } from './qwen.js'
 import {
@@ -4109,7 +4110,7 @@ function buildCompactCurveGenerationPrompt(
     `用户原始想法（仅供核对，不要复述）：${idea}`,
     `作者材料（只能选择这里的 ID，anchor 是逐字原文）：${JSON.stringify(contract.sourceFacts)}`,
     `选择合同：${JSON.stringify({
-      allowedTriggerFactIds: contract.pressureFactIds,
+      allowedTriggerFactIds: contract.triggerFactIds,
       allowedEscalationFactIds: contract.pressureFactIds,
       allowedChoiceFactIds: contract.choiceFactIds,
       allowedResolutionModes: contract.resolutionModes,
@@ -4172,7 +4173,7 @@ function buildCompactCurveRepairPrompt(
     `用户原始想法（仅供核对）：${idea}`,
     `逐字原文锚点（只能从这里选择 ID）：${JSON.stringify(contract.sourceFacts)}`,
     `选择合同：${JSON.stringify({
-      allowedTriggerFactIds: contract.pressureFactIds,
+      allowedTriggerFactIds: contract.triggerFactIds,
       allowedEscalationFactIds: contract.pressureFactIds,
       allowedChoiceFactIds: contract.choiceFactIds,
       allowedResolutionModes: contract.resolutionModes,
@@ -4209,6 +4210,7 @@ type ModelCurveResolutionMode = typeof modelCurveResolutionModes[number]
 
 interface ModelFactRoleCurveContract {
   sourceFacts: Array<{ id: string, text: string, anchor: string }>
+  triggerFactIds: string[]
   pressureFactIds: string[]
   choiceFactIds: string[]
   resolutionModes: ModelCurveResolutionMode[]
@@ -4245,6 +4247,7 @@ function getModelFactRoleCurveContract(
   // information gap, or a stated obstruction. If fewer than two exist, the
   // caller asks the author for another concrete condition.
   const pressureFacts = nonGoalFacts.filter(isModelCurvePressureFact)
+  const directObstacles = pressureFacts.filter((fact) => /(?:缺少|缺失|无法|不能|拒绝|冲突|分歧)/u.test(fact.text))
 
   const preferredModes: ModelCurveResolutionMode[] = brief.dramaticForces.includes('relationship-tension')
     ? ['address-pressure-before-goal', 'adjust-goal-under-constraint']
@@ -4260,6 +4263,7 @@ function getModelFactRoleCurveContract(
       text: fact.text,
       anchor: getModelCurveFactAnchor(fact.text),
     })),
+    triggerFactIds: (directObstacles.length ? directObstacles : pressureFacts).map((fact) => fact.id),
     pressureFactIds: pressureFacts.map((fact) => fact.id),
     choiceFactIds,
     resolutionModes: preferredModes,
@@ -4277,7 +4281,7 @@ function getModelFactRoleCurveReadinessFailure(contract: ModelFactRoleCurveContr
 }
 
 function isModelCurvePressureFact(fact: StorySourceFact): boolean {
-  if (/(?:今晚|明早|明天|后天|今天|周[一二三四五六日天]|截止|期限|归还|必须在[^，。！？；]{0,24}前|要在[^，。！？；]{0,24}前|答应|承诺|约定|保证|不再|缺失|卖掉|无法|不能|不得|冲突|分歧|关系|姐姐|哥哥|弟弟|妹妹|队友|朋友|家人|不知道|不确定|犹豫|是否|要不要)/u.test(fact.text)) {
+  if (/(?:今晚|明早|明天|后天|今天|周[一二三四五六日天]|截止|期限|归还|必须在[^，。！？；]{0,24}前|要在[^，。！？；]{0,24}前|答应|承诺|约定|保证|不再|缺少|缺失|卖掉|无法|不能|不得|冲突|分歧|关系|姐姐|哥哥|弟弟|妹妹|队友|朋友|家人|不知道|不确定|犹豫|是否|要不要)/u.test(fact.text)) {
     return true
   }
   // “看到/发现” alone is an observation, not a pressure. Promote it only
@@ -4321,7 +4325,7 @@ function buildModelFactRoleCurvePayload(
   const contract = getModelFactRoleCurveContract(design, seed, brief)
   const readinessFailure = getModelFactRoleCurveReadinessFailure(contract)
   if (readinessFailure) throwCurveModelValidationFailure(readinessFailure, value)
-  if (!contract.pressureFactIds.includes(triggerFactId)) {
+  if (!contract.triggerFactIds.includes(triggerFactId)) {
     throwCurveModelValidationFailure(`curvePlan 的 triggerFactId 不是允许的压力事实“${triggerFactId}”`, value)
   }
   if (!contract.pressureFactIds.includes(escalationFactId)) {
@@ -4356,17 +4360,15 @@ function buildModelFactRoleCurvePayload(
   const decision = getCurvePlanDecisionPhrase(goal)
   const triggerDetail = `暂定：${trigger}让${subject}${direction.trigger}${decision}`
   const escalationDetail = `暂定：若${subject}继续考虑${decision}，${direction.escalation}${escalation}`
-  const choiceDetail = getCurvePlanChoiceDetail(
-    subject,
-    goal,
-    escalation,
-    resolutionMode as ModelCurveResolutionMode,
-    direction.choiceSuffix,
-  )
+  const decisionMaterial = getAuthorDecisionMaterial(design.sourceFacts, choiceFact, goal)
+  const choiceConstraint = normalizeCurveEvidence(escalation).includes(normalizeCurveEvidence(decisionMaterial.action))
+    ? { text: trigger, fact: triggerFact }
+    : { text: escalation, fact: escalationFact }
+  const choiceDetail = renderAuthorDecisionChoice(subject, decisionMaterial, choiceConstraint.text)
   const resolutionDetail = getCurvePlanResolutionDetail(
     subject,
-    goal,
-    escalation,
+    decisionMaterial.action,
+    choiceConstraint.text,
     resolutionMode as ModelCurveResolutionMode,
     direction.resolutionSuffix,
   )
@@ -4387,12 +4389,12 @@ function buildModelFactRoleCurvePayload(
       {
         kind: 'climax-choice',
         detail: choiceDetail,
-        sourceFactIds: [escalationFact.id, choiceFact.id],
+        sourceFactIds: [...new Set([choiceConstraint.fact.id, decisionMaterial.fact.id, ...decisionMaterial.riskFacts.map((fact) => fact.id)])],
       },
       {
         kind: 'resolution',
         detail: resolutionDetail,
-        sourceFactIds: [escalationFact.id, choiceFact.id],
+        sourceFactIds: [...new Set([choiceConstraint.fact.id, decisionMaterial.fact.id])],
       },
     ],
   }
