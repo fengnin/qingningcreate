@@ -174,6 +174,50 @@ test('author review preserves exact original text and covers exactly the selecte
   assert.throws(() => parsePreparationReview({ ...review, originalText: '' }, ['count']), code('INVALID_REQUEST'))
 })
 
+test('long reviewed text keeps exact evidence and history while stage titles satisfy the reasoning contract', async () => {
+  const originalFetch = globalThis.fetch
+  const env = { key: process.env.DASHSCOPE_API_KEY, disable: process.env.STORY_DISABLE_MODEL }
+  process.env.DASHSCOPE_API_KEY = 'stub'; process.env.STORY_DISABLE_MODEL = 'false'
+  const curve = { id: 'long-review', title: '待审', status: 'draft' as const, brief, beats: [], instructions: [], createdAt: 1, updatedAt: 1,
+    preparation: { protocol: 1 as const, status: 'needs-review' as const, sources: [source], material, candidates: [candidate], questions: [], acceptedCandidateIds: [], executed: false as const } }
+  let longText = '合成作者审阅的未来可能结果：画被完整装入封套，未折叠，符合朋友要求且获准状态持续有效'
+  let invalidReference = false, calls = 0
+  globalThis.fetch = async (_url, init) => {
+    calls++
+    const user = JSON.parse(JSON.parse(String(init?.body)).messages[1].content)
+    const revised = user.acceptedCandidates[0]
+    const steps = ['current-state','trigger','resolution'].map((kind, i) => {
+      const content = i === 0 ? material[0]!.quote : i === 1 ? revised.action : revised.possibleResult
+      return { kind, title: content, text: content, candidateIds: i ? [candidate.id] : [], materialIds: invalidReference ? ['absent'] : ['m0','m1','m2','m3'] }
+    })
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ steps, supplements: [] }) } }] }), { status: 200 })
+  }
+  try {
+    const before = structuredClone(curve)
+    for (const size of [42, 40, 240]) {
+      longText = size === 42 ? longText : '审'.repeat(size)
+      const review = { originalText: '明确重审未来结果；并非执行。', candidates: [{ id: candidate.id, action: candidate.action, possibleResult: longText }] }
+      const mapped = await generateCurveFromPreparation(curve, [candidate.id], review)
+      assert.equal(mapped.beats.at(-1)!.detail, longText)
+      assert.equal(mapped.reasoning!.outcome, 'proposal')
+      assert.equal(mapped.foundation!.storyEnds.resolution, longText)
+      assert.deepEqual(mapped.preparation!.originalCandidates, [candidate])
+      assert.deepEqual(mapped.preparation!.candidates[0]!.resultBasisIds, candidate.resultBasisIds)
+      assert.ok(mapped.beats.every(b => b.title.length <= 40))
+      assert.deepEqual(curve, before)
+    }
+    assert.equal(calls, 3)
+    invalidReference = true
+    await assert.rejects(() => generateCurveFromPreparation(curve, [candidate.id]), code('STORY_PREPARATION_INVALID_OUTPUT'))
+    invalidReference = false
+    await assert.rejects(() => generateCurveFromPreparation(curve, [candidate.id], { originalText: '超长正文', candidates: [{ id: candidate.id, action: candidate.action, possibleResult: '审'.repeat(241) }] }), code('STORY_PREPARATION_INVALID_OUTPUT'))
+    assert.deepEqual(curve, before)
+  } finally {
+    globalThis.fetch = originalFetch
+    for (const [key, value] of [['DASHSCOPE_API_KEY', env.key], ['STORY_DISABLE_MODEL', env.disable]]) { if (value === undefined) delete process.env[key!]; else process.env[key!] = value }
+  }
+})
+
 test('editing an action invalidates its old derived possible result while preserving the original candidate', () => {
   const p = { protocol: 1 as const, status: 'needs-review' as const, sources: [source], material, candidates: [candidate], questions: [], acceptedCandidateIds: [], executed: false as const }
   const unchangedResult = { originalText: '改动行动。', candidates: [{ id: candidate.id, action: '方屿改为先清点借阅记录。', possibleResult: candidate.possibleResult }] }

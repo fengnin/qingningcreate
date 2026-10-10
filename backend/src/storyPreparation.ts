@@ -267,7 +267,10 @@ trigger 的 text 必须逐字等于被引用候选的 action，不能改用材�
     goal: goalMaterial ? { id: 'prepared-goal', text: goalMaterial.quote, basis: { kind: 'author-text', evidence: evidence([goalMaterial.id]) } } : null,
     constraints: conditions, actions, relations, unknowns: [], steps: arrangements.map((s, i) => {
       // Model text remains a separate design proposal, never server-written cause.
-      return { id: `beat-${s.kind}`, kind: s.kind, title: s.title, text: s.text, basis: basis(s.materialRefs),
+      // Titles are display labels. Preserve the complete, strictly validated
+      // source text and references in the statement, not in the 40-char slot.
+      const titles = { 'current-state': '当前材料', trigger: '未来行动', escalation: '后续行动', 'climax-choice': '行动取舍', resolution: '可能结果' }
+      return { id: `beat-${s.kind}`, kind: s.kind, title: titles[s.kind], text: s.text, basis: basis(s.materialRefs),
         actionIds: s.refs, relationIds: s.kind === 'resolution' ? s.refs.map(id => `result-${id}`) : [], dependsOn: i ? [`beat-${arrangements[i - 1]!.kind}`] : [], respondsToEditIds: [] }
     }), designReview: { required: true, acceptedProposalIds: [] } }
   const design: StoryDesignRecord = { id: `design-${randomUUID()}`, sourceFacts: activeMaterial.filter(m => m.role !== 'unknown').map(m => ({ id: m.id, text: m.quote, source: 'user-input', disposition: 'needs-author-decision', coveredByBeatIds: [] })), conflictCoreBeatIds: ['beat-current-state','beat-trigger'], predicamentBeatIds: ['beat-trigger','beat-escalation'], storyEndBeatIds: ['beat-current-state','beat-climax-choice','beat-resolution'], middleDevelopmentBeatIds: ['beat-escalation','beat-climax-choice'] }
