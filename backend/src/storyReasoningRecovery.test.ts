@@ -10,6 +10,7 @@ import { updateCurveBeat, confirmProvisionalCurve, materializeConfirmedCurve } f
 import { changeCurveClarification, confirmCurveClarification } from './storyClarification.js'
 import { AppError } from './qwen.js'
 import { storyReasoningWireExample } from './storyReasoningWire.js'
+import { requiredDesignProposalIds } from './storyDesignReview.js'
 import type { StoryReasoningProposal, StoryReasoningValidationContext } from '../../shared/story-reasoning-contract.js'
 import type { ProvisionalCurve } from '../../shared/story-contract.js'
 const env={...process.env}, fetchBefore=globalThis.fetch
@@ -53,10 +54,11 @@ test('edited preview preserves author nodes, reconstructs structure/foundation, 
    p.actions[0]!.constraintIds.push(cid)
  }
  assert.throws(()=>acceptReasoningRecovery(c,hidden,Object.fromEntries(hidden.items.map(i=>[i.id,'accept']))),code('STORY_REASONING_REVIEW_CONFLICT'))
- const accepted=acceptReasoningRecovery(c,preview,Object.fromEntries(preview.items.map(i=>[i.id,'accept']))).curve
+ assert.throws(()=>acceptReasoningRecovery(c,preview,Object.fromEntries(preview.items.map(i=>[i.id,'accept']))),code('STORY_DESIGN_REVIEW_REQUIRED'))
+ const accepted=acceptReasoningRecovery(c,preview,Object.fromEntries(preview.items.map(i=>[i.id,'accept'])),[],requiredDesignProposalIds(preview.reasoning!)).curve
  assert.deepEqual(c,before);assert.equal(accepted.beats.find(b=>b.id==='beat-trigger')!.detail,c.beats.find(b=>b.id==='beat-trigger')!.detail)
  assert.equal(isStoryCurveFoundationCurrent(accepted.foundation,accepted.beats),true)
- const confirmed=confirmProvisionalCurve(accepted).confirmedCurve
+ const confirmed=confirmProvisionalCurve(accepted,requiredDesignProposalIds(accepted.reasoning!)).confirmedCurve
  const facts=materializeConfirmedCurve(seed,confirmed).predicament.facts
  assert.ok(facts.every(f=>c.design!.sourceFacts.some(s=>s.text===f.statement)))
  assert.ok(!facts.some(f=>f.statement.startsWith('作者编辑')))
@@ -73,7 +75,7 @@ test('unknown declaration, independent author review, rejected previews and conf
  assert.throws(()=>acceptReasoningRecovery(c,preview,decisions),code('STORY_REASONING_REVIEW_CONFLICT'))
  const rejected=acceptReasoningRecovery(c,preview,Object.fromEntries(preview.items.map(i=>[i.id,'reject']))).curve
  assert.equal(rejected.clarifications![0]!.resolution,undefined)
- const independent=acceptReasoningRecovery(c,preview,decisions,[id]).curve
+ const independent=acceptReasoningRecovery(c,preview,decisions,[id],requiredDesignProposalIds(preview.reasoning!)).curve
  assert.equal(independent.clarifications![0]!.status,'author-unknown');assert.equal(independent.clarifications![0]!.answerText,'  目前不确定。\n')
  assert.equal(independent.clarifications![0]!.resolution,'independent-proposal-accepted')
  assert.ok(!independent.design!.sourceFacts.some(f=>f.text.includes('不确定')))
@@ -82,7 +84,7 @@ test('unknown declaration, independent author review, rejected previews and conf
  c=confirmCurveClarification(c,id).curve
  const context=createRecoveryContext(c,['beat-trigger']);assert.ok(context.sources.some(s=>s.text==='  重复编号也保留全部图纸。\n'&&s.authority==='author-material'))
  const rebuilt=await previewReasoningRecovery(idea,seed,c,['beat-trigger'])
- const applied=acceptReasoningRecovery(c,rebuilt.preview,Object.fromEntries(rebuilt.preview.items.map(i=>[i.id,'accept']))).curve
+ const applied=acceptReasoningRecovery(c,rebuilt.preview,Object.fromEntries(rebuilt.preview.items.map(i=>[i.id,'accept'])),[],requiredDesignProposalIds(rebuilt.preview.reasoning!)).curve
  assert.equal(applied.clarifications![0]!.resolution,'answer-applied')
 })
 test('question-only recovery is visible, author unknown remains unknown and independent recovery has no executed facts',async()=>{
@@ -92,7 +94,7 @@ test('question-only recovery is visible, author unknown remains unknown and inde
  changed=await service.updateSessionCurveClarification({storyId:initial.storyId,revision:changed.revision,curveId:c.id,action:'request-independent-proposal',clarificationId:c.clarifications![0]!.id})
  ask=false;const preview=await service.regenerateSessionCurveDependencies({storyId:initial.storyId,revision:changed.revision,curveId:c.id})
  const accepted=await service.resolveSessionCurveDependencies({storyId:initial.storyId,revision:preview.revision,curveId:c.id,previewId:preview.pendingCurveRegeneration!.id,
- independentUnknownIds:[c.clarifications![0]!.id],decisions:Object.fromEntries(preview.pendingCurveRegeneration!.items.map(i=>[i.id,'accept']))})
+ independentUnknownIds:[c.clarifications![0]!.id],acceptedDesignProposalIds:requiredDesignProposalIds(preview.pendingCurveRegeneration!.reasoning!),decisions:Object.fromEntries(preview.pendingCurveRegeneration!.items.map(i=>[i.id,'accept']))})
  assert.equal(accepted.curve.beats.length,5);assert.equal(accepted.curve.clarifications![0]!.status,'author-unknown')
  assert.equal(service.getStorySessionSnapshot(initial.storyId).currentTurn,undefined)
 })
@@ -109,6 +111,6 @@ test('malformed output and in-flight revision changes leave session intact; pers
  assert.equal(service.getStorySessionSnapshot(s.storyId).pendingCurveRegeneration,undefined)
  const preview=await service.regenerateSessionCurveDependencies({storyId:s.storyId,revision:edited.revision,curveId:s.curve.id})
  before=service.getStorySessionSnapshot(s.storyId);const persisted=readFileSync(store,'utf8');mkdirSync(store+'.tmp')
- await assert.rejects(()=>service.resolveSessionCurveDependencies({storyId:s.storyId,revision:preview.revision,curveId:s.curve.id,previewId:preview.pendingCurveRegeneration!.id,decisions:Object.fromEntries(preview.pendingCurveRegeneration!.items.map(i=>[i.id,'accept']))}),code('STORY_SESSION_PERSIST_FAILED'))
+ await assert.rejects(()=>service.resolveSessionCurveDependencies({storyId:s.storyId,revision:preview.revision,curveId:s.curve.id,previewId:preview.pendingCurveRegeneration!.id,acceptedDesignProposalIds:requiredDesignProposalIds(preview.pendingCurveRegeneration!.reasoning!),decisions:Object.fromEntries(preview.pendingCurveRegeneration!.items.map(i=>[i.id,'accept']))}),code('STORY_SESSION_PERSIST_FAILED'))
  assert.deepEqual(service.getStorySessionSnapshot(s.storyId),before);assert.equal(readFileSync(store,'utf8'),persisted)
 })

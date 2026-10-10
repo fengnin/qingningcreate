@@ -71,7 +71,7 @@ test('online initial entry requests direct structure; legacy IDs, invalid author
       return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(wire) } }] }), { status: 200 })
     }
     const curve = await generateProvisionalCurve(c.text,seed,brief)
-    assert.equal(curve.generation!.origin,'model'); assert.deepEqual(curve.reasoning,payload)
+    assert.equal(curve.generation!.origin,'model'); assert.deepEqual(curve.reasoning,{ ...(payload as object), designReview: { required: true, acceptedProposalIds: [] } })
     await assert.rejects(() => regenerateCurveBeat(c.text,seed,curve,'beat-escalation'), (e: unknown) => e instanceof AppError && e.code === 'STORY_REASONING_REGENERATION_NOT_CONNECTED')
     const failure = (e: unknown) => e instanceof AppError && e.code === 'STORY_CURVE_MODEL_GENERATION_FAILED'
     payload = { curvePlan: { triggerFactId: 'source-fact-1' } }

@@ -866,7 +866,7 @@ export function parseStoryCurveDependenciesRegenerationRequest(body: unknown): S
 }
 
 export function parseStoryCurveRegenerationResolutionRequest(body: unknown): StoryCurveRegenerationResolutionRequest {
-  const record = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'previewId', 'decisions', 'independentUnknownIds'])
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'previewId', 'decisions', 'independentUnknownIds', 'acceptedDesignProposalIds'])
   if (record.independentUnknownIds !== undefined && (!Array.isArray(record.independentUnknownIds)
     || record.independentUnknownIds.some(id => typeof id !== 'string' || !id.trim())
     || new Set(record.independentUnknownIds).size !== record.independentUnknownIds.length)) {
@@ -888,6 +888,7 @@ export function parseStoryCurveRegenerationResolutionRequest(body: unknown): Sto
     curveId: readIdentifier(record, 'curveId', '暂定故事曲线不完整，请刷新后重试。', invalidRequestContext),
     previewId: readIdentifier(record, 'previewId', '批量重推预览已经失效，请刷新后重试。', invalidRequestContext),
     decisions,
+    ...(record.acceptedDesignProposalIds === undefined ? {} : { acceptedDesignProposalIds: readDesignReviewIds(record.acceptedDesignProposalIds) }),
     ...(record.independentUnknownIds === undefined ? {} : { independentUnknownIds: record.independentUnknownIds as string[] }),
   }
 }
@@ -906,11 +907,18 @@ export function parseStorySourceFactDispositionRequest(body: unknown): StorySour
 }
 
 export function parseStoryCurveConfirmRequest(body: unknown): StoryCurveConfirmRequest {
-  const record = parseRequestRecord(body, ['storyId', 'revision', 'curveId'])
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'acceptedDesignProposalIds'])
   return {
     ...parseStorySessionReference(record),
     curveId: readIdentifier(record, 'curveId', '暂定故事曲线不完整，请刷新后重试。', invalidRequestContext),
+    ...(record.acceptedDesignProposalIds === undefined ? {} : { acceptedDesignProposalIds: readDesignReviewIds(record.acceptedDesignProposalIds) }),
   }
+}
+
+function readDesignReviewIds(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > 100 || value.some(id => typeof id !== 'string' || !id.trim() || id.length > 80)
+    || new Set(value).size !== value.length) throw new AppError('设计提案审阅记录格式不正确。', 400, 'INVALID_REQUEST')
+  return value as string[]
 }
 
 export function parseStoryAuthorClarificationRequest(body: unknown): StoryAuthorClarificationRequest {
@@ -2904,7 +2912,7 @@ export async function resolveSessionCurveDependencies(
     throw new AppError('批量重推预览已经失效，请重新生成预览。', 409, 'STORY_CURVE_REGENERATION_PREVIEW_NOT_FOUND')
   }
   if (curve.reasoning) {
-    const result = resolveAffectedCurveBeats(curve, preview, request.decisions, request.independentUnknownIds)
+    const result = resolveAffectedCurveBeats(curve, preview, request.decisions, request.independentUnknownIds, request.acceptedDesignProposalIds)
     const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), provisionalCurve: result.curve, pendingCurveRegeneration: undefined })
     return createCurveMutationResponse(saved, result)
   }
@@ -3022,7 +3030,7 @@ export async function confirmSessionCurve(
   if (session.pendingCurveRegeneration?.items.length) {
     throw new AppError('请先逐项接受或拒绝重推预览，再确认主线。', 409, 'STORY_CURVE_REGENERATION_PENDING')
   }
-  const result = confirmProvisionalCurve(curve)
+  const result = confirmProvisionalCurve(curve, request.acceptedDesignProposalIds)
   for (const clarification of curve.clarifications ?? []) {
     if (curve.reasoning) continue // Protocol 1 is reviewed by the author, never certified by a model reviewer.
     const affected = curve.beats.filter((beat) => beat.status !== 'rejected'

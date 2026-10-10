@@ -681,6 +681,7 @@ export interface StoryCurveRegenerationPreview {
 }
 
 export interface StoryCurveRegenerationResolutionRequest extends StorySessionVersion {
+  acceptedDesignProposalIds?: string[]
   /** Explicit author review, not supplied or certified by the model. */
   independentUnknownIds?: string[]
   curveId: string
@@ -695,6 +696,7 @@ export interface StorySourceFactDispositionRequest extends StorySessionVersion {
 }
 
 export interface StoryCurveConfirmRequest extends StorySessionVersion {
+  acceptedDesignProposalIds?: string[]
   curveId: string
 }
 

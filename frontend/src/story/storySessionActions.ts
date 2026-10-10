@@ -74,12 +74,12 @@ export interface StorySessionActions {
   regenerateCurveBeat: (beatId: string, feedback?: string, replaceRejected?: boolean) => Promise<void>
   rejectCurveBeat: (beatId: string, reason?: string) => Promise<void>
   regenerateAffectedCurveBeats: (feedback?: string) => Promise<void>
-  resolveAffectedCurveBeats: (decisions: Record<string, StoryCurveRegenerationDecision>, independentUnknownIds?: string[]) => Promise<void>
+  resolveAffectedCurveBeats: (decisions: Record<string, StoryCurveRegenerationDecision>, independentUnknownIds?: string[], acceptedDesignProposalIds?: string[]) => Promise<void>
   setSourceFactDisposition: (factId: string, disposition: 'parked' | 'integrated') => Promise<void>
   changeCurveClarification: (action: StoryAuthorClarificationAction, fields?: {
     clarificationId?: string; targetBeatId?: string; prompt?: string; causalGap?: string; answerText?: string
   }) => Promise<boolean>
-  confirmProvisionalCurve: () => Promise<void>
+  confirmProvisionalCurve: (acceptedDesignProposalIds?: string[]) => Promise<void>
   startStorySpineFromCurve: () => Promise<void>
   showDifferentConflictCores: () => Promise<void>
   applyConflictCoreFeedback: (feedback: string) => Promise<void>
@@ -244,7 +244,7 @@ function createCoCreationActions(
     )
   }
 
-  const resolveAffectedCurveBeats = async (decisions: Record<string, StoryCurveRegenerationDecision>, independentUnknownIds?: string[]) => {
+  const resolveAffectedCurveBeats = async (decisions: Record<string, StoryCurveRegenerationDecision>, independentUnknownIds?: string[], acceptedDesignProposalIds?: string[]) => {
     const curve = state.provisionalCurve
     const preview = state.pendingCurveRegeneration
     if (!curve || !preview || !state.storyId) return
@@ -258,6 +258,7 @@ function createCoCreationActions(
         previewId: preview.id,
         decisions,
         ...(independentUnknownIds ? { independentUnknownIds } : {}),
+        ...(acceptedDesignProposalIds ? { acceptedDesignProposalIds } : {}),
       }),
       (result) => {
         applyCurveMutationState(state, result)
@@ -295,7 +296,7 @@ function createCoCreationActions(
     return saved
   }
 
-  const confirmProvisionalCurve = async () => {
+  const confirmProvisionalCurve = async (acceptedDesignProposalIds?: string[]) => {
     const curve = state.provisionalCurve
     if (!curve || !state.storyId || state.confirmedCurve) return
     await runStorySessionStageRequest(
@@ -305,6 +306,7 @@ function createCoCreationActions(
         storyId: state.storyId!,
         revision: state.revision,
         curveId: curve.id,
+        ...(acceptedDesignProposalIds ? { acceptedDesignProposalIds } : {}),
       }),
       (result) => {
         state.setProvisionalCurve(result.curve)

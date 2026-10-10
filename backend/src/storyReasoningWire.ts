@@ -17,6 +17,7 @@ function exact(r: Record<string, unknown>, keys: string[], path: string) {
 export function parseStoryReasoningWire(value: unknown, context: StoryReasoningValidationContext): StoryReasoningProposal {
   const r = object(value, 'output')
   if (r.protocol !== 2) invalid('protocol')
+  if ('designReview' in r) invalid('designReview（仅服务器记录作者审阅）')
   const node = (value: unknown, path: string, extra: string[] = []) => {
     const n = object(value, path); exact(n, ['id', 'content', ...extra], path)
     const c = object(n.content, `${path}.content`)
@@ -49,7 +50,8 @@ export function parseStoryReasoningWire(value: unknown, context: StoryReasoningV
     relations: list('relations', ['relation','fromIds','toIds']),
     ...(r.outcome === 'proposal' && context.stage !== 'action-candidates' ? { steps: list('steps', ['kind','title','actionIds','relationIds','dependsOn','respondsToEditIds']) } : {}),
   }
-  return validateStoryReasoningProposal(mapped, context)
+  const parsed = validateStoryReasoningProposal(mapped, context)
+  return { ...parsed, designReview: { required: true, acceptedProposalIds: [] } }
 }
 
 /** Explicit serialization for prompt examples and model stubs. Never called
@@ -64,7 +66,8 @@ export function storyReasoningWireExample(value: unknown, context: StoryReasonin
       : { kind: 'proposal', text, evidence: basis.evidence, unknownIds: basis.unknownIds }
     return { ...rest, content }
   }
-  return { ...p, protocol: 2, goal: p.goal ? node(p.goal, true) : null, constraints: p.constraints.map(n => node(n)),
+  const { designReview: _review, ...model } = p
+  return { ...model, protocol: 2, goal: p.goal ? node(p.goal, true) : null, constraints: p.constraints.map(n => node(n)),
     actions: p.actions.map(n => node(n)), relations: p.relations.map(n => node(n)),
     ...('steps' in p ? { steps: p.steps.map(n => node(n)) } : {}),
   }

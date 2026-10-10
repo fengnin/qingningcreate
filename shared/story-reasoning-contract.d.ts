@@ -52,6 +52,9 @@ export interface StoryReasoningDesignStep extends StoryReasoningStatement {
 }
 
 export interface StoryReasoningCommon {
+  /** Server-owned review receipt. Model output cannot supply this field.
+   * Acceptance concerns future design only, never execution or authority. */
+  designReview?: { required: true; acceptedProposalIds: string[] }
   protocol: 1
   status: 'needs-review'
   goal: StoryReasoningStatement | null

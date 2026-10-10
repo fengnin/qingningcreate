@@ -1,4 +1,5 @@
 import { AppError } from './qwen.js'
+import { reviewReasoningDesign } from './storyDesignReview.js'
 import type {
   StoryReasoningBasis, StoryReasoningProposal, StoryReasoningStatement,
   StoryReasoningValidationContext, StoryReasoningDesignAcceptance, StoryReasoningAuthorResult,
@@ -19,8 +20,8 @@ function array(value: unknown, max = 24): unknown[] {
   if (!Array.isArray(value) || value.length > max) invalid('推理提案列表格式不正确。')
   return value as unknown[]
 }
-function ids(value: unknown): string[] {
-  const list = array(value).map(v => text(v, 80))
+function ids(value: unknown, max = 24): string[] {
+  const list = array(value, max).map(v => text(v, 80))
   if (new Set(list).size !== list.length) invalid('推理提案引用重复。')
   return list
 }
@@ -35,7 +36,11 @@ function references(values: string[], allowed: Set<string>, label: string) {
 export function validateStoryReasoningProposal(value: unknown, context: StoryReasoningValidationContext): StoryReasoningProposal {
   const preliminary = value as Record<string, unknown> | null
   const tail = preliminary?.outcome === 'questions' ? 'questions' : context.stage === 'action-candidates' ? 'options' : 'steps'
-  const r = record(value, ['protocol', 'stage', 'status', 'outcome', 'goal', 'constraints', 'actions', 'relations', 'unknowns', tail])
+  const r = record(value, ['protocol', 'stage', 'status', 'outcome', 'goal', 'constraints', 'actions', 'relations', 'unknowns', tail,
+    ...(preliminary && 'designReview' in preliminary ? ['designReview'] : [])])
+  const review = r.designReview === undefined ? undefined : record(r.designReview, ['required', 'acceptedProposalIds'])
+  if (review && review.required !== true) invalid('designReview 必须保留明确审阅要求。')
+  const acceptedProposalIds = review ? ids(review.acceptedProposalIds, 100) : []
   if (r.protocol !== 1 || r.stage !== context.stage || r.status !== 'needs-review'
     || !['proposal', 'questions'].includes(String(r.outcome))) invalid('输出阶段或审阅状态不正确；模型不能确认设计或执行结果。')
   const sources = new Map(context.sources.map(s => [s.id, s]))
@@ -152,7 +157,10 @@ export function validateStoryReasoningProposal(value: unknown, context: StoryRea
     const addressed = new Set([...actions, ...steps].flatMap(s => s.respondsToEditIds))
     if ([...edits].some(id => !addressed.has(id))) invalid('输出没有承接要求保留的作者编辑。')
   }
-  const common = { protocol: 1 as const, status: 'needs-review' as const, goal, constraints, actions, relations, unknowns }
+  const proposalIds = new Set([...(goal ? [goal] : []), ...constraints, ...actions, ...relations, ...steps].filter(s => s.basis.kind === 'design-proposal').map(s => s.id))
+  references(acceptedProposalIds, proposalIds, '设计审阅记录')
+  const common = { protocol: 1 as const, status: 'needs-review' as const, goal, constraints, actions, relations, unknowns,
+    ...(review ? { designReview: { required: true as const, acceptedProposalIds } } : {}) }
   if (tail === 'questions') {
     const questions = array(r.questions, 8).map(value => {
       const q = record(value, ['unknownId', 'dependentIds']), unknownId = text(q.unknownId, 80), dependentIds = ids(q.dependentIds)
@@ -185,6 +193,7 @@ export function acceptStoryReasoningDesign(proposal: StoryReasoningProposal): St
   // Answer confirmation must rebuild the proposal from confirmed sources.
   // Accepting a model's list of supposedly resolved IDs would launder unknowns.
   if (dependencies.length) throw new AppError('依赖的未知前提尚未由作者解决，请重建提案或审阅独立替代提案。', 409, 'STORY_REASONING_UNKNOWN_DEPENDENCY')
+  reviewReasoningDesign(proposal)
   return { status: 'accepted-design', proposal: structuredClone(proposal), executed: false }
 }
 

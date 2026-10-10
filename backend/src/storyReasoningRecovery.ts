@@ -4,6 +4,7 @@ import { mapInitialReasoningProposal } from './storyInitialReasoning.js'
 import { storyReasoningSystemPrompt } from './storyReasoningPrompt.js'
 import { validateStoryReasoningProposal } from './storyReasoningContract.js'
 import { parseStoryReasoningWire } from './storyReasoningWire.js'
+import { reviewSelectedReasoningDesign } from './storyDesignReview.js'
 import type { StoryReasoningProposal, StoryReasoningDesignStep, StoryReasoningStatement, StoryReasoningValidationContext } from '../../shared/story-reasoning-contract.js'
 import type { ProvisionalCurve, StorySeed, StoryCurveRegenerationPreview, StoryCurveRegenerationDecision } from '../../shared/story-contract.js'
 
@@ -98,7 +99,7 @@ export async function previewReasoningRecovery(idea:string,seed:StorySeed,curve:
 
 /** Merge only accepted reachable structure, preserving author nodes. A rejected
  * dependency cannot silently contribute its proposed meaning to another step. */
-export function acceptReasoningRecovery(curve:ProvisionalCurve,preview:StoryCurveRegenerationPreview,decisions:Record<string,StoryCurveRegenerationDecision>,independentUnknownIds:string[]=[]) {
+export function acceptReasoningRecovery(curve:ProvisionalCurve,preview:StoryCurveRegenerationPreview,decisions:Record<string,StoryCurveRegenerationDecision>,independentUnknownIds:string[]=[],acceptedDesignProposalIds:string[]=[]) {
   if(curve.status!=='draft'||preview.curveId!==curve.id||preview.baseFingerprint!==reasoningFingerprint(curve))conflict('草案已变化，重推预览失效。')
   const p=preview.reasoning
   if(!curve.reasoning||!curve.design||!p||p.outcome!=='proposal'||!('steps'in p))conflict('当前只有问题审阅，不能接受为设计。')
@@ -120,6 +121,7 @@ export function acceptReasoningRecovery(curve:ProvisionalCurve,preview:StoryCurv
   for(const s of p!.outcome==='proposal'&&'steps'in p!?p!.steps:[]){if(!accepted.has(s.id))continue
     if(curve.beats.find(b=>b.id===s.id)?.source==='user-edit')conflict('作者节点不能被系统覆盖。')
     if(s.dependsOn.some(id=>targets.includes(id)&&!accepted.has(id)))conflict('接受的节点依赖被拒绝的预览，请一起审阅或重新生成。')}
+  const reviewed = accepted.size && p!.designReview ? reviewSelectedReasoningDesign(p!, [...accepted], acceptedDesignProposalIds) : p!
   if(!accepted.size)return {curve:{...curve,rejectedProposals:[...(curve.rejectedProposals??[]),...preview.items.map(i=>({id:`rejected-${randomUUID()}`,kind:i.kind,title:i.title,detail:i.newDetail,source:'system-proposal' as const,status:'rejected' as const,dependsOn:[],sourceFactIds:[]}))]},affectedBeatIds:targets}
   const original=curve.reasoning!, oldSteps='steps'in original?original.steps:[]
   const newSteps=p!.outcome==='proposal'&&'steps'in p!?p!.steps:[]
@@ -141,10 +143,18 @@ export function acceptReasoningRecovery(curve:ProvisionalCurve,preview:StoryCurv
   const merged:StoryReasoningProposal={protocol:1,stage:'initial-design',status:'needs-review',outcome:'proposal',goal:original.goal??p!.goal,
     constraints:[...original.constraints,...p!.constraints].filter(s=>reachable.has(s.id)),actions:[...original.actions,...p!.actions].filter(s=>reachable.has(s.id)),
     relations:[...original.relations,...p!.relations].filter(s=>reachable.has(s.id)),unknowns:allUnknowns.filter((q,i,a)=>unknownIds.has(q.id)&&a.findIndex(v=>v.id===q.id)===i),steps:cloned}
+  if (original.designReview || p!.designReview) {
+    const ids = new Set([...original.designReview?.acceptedProposalIds ?? [], ...reviewed.designReview?.acceptedProposalIds ?? []])
+    merged.designReview = { required: true, acceptedProposalIds: statements(merged).filter(s => s.basis.kind === 'design-proposal' && ids.has(s.id)).map(s => s.id) }
+  }
   const mergedContext={...createRecoveryContext(curve,[]),stage:'initial-design' as const,requiredEditIds:[],previewTargetIds:undefined,excludedUnknowns:undefined}
   // Author nodes were copied by the server, not emitted by the model. Validate
   // all generated structure against those protected external nodes.
-  validateStoryReasoningProposal({...merged,steps:merged.steps.filter(s=>!mergedContext.protectedSteps.some(p=>p.id===s.id))},mergedContext)
+  const modelSteps = merged.steps.filter(s=>!mergedContext.protectedSteps.some(p=>p.id===s.id))
+  const modelStepIds = new Set(modelSteps.map(s=>s.id))
+  const protectedIds = new Set(mergedContext.protectedSteps.map(s=>s.id))
+  validateStoryReasoningProposal({...merged,steps:modelSteps,
+    ...(merged.designReview ? { designReview: { required: true, acceptedProposalIds: merged.designReview.acceptedProposalIds.filter(id=>!protectedIds.has(id)||modelStepIds.has(id)) } } : {})},mergedContext)
   const mapped=mapInitialReasoningProposal(merged,curve.design!,curve.brief)
   const beats=mapped.beats.map(b=>{const old=curve.beats.find(o=>o.id===b.id)
     return old&&!accepted.has(b.id)?{...old}:b})

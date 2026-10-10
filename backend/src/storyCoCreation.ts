@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { attachReasoningQuestions, previewReasoningRecovery, acceptReasoningRecovery } from './storyReasoningRecovery.js'
-import { generateInitialReasoningCurve } from './storyInitialReasoning.js'
+import { generateInitialReasoningCurve, mapInitialReasoningProposal } from './storyInitialReasoning.js'
 import { acceptStoryReasoningDesign } from './storyReasoningContract.js'
+import { reviewSelectedReasoningDesign } from './storyDesignReview.js'
 import { getAuthorDecisionMaterial, renderAuthorDecisionChoice } from './storyDecision.js'
 import { getClarificationGroundingFacts, getClarificationsForBeat, getUnresolvedClarifications, markClarificationsResolved, reviewClarificationReplacement } from './storyClarification.js'
 import { AppError, requestQwenJson, summarizeModelResponse, withModelDiagnostic } from './qwen.js'
@@ -1284,8 +1285,9 @@ export function resolveAffectedCurveBeats(
   preview: StoryCurveRegenerationPreview,
   decisions: Record<string, StoryCurveRegenerationDecision>,
   independentUnknownIds?: string[],
+  acceptedDesignProposalIds?: string[],
 ): CurveMutationResult {
-  if (curve.reasoning) return acceptReasoningRecovery(curve, preview, decisions, independentUnknownIds)
+  if (curve.reasoning) return acceptReasoningRecovery(curve, preview, decisions, independentUnknownIds, acceptedDesignProposalIds)
   assertDraftCurve(curve)
   if (preview.curveId !== curve.id) {
     throw new AppError('批量重推预览不属于当前主线，请刷新后重试。', 409, 'STORY_SESSION_CONFLICT')
@@ -1447,10 +1449,23 @@ function updateBeatsForSourceFactDisposition(
   })
 }
 
-export function confirmProvisionalCurve(curve: ProvisionalCurve): {
+export function confirmProvisionalCurve(curve: ProvisionalCurve, acceptedDesignProposalIds?: string[]): {
   curve: ProvisionalCurve
   confirmedCurve: ConfirmedCurve
 } {
+  if (curve.reasoning?.designReview) {
+    const priorFoundation = curve.foundation ?? curve.design?.foundation
+    if (!priorFoundation?.reasoning || JSON.stringify(priorFoundation.reasoning) !== JSON.stringify(curve.reasoning)
+      || !isStoryCurveFoundationCurrent(priorFoundation, curve.beats)) {
+      throw new AppError('请先恢复当前草案对应的设计基础，不能用审阅记录修复过期结构。', 409, 'STORY_CURVE_FOUNDATION_OUT_OF_DATE')
+    }
+    const reasoning = reviewSelectedReasoningDesign(curve.reasoning, curve.beats.filter(b => b.status !== 'rejected').map(b => b.id), acceptedDesignProposalIds)
+    if (!curve.design) throw new AppError('设计材料不存在。', 409, 'STORY_DESIGN_REVIEW_REQUIRED')
+    const mapped = mapInitialReasoningProposal(reasoning, curve.design, curve.brief)
+    if (mapped.foundation) mapped.foundation.beatSignatures = { ...priorFoundation.beatSignatures }
+    curve = { ...curve, reasoning,
+      foundation: mapped.foundation, design: mapped.design }
+  }
   const design = validateCurveForConfirmation(curve)
   const foundation = curve.foundation
     ?? design?.foundation

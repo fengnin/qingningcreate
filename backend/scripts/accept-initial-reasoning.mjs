@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { setTimeout as delay } from 'node:timers/promises'
 const backend=resolve(fileURLToPath(new URL('..',import.meta.url)))
 const { storyReasoningWireExample }=await import('../dist/storyReasoningWire.js')
+const { requiredDesignProposalIds }=await import('../dist/storyDesignReview.js')
 const artifacts=mkdtempSync(join(tmpdir(),'story-initial-reasoning-')), store=join(artifacts,'sessions.json')
 const brief={tones:['growth'],dramaticForces:['cost'],allowSystemNamedCharacters:false}
 let invalid=false, unknown=false, questions=false, calls=0, child, base, launch=0
@@ -54,7 +55,10 @@ try{
     const before=await snapshot(s.storyId)
     await api('/api/story/curve/start-spine',ref(s),409,'STORY_CURVE_NOT_CONFIRMED')
     assert.deepEqual(await snapshot(s.storyId),before)
-    const confirmed=await api('/api/story/curve/confirm',ref(s));assert.equal(confirmed.confirmedCurve.reasoning.protocol,1)
+    const beforeReview=await snapshot(s.storyId)
+    await api('/api/story/curve/confirm',ref(s),409,'STORY_DESIGN_REVIEW_REQUIRED');assert.deepEqual(await snapshot(s.storyId),beforeReview)
+    const confirmed=await api('/api/story/curve/confirm',{...ref(s),acceptedDesignProposalIds:requiredDesignProposalIds(s.curve.reasoning)});assert.equal(confirmed.confirmedCurve.reasoning.protocol,1)
+    assert.ok(confirmed.confirmedCurve.reasoning.designReview.acceptedProposalIds.length)
     const frozen=await snapshot(s.storyId);await start(false);assert.deepEqual(await snapshot(s.storyId),frozen)
   }
   const s=await api('/api/story/co-create/start',{idea:'余禾想修补陶杯；没有完成期限；先测量不会改变杯子。',brief})

@@ -1271,6 +1271,10 @@ function parseReasoning(value: unknown): StoryReasoningProposal {
   if (r.protocol !== 1 || !['initial-design','edit-preview','action-candidates'].includes(String(r.stage))
     || r.status !== 'needs-review' || !['proposal','questions'].includes(String(r.outcome))) throwInvalidResponse()
   for (const key of ['constraints','actions','relations','unknowns']) if (!Array.isArray(r[key])) throwInvalidResponse()
+  if (r.designReview !== undefined) {
+    const review = expectRecord(r.designReview)
+    if (review.required !== true || !Array.isArray(review.acceptedProposalIds) || review.acceptedProposalIds.some(id => typeof id !== 'string')) throwInvalidResponse()
+  }
   if (r.goal !== null) expectRecord(r.goal)
   if (r.outcome === 'questions') { if (!Array.isArray(r.questions)) throwInvalidResponse() }
   else if (!Array.isArray(r.stage === 'action-candidates' ? r.options : r.steps)) throwInvalidResponse()

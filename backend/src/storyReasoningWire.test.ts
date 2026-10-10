@@ -4,6 +4,7 @@ import { AppError } from './qwen.js'
 import { reasoningEncodingExample, reasoningEditExample, reasoningQuestionExample } from './storyReasoningPrompt.js'
 import { parseStoryReasoningWire, storyReasoningWireExample } from './storyReasoningWire.js'
 import { acceptStoryReasoningDesign } from './storyReasoningContract.js'
+import { reviewReasoningDesign, requiredDesignProposalIds } from './storyDesignReview.js'
 
 const invalid = (e: unknown) => e instanceof AppError && e.code === 'STORY_REASONING_INVALID_OUTPUT'
 test('wire2 quotes render exactly once; locked goals are references, stored history remains protocol1', () => {
@@ -14,7 +15,10 @@ test('wire2 quotes render exactly once; locked goals are references, stored hist
     assert.equal(parsed.goal?.text ?? null, output.goal?.text ?? null)
     assert.deepEqual(parsed.constraints, output.constraints)
     assert.deepEqual(parsed.actions, output.actions)
-    if (parsed.outcome === 'proposal') assert.equal(acceptStoryReasoningDesign(parsed).executed, false)
+    if (parsed.outcome === 'proposal') {
+      assert.throws(() => acceptStoryReasoningDesign(parsed), (e: unknown) => e instanceof AppError && e.code === 'STORY_DESIGN_REVIEW_REQUIRED')
+      assert.equal(acceptStoryReasoningDesign(reviewReasoningDesign(parsed, requiredDesignProposalIds(parsed))).executed, false)
+    }
     assert.throws(() => parseStoryReasoningWire(output, context), invalid, 'no online legacy protocol fallback')
   }
 })
