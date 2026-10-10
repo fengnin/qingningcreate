@@ -28,6 +28,9 @@ export interface StoryAction {
   preconditions: string[]
   effects: string[]
   source: 'user-choice' | 'generated'
+  /** Focus and candidates never assert that a character has acted. */
+  mode?: 'focus' | 'candidate' | 'executed'
+  focusSourceTexts?: string[]
   /** Curve nodes that constrain this action after the author confirms a curve. */
   originCurveBeatIds?: string[]
 }
@@ -42,6 +45,24 @@ export interface StoryTransition {
   consumedFacts: string[]
   changedFacts: StoryFactChange[]
   introducedFacts: StoryFact[]
+  /** Server-created receipt of an explicit author confirmation, never model evidence. */
+  authorConfirmation?: StoryExecutedResultConfirmation
+}
+
+export interface StoryExecutedResultConfirmation {
+  proposalId: string
+  turnId: string
+  actionText: string
+  resultText: string
+  confirmedAt: number
+}
+
+export interface StoryCandidateActionReview {
+  status: 'needs-review'
+  /** Citations identify material considered; they do not prove a causal claim. */
+  sourceFactIds: string[]
+  causalClaims: { statement: string; sourceFactIds: string[] }[]
+  questions: string[]
 }
 
 export interface StoryNarrativeState {
@@ -49,6 +70,8 @@ export interface StoryNarrativeState {
   facts: StoryFact[]
   actions: StoryAction[]
   appliedTransitions: StoryTransition[]
+  /** Author review focus, outside the story fact ledger and executed actions. */
+  focus?: { actionId: string; sourceTexts: string[] }
 }
 
 export interface StorySeed {
@@ -275,6 +298,7 @@ export type ProvisionalCurveStatus = 'draft' | 'confirmed' | 'superseded'
  * never path facts, until the author confirms the whole curve.
  */
 export interface ProvisionalCurve {
+  preparation?: import('./story-preparation.js').StoryPreparation
   /** Absent in historical/local-disabled curves. Never auto-upgrade history. */
   reasoning?: import('./story-reasoning-contract.js').StoryReasoningProposal
   id: string
@@ -299,6 +323,7 @@ export interface ProvisionalCurve {
 }
 
 export interface ConfirmedCurve {
+  preparation?: import('./story-preparation.js').StoryPreparation
   reasoning?: import('./story-reasoning-contract.js').StoryReasoningProposal
   id: string
   provisionalCurveId: string
@@ -399,6 +424,7 @@ export interface StoryConflictCore {
 export type StoryConflictCores = [StoryConflictCore, StoryConflictCore, StoryConflictCore]
 
 export interface StoryPredicament {
+  designProtocol?: 'prepared-action'
   id: string
   title: string
   variationAxis: StoryVariationAxis
@@ -421,6 +447,7 @@ export interface StoryPredicamentApproach {
 }
 
 export interface StoryHeadTailOption {
+  designProtocol?: 'prepared-action'
   id: string
   opening: string
   openingClue: string
@@ -463,6 +490,7 @@ export interface StoryTurnOption {
   laterEffect: string
   narrativeAction: StoryAction
   transition: StoryTransition
+  proposal?: StoryCandidateActionReview
 }
 
 export interface StoryRefinement<TFocus extends string> {
@@ -506,6 +534,7 @@ export interface StoryTurn {
   transition: StoryTransition | null
   canConclude: boolean
   isConclusion: boolean
+  presentation?: 'focus-selection' | 'candidate-actions'
 }
 
 export interface StoryTurnHistoryItem {
@@ -599,6 +628,8 @@ export interface StoryDirectionsRequest {
 }
 
 export interface StoryCoCreationStartRequest {
+  /** Current UI reviews action structure first; absent keeps historical API behavior. */
+  generationMode?: 'review-actions'
   idea: string
   brief: CreativeBrief
   /** Stable identity for one browser submission; retries replay this operation. */
@@ -722,6 +753,8 @@ export interface StoryActionProposalRequest extends StorySessionVersion {
 export interface StoryActionProposalConfirmRequest extends StorySessionVersion {
   proposalId: string
   mode: Extract<StoryTurnMode, 'continue' | 'conclude'>
+  /** Required in co-creation: author-supplied text, not a model's predicted result. */
+  authorConfirmation?: { actionText: string; resultText: string }
 }
 
 export interface StoryActionProposal {
@@ -734,6 +767,7 @@ export interface StoryActionProposal {
   laterEffect: string
   option: StoryTurnOption
   createdAt: number
+  requiresExecutedResultConfirmation?: boolean
 }
 
 export interface StoryPredicamentSessionRequest extends StorySessionVersion {
@@ -815,6 +849,7 @@ export interface StoryHeadTailResponse extends StorySessionVersion {
 export interface StoryTurnResponse extends StorySessionVersion {
   history: StoryTurnHistoryItem[]
   turn: StoryTurn
+  pendingActionProposal?: StoryActionProposal
 }
 
 /** The first turn created from a confirmed curve, with its materialized path foundation. */

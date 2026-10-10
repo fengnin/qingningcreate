@@ -254,6 +254,23 @@ function validateTransitionForAction(
     throwValidationError(context, message, 'transition.actionId 必须与 narrativeAction 对应。')
   }
 
+  if (action.mode === 'focus' || action.mode === 'candidate') {
+    if (action.effects.length || transition.changedFacts.length || transition.introducedFacts.length
+      || transition.authorConfirmation || (action.mode === 'focus' && (action.preconditions.length || transition.consumedFacts.length))) {
+      throwValidationError(context, message, '关注点与候选行动不能包含已执行结果或事实变更。')
+    }
+  }
+  if (action.mode === 'executed') {
+    const receipt = transition.authorConfirmation
+    if (!receipt || !receipt.proposalId || !receipt.turnId || !receipt.resultText.trim()
+      || !Number.isFinite(receipt.confirmedAt) || receipt.actionText !== action.intent
+      || action.source !== 'user-choice' || action.effects.length || transition.changedFacts.length
+      || transition.introducedFacts.length !== 1
+      || transition.introducedFacts[0]!.statement !== receipt.resultText) {
+      throwValidationError(context, message, '已执行结果必须逐字对应作者明确确认的结果，模型引用不能作为确认凭证。')
+    }
+  }
+
   const factsById = new Map(state.facts.map((fact) => [fact.id, fact]))
   validateReferencedFacts(action, transition, factsById, context, message)
   validateConsumedPreconditions(action, transition, context, message)
@@ -263,6 +280,7 @@ function validateTransitionForAction(
 
   if (!transition.changedFacts.length
     && !transition.introducedFacts.length
+    && action.mode !== 'focus' && action.mode !== 'candidate'
     && !isImplicitNarrativeTransition(action, transition)) {
     throwValidationError(context, message, 'transition 至少需要更新一个 effect 或引入一个行动直接带来的新事实。')
   }
@@ -389,6 +407,18 @@ function applyTransition(
   action: StoryAction,
   transition: StoryTransition,
 ): StoryNarrativeState {
+  if (action.mode === 'focus' || action.mode === 'candidate') {
+    if (action.effects.length || transition.changedFacts.length || transition.introducedFacts.length || transition.authorConfirmation) {
+      throw new AppError('未确认提案不能写入事实状态。', 409, 'STORY_ACTION_REVIEW_REQUIRED')
+    }
+    return action.mode === 'focus'
+      ? { ...state, focus: { actionId: action.id, sourceTexts: [...(action.focusSourceTexts ?? [])] } }
+      : state
+  }
+  if (action.mode === 'executed') {
+    validateActionTransition(state, action, transition, { maximumActions: Infinity, maximumFacts: Infinity },
+      { statusCode: 409, code: 'STORY_ACTION_REVIEW_REQUIRED' }, '作者未确认这项行动的实际结果。')
+  }
   const changesByFactId = new Map(transition.changedFacts.map((change) => [change.factId, change.statement]))
   const facts = state.facts.map((fact) => {
     const statement = changesByFactId.get(fact.id)
@@ -396,6 +426,7 @@ function applyTransition(
   })
 
   return {
+    ...(state.focus ? { focus: state.focus } : {}),
     revision: state.revision + 1,
     facts: [...facts, ...transition.introducedFacts],
     actions: state.actions.some((candidate) => candidate.id === action.id)
