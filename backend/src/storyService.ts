@@ -2553,11 +2553,10 @@ async function startStoryCoCreationInternal(
     ...seedWithoutSystemDraft,
     creativeBrief: request.brief,
   }
-  // The deterministic local mode is reserved for regression/contract checks;
-  // it keeps the historical fixture workflow available. Real model mode must
-  // stop at an explicit clarification question instead of manufacturing a
-  // seven-beat generic curve from a bare premise.
-  if (!isExplicitLocalModelMode() && needsAuthorDetailBeforeCurve(request.idea, seed)) {
+  // Initial protocol 1 can express compatible conditions or review questions.
+  // The legacy keyword conflict gate must not reject before that generation.
+  // Keep the existing bare-premise recovery boundary until question UI migration.
+  if (!isExplicitLocalModelMode() && (!seed.lockedGoal?.trim() || request.idea.trim().length < 12)) {
     throw createAuthorDetailRequiredError()
   }
   const excludedProposalDetails = existingSession

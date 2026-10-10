@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { generateInitialReasoningCurve } from './storyInitialReasoning.js'
+import { acceptStoryReasoningDesign } from './storyReasoningContract.js'
 import { getAuthorDecisionMaterial, renderAuthorDecisionChoice } from './storyDecision.js'
 import { getClarificationGroundingFacts, getClarificationsForBeat, getUnresolvedClarifications, markClarificationsResolved, reviewClarificationReplacement } from './storyClarification.js'
 import { AppError, requestQwenJson, summarizeModelResponse, withModelDiagnostic } from './qwen.js'
@@ -244,6 +246,10 @@ function assertDraftCurve(curve: ProvisionalCurve): void {
   }
 }
 
+function assertLegacyRegenerationProtocol(curve: ProvisionalCurve): void {
+  if (curve.reasoning) throw new AppError('这条草案使用新设计协议，编辑重推尚未接入；不会转入旧模板。', 409, 'STORY_REASONING_REGENERATION_NOT_CONNECTED')
+}
+
 function requireCurveBeat(curve: ProvisionalCurve, beatId: string, action: string): CurveBeat {
   const beat = curve.beats.find((candidate) => candidate.id === beatId)
   if (!beat) {
@@ -289,7 +295,7 @@ function finalizeCurveMutation(
 ): ProvisionalCurve {
   const design = curve.design ? updateStoryDesignCoverage(curve.design, beats) : undefined
   const currentState = beats.find((beat) => beat.kind === 'current-state')
-  const foundation = design
+  const foundation = !curve.reasoning && design
     ? buildStoryCurveFoundation(beats, curve.brief, {
       activeSituation: currentState?.detail ?? '',
       lockedGoal: currentState?.source === 'user-edit'
@@ -299,12 +305,14 @@ function finalizeCurveMutation(
         ?? null,
     })
     : undefined
-  const nextDesign = design && foundation ? { ...design, foundation } : design
+  const nextDesign = curve.reasoning && design ? { ...design, foundation: undefined }
+    : design && foundation ? { ...design, foundation } : design
   const rejectedProposals = overrides.rejectedProposals ?? curve.rejectedProposals
   const generation = overrides.generation ?? curve.generation
   return {
     ...curve,
     beats,
+    ...(curve.reasoning ? { foundation: undefined } : {}),
     ...(nextDesign ? { design: nextDesign } : {}),
     ...(foundation ? { foundation } : {}),
     ...(rejectedProposals ? { rejectedProposals } : {}),
@@ -338,6 +346,19 @@ export function parseCreativeBrief(value: unknown): CreativeBrief {
 }
 
 export async function generateProvisionalCurve(
+  idea: string,
+  seed: StorySeed,
+  brief: CreativeBrief,
+  excludedProposalDetails: readonly string[] = [],
+): Promise<ProvisionalCurve> {
+  // Disabled-model contracts remain explicit local drafts, never model success.
+  if (isModelDisabled()) return generateLegacyProvisionalCurve(idea, seed, brief, excludedProposalDetails)
+  return generateInitialReasoningCurve(idea, seed, brief, createStoryDesignRecord(idea, seed), excludedProposalDetails, maxCurveGenerationAttempts)
+}
+
+/** Historical protocol entry point. New online sessions never call this.
+ * Kept for compatibility contract tests and explicit disabled-model drafts. */
+export async function generateLegacyProvisionalCurve(
   idea: string,
   seed: StorySeed,
   brief: CreativeBrief,
@@ -1004,6 +1025,7 @@ export async function regenerateCurveBeat(
   feedback?: string,
   replaceRejected = false,
 ): Promise<CurveMutationResult> {
+  assertLegacyRegenerationProtocol(curve)
   const target = requireCurveBeat(curve, beatId, '重推')
   const targetWasRejected = target?.status === 'rejected'
   if (targetWasRejected && !replaceRejected) {
@@ -1125,6 +1147,7 @@ export async function regenerateAffectedCurveBeats(
   curve: ProvisionalCurve,
   feedback?: string,
 ): Promise<CurveMutationResult> {
+  assertLegacyRegenerationProtocol(curve)
   assertDraftCurve(curve)
   let nextCurve = curve
   const affectedBeatIds = nextCurve.beats
@@ -1155,6 +1178,7 @@ export async function previewAffectedCurveBeats(
   curve: ProvisionalCurve,
   feedback?: string,
 ): Promise<CurveRegenerationPreviewResult> {
+  assertLegacyRegenerationProtocol(curve)
   assertDraftCurve(curve)
   let working = structuredClone(curve)
   const affectedBeatIds = working.beats
@@ -1213,6 +1237,7 @@ export async function previewClarificationCurveBeat(
   feedback?: string,
   replaceRejected = false,
 ): Promise<CurveRegenerationPreviewResult> {
+  assertLegacyRegenerationProtocol(curve)
   const target = requireCurveBeat(curve, beatId, '重推')
   assertDraftCurve(curve)
   if (target.status === 'rejected' && !replaceRejected) {
@@ -1444,6 +1469,7 @@ export function confirmProvisionalCurve(curve: ProvisionalCurve): {
       id: `confirmed-curve-${randomUUID()}`,
       provisionalCurveId: confirmed.id,
       title: confirmed.title,
+      ...(confirmed.reasoning ? { reasoning: structuredClone(confirmed.reasoning) } : {}),
       brief: confirmed.brief,
       beats: confirmed.beats,
       ...(confirmed.design ? { design: confirmed.design } : {}),
@@ -1456,6 +1482,13 @@ export function confirmProvisionalCurve(curve: ProvisionalCurve): {
 }
 
 function validateCurveForConfirmation(curve: ProvisionalCurve): StoryDesignRecord | undefined {
+  if (curve.reasoning) {
+    acceptStoryReasoningDesign(curve.reasoning)
+    const foundation = curve.foundation ?? curve.design?.foundation
+    if (!foundation?.reasoning || JSON.stringify(foundation.reasoning) !== JSON.stringify(curve.reasoning)) {
+      throw new AppError('新设计结构与当前草案不匹配，请重新审阅。', 409, 'STORY_CURVE_FOUNDATION_OUT_OF_DATE')
+    }
+  }
   if (getUnresolvedClarifications(curve).length) {
     throw new AppError('还有节点依赖未确认的因果前提，请确认作者回答、审阅独立提案或放弃旧提案。', 400, 'STORY_CURVE_CLARIFICATIONS_UNRESOLVED')
   }
@@ -1640,6 +1673,9 @@ function materializeConfirmedCurveFacts(seed: StorySeed, curve: ConfirmedCurve):
   const sourceFactStatements = new Set(sourceFacts.map((fact) => fact.statement.trim()))
   const foundation = curve.foundation ?? curve.design?.foundation
   if (!foundation) return sourceFacts
+  // Protocol 1 relations and future steps remain design, even after acceptance.
+  // Only original author material may enter this legacy fact adapter.
+  if (curve.reasoning) return sourceFacts
 
   // These are design constraints already reviewed before confirmation.  They
   // are intentionally copied from the frozen foundation, never from the

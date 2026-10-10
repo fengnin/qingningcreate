@@ -38,7 +38,9 @@ import { AppError } from './qwen.js'
 import {
   confirmProvisionalCurve,
   createProvisionalCurveFallback,
-  generateProvisionalCurve,
+  // Existing fixtures exercise the historical ID-selector contract unchanged.
+  // New online generation has independent protocol-1 coverage.
+  generateLegacyProvisionalCurve as generateProvisionalCurve,
   isSystemCurveProposalSafe,
   materializeConfirmedCurve,
   previewAffectedCurveBeats,

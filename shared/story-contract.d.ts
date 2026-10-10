@@ -175,6 +175,8 @@ export interface StoryDesignRecord {
  * only after the author confirms the curve and starts the spine.
  */
 export interface StoryCurveFoundation {
+  /** Protocol 1 projection: design only, never narrative fact authority. */
+  reasoning?: import('./story-reasoning-contract.js').StoryReasoningProposal
   /** The concrete conflict core that the author is reviewing before confirmation. */
   conflictCore: {
     goal: string
@@ -271,6 +273,8 @@ export type ProvisionalCurveStatus = 'draft' | 'confirmed' | 'superseded'
  * never path facts, until the author confirms the whole curve.
  */
 export interface ProvisionalCurve {
+  /** Absent in historical/local-disabled curves. Never auto-upgrade history. */
+  reasoning?: import('./story-reasoning-contract.js').StoryReasoningProposal
   id: string
   title: string
   status: ProvisionalCurveStatus
@@ -293,6 +297,7 @@ export interface ProvisionalCurve {
 }
 
 export interface ConfirmedCurve {
+  reasoning?: import('./story-reasoning-contract.js').StoryReasoningProposal
   id: string
   provisionalCurveId: string
   title: string

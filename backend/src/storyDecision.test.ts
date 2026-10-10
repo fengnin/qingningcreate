@@ -5,7 +5,8 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AppError } from './qwen.js'
-import { generateProvisionalCurve } from './storyCoCreation.js'
+// Preserve historical rendering contract assertions; protocol 1 does not use it.
+import { generateLegacyProvisionalCurve as generateProvisionalCurve } from './storyCoCreation.js'
 
 const previousStorePath = process.env.STORY_SESSION_STORE_PATH
 // Isolate the service module's store even though these tests only use its seed extractor.
