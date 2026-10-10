@@ -556,6 +556,9 @@ function createStoryProgressActions(
   }
 
   const advanceStory = (mode: Extract<StoryTurnMode, 'continue' | 'conclude'>) => {
+    if (mode === 'conclude' && state.currentTurn?.presentation === 'closure-review' && state.currentTurn.canConclude) {
+      return loaders.loadStoryTurn({ mode, turnId: state.currentTurn.id })
+    }
     if (!state.currentTurn || state.currentTurn.isConclusion || !state.selectedTurnOption) return Promise.resolve()
     return loaders.loadStoryTurn({
       mode,

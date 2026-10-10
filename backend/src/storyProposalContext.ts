@@ -112,4 +112,5 @@ export const storyProposalGenerationInstruction = `你是中文故事共创提�
 action 是候选行动，不是执行结果；proposedConsequence 须区分作者已有因果与待核对的条件性承接，不能保证未获证实的效果。整个候选留在待审区不意味着内容合格。不要引用系统模板作为理由。
 先输出 candidatePlan.basis，再给 options。basis.latestResultFactId 逐字使用 lastAuthorConfirmedResult.factId，无执行结果时为 null。basis.unresolved={kind,text,sourceFactIds}：existing 仅用于作者事实仍未解决的事项，引用具体依据；optional-design 是可拒绝且不阻碍原目标完成的新增建议，引用为空；next-goal 表示现有事项已完成或无已知未解决事项，请作者收束或提出新目标，引用为空。basis.reason 解释为何从刚才结果推进到该事项；basis.contradictions=[{text,sourceFactIds}] 只列真正矛盾的作者依据，没有则为空。较早的未开始和较晚的完成只是时序变化，不是矛盾。
 options 只能处理 basis.unresolved；新编号、签收、装帧、检查或他人认可等要求若没有作者依据，只能属于 optional-design，不得称为完成原目标的必需条件。既有目标已明确完成时优先收束，不再让作者证明完成；结果未知时只核对真实未解决事项，不发明验收标准。引用 ID 不能证明语义正确；不能通过 basis 标签包装新增因果。
+收束出口与行动出口互斥：kind=next-goal 时 options 必须为 []，只请作者审阅收束或提出下一目标，不写“确认完成”的行动、可能结果或问题。只有 existing 或 optional-design 才生成行动 options。
 严格输出 JSON 对象 candidatePlan，不输出 turn、transition、introducedFacts、review 或任何确认凭证。`

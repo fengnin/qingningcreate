@@ -407,7 +407,7 @@ export function StorySpineScreen({ session }: { session: StorySession }) {
   const currentTurn = session.currentTurn
   const story = session.generatedStory
   const hasConclusion = currentTurn?.isConclusion ?? false
-  const canAdvance = Boolean(session.selectedTurnOption && !hasConclusion)
+  const canAdvance = Boolean((session.selectedTurnOption || (currentTurn?.presentation === 'closure-review' && currentTurn.canConclude)) && !hasConclusion)
   const canConclude = currentTurn?.canConclude ?? false
   const isWritingStory = hasConclusion && session.stageStatus === 'loading'
   const hasStoryGenerationError = hasConclusion && Boolean(session.stageError)
@@ -941,7 +941,7 @@ function CurrentStoryTurn({ currentTurn, selectedOptionId, onSelect, onRefineOpt
   return (
     <section className={`current-story-turn ${currentTurn.isConclusion ? 'is-conclusion' : ''}`} aria-label={currentTurn.isConclusion ? '故事结局' : '当前故事情境'}>
       <header className="turn-section-heading">
-        <span>{currentTurn.isConclusion ? '故事结局' : currentTurn.presentation === 'candidate-actions' ? '待审阅行动提案' : currentTurn.presentation === 'focus-selection' ? '选择审阅关注点' : '当前情境'}</span>
+        <span>{currentTurn.isConclusion ? '故事结局' : currentTurn.presentation === 'candidate-actions' ? '待审阅行动提案' : currentTurn.presentation === 'closure-review' ? '收束审阅' : currentTurn.presentation === 'focus-selection' ? '选择审阅关注点' : '当前情境'}</span>
         <small>{turnPhaseLabel[currentTurn.phase]} · 目标：{goalStateLabel[node.goalState]} · {conflict.anchor}</small>
       </header>
       <div className="current-turn-copy">
@@ -1101,8 +1101,10 @@ function TurnActions({ canConclude, disabled, onContinue, onConclude, reviewMode
 }) {
   return (
     <div className="stage-actions turn-actions">
-      {canConclude && <button className="text-action" type="button" onClick={onConclude} disabled={disabled}>确认这次选择，开始写结尾 <ArrowRight size={15} /></button>}
-      <button className="primary-action" type="button" onClick={onContinue} disabled={disabled}>{reviewMode === 'focus-selection' ? '选择关注点，生成待审行动' : reviewMode === 'candidate-actions' ? '打开这项提案审阅' : '确认选择，继续发展'} <ArrowRight size={18} /></button>
+      {reviewMode === 'closure-review' ? <p className="conclusion-note">已没有新的待执行行动；请在作者调整入口提出下一目标，或直接结束当前主线。</p> : null}
+      {reviewMode === 'closure-review' && canConclude && <button className="primary-action" type="button" onClick={onConclude} disabled={disabled}>按已确认路径收束 <Check size={15} /></button>}
+      {reviewMode !== 'closure-review' && canConclude && <button className="text-action" type="button" onClick={onConclude} disabled={disabled}>确认这次选择，开始写结尾 <ArrowRight size={15} /></button>}
+      {reviewMode !== 'closure-review' && <button className="primary-action" type="button" onClick={onContinue} disabled={disabled}>{reviewMode === 'focus-selection' ? '选择关注点，生成待审行动' : reviewMode === 'candidate-actions' ? '打开这项提案审阅' : '确认选择，继续发展'} <ArrowRight size={18} /></button>}
     </div>
   )
 }

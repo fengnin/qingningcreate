@@ -1060,7 +1060,7 @@ export function parseStoryTurnSessionRequest(body: unknown): StoryTurnSessionReq
     throw new AppError('开始故事时需要确认故事两端。', 400, 'INVALID_REQUEST')
   }
 
-  if (mode !== 'start' && (!turnId || !optionId || headTailId)) {
+  if (mode !== 'start' && (!turnId || (mode === 'continue' && !optionId) || headTailId)) {
     throw new AppError('请确认当前情境中的一个行动。', 400, 'INVALID_REQUEST')
   }
 
@@ -5594,6 +5594,24 @@ async function generateCoCreationCandidateTurn(request: StoryTurnRequest, state:
       const plan = expectRecord(record.candidatePlan, '候选行动缺少 candidatePlan。', invalidModelOutputContext)
       assertProposalKeys(plan, ['basis', 'options'])
       const continuationBasis = validateContinuationBasis(plan.basis, context)
+      // A completed result or an absent next goal is a review boundary, not
+      // another executable candidate round. Keep it visible to the author so
+      // they can decide whether to close or state a new goal; do not turn
+      // completion into a fresh confirmation loop.
+      if (continuationBasis.unresolved.kind === 'next-goal') {
+        if (!Array.isArray(plan.options) || plan.options.length) throw new AppError('收束审阅不能携带待执行候选；options 必须为空。', 502, 'INVALID_MODEL_OUTPUT')
+        const turnId = `turn-${request.history.length + 1}`, nodeId = `node-${request.history.length + 1}`
+        const latestResult = context.lastAuthorConfirmedResult
+        const event = latestResult ? `作者最近明确提交的结果：${latestResult.resultText}` : '当前已确认事项没有未解决内容。'
+        return {
+          id: turnId, phase: 'development', presentation: 'closure-review',
+          node: { id: nodeId, title: '审阅收束或下一目标', event,
+            purpose: continuationBasis.reason, goalState: 'trying' },
+          conflict: { nodeId, conflict: continuationBasis.unresolved.text, action: '请作者决定收束，或明确提出下一目标。', consequence: '未新增执行行动或故事事实。', intensity: 1, anchor: '收束审阅' },
+          question: '请决定是否按已确认路径收束，或先提出新的作者目标。', options: [], narrativeAction: null, transition: null,
+          canConclude: Boolean(latestResult) && !continuationBasis.contradictions.length, isConclusion: false,
+        }
+      }
       if (!Array.isArray(plan.options) || plan.options.length < 1 || plan.options.length > 3) throw new AppError('候选行动必须有一至三项待审提案，不应为了凑数新增条件。', 502, 'INVALID_MODEL_OUTPUT')
       const turnId = `turn-${request.history.length + 1}`, nodeId = `node-${request.history.length + 1}`
       const refs = (value: unknown, path: string) => validateProposalFactReferences(value, proposalEvidenceIds, path)
@@ -5624,7 +5642,7 @@ async function generateCoCreationCandidateTurn(request: StoryTurnRequest, state:
         : focus.length ? focus.map((text) => `「${text}」`).join('；') : sourceFacts.slice(0, 3).map((fact) => `「${fact.text}」`).join('；')
       return { id: turnId, phase: 'development', presentation: 'candidate-actions',
         node: { id: nodeId, title: '审阅下一步行动', event, purpose: continuationBasis.reason, goalState: 'trying' },
-        conflict: { nodeId, conflict: `${continuationBasis.unresolved.kind === 'optional-design' ? '可拒绝的新增建议（不影响原目标完成）' : continuationBasis.unresolved.kind === 'next-goal' ? '收束或下一目标' : '尚未解决'}：${continuationBasis.unresolved.text}${continuationBasis.contradictions.length ? `；作者依据矛盾：${continuationBasis.contradictions.map(c => c.text).join('；')}` : ''}`,
+        conflict: { nodeId, conflict: `${continuationBasis.unresolved.kind === 'optional-design' ? '可拒绝的新增建议（不影响原目标完成）' : '尚未解决'}：${continuationBasis.unresolved.text}${continuationBasis.contradictions.length ? `；作者依据矛盾：${continuationBasis.contradictions.map(c => c.text).join('；')}` : ''}`,
           action: '选择一项提案进行审阅；只有另行确认实际行动和结果才能进入事实状态。',
           consequence: '当前没有新增已执行结果。', intensity: 1, anchor: '提案审阅' },
         question: '你想先审阅哪项候选行动？', options, narrativeAction: null, transition: null, canConclude: false, isConclusion: false }
@@ -7398,6 +7416,18 @@ async function continueSessionStoryTurn(
   }
 
   validateSessionTurnRequest(session, request, currentTurn)
+  if (session.workflow === 'co-creation' && currentTurn.presentation === 'closure-review') {
+    if (request.mode !== 'conclude' || request.optionId || !currentTurn.canConclude) {
+      throw new AppError('收束审阅不执行候选；请作者明确选择按已确认路径收束，或调整下一目标。', 409, 'STORY_RESULT_REVIEW_REQUIRED')
+    }
+    // This author decision closes the reviewed path. It does not perform a
+    // new action, re-confirm a result, or change any narrative fact.
+    const conclusion: StoryTurn = { ...structuredClone(currentTurn), phase: 'resolution',
+      node: { ...structuredClone(currentTurn.node), title: '作者已选择收束', goalState: 'resolved' },
+      question: null, options: [], canConclude: false, isConclusion: true }
+    const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), currentTurn: conclusion, pendingActionProposal: undefined })
+    return createStoryTurnResponse(saved, conclusion)
+  }
   let selectedOption = findSelectedTurnOption(currentTurn, request.optionId)
   const mode: Extract<StoryTurnMode, 'continue' | 'conclude'> = request.mode === 'conclude' ? 'conclude' : 'continue'
   if (session.workflow === 'co-creation') {

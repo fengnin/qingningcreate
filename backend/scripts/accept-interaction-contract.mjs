@@ -45,6 +45,10 @@ const stub = createServer(async (request, response) => {
       if (mode === 'design-claim-id') payload.candidatePlan.options[0].causalClaims[0].sourceFactIds = ['beat-resolution']
       if (mode === 'single') payload.candidatePlan.options = payload.candidatePlan.options.slice(0, 1)
       if (mode === 'empty') payload.candidatePlan.options = []
+      if (mode === 'closure' || mode === 'closure-with-action') {
+        payload.candidatePlan.basis.unresolved = { kind: 'next-goal', text: '已无未解决事项，请作者选择收束或下一目标。', sourceFactIds: [] }
+        if (mode === 'closure') payload.candidatePlan.options = []
+      }
     }
     response.writeHead(200, { 'Content-Type': 'application/json' })
     response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] }))
@@ -134,6 +138,32 @@ try {
   const newFacts = disk(before.storyId).state.facts.filter((f) => !stateBefore.facts.some((old) => old.id === f.id))
   assert.deepEqual(newFacts.map((f) => f.statement), ['合同作者确认：只审阅了条件，设备仍未通电。'])
   const final = await snapshot(before.storyId); await start(false); assert.deepEqual(await snapshot(before.storyId), final)
+  const closureReview = await api('/api/story-spine/turn', click(final))
+  const closureReceipt = { storyId: final.storyId, revision: closureReview.revision,
+    proposalId: closureReview.pendingActionProposal.id, mode: 'continue',
+    authorConfirmation: { actionText: closureReview.pendingActionProposal.action, resultText: '合同作者确认：供电事项已经完成，没有其余待办。' } }
+  mode = 'closure-with-action'
+  const beforeInvalidClosure = await snapshot(final.storyId), diskBeforeInvalidClosure = readFileSync(store, 'utf8')
+  await api('/api/story/action-proposal/confirm', closureReceipt, 502, 'STORY_TURN_RETRY_EXHAUSTED')
+  assert.deepEqual(await snapshot(final.storyId), beforeInvalidClosure)
+  assert.equal(readFileSync(store, 'utf8'), diskBeforeInvalidClosure)
+  mode = 'closure'
+  const closure = await throughBrowser(() => browser.requestStoryActionProposalConfirmation(closureReceipt))
+  assert.equal(closure.turn.presentation, 'closure-review')
+  assert.deepEqual(closure.turn.options, [])
+  assert.equal(closure.turn.transition, null)
+  assert.equal(closure.turn.canConclude, true)
+  const closureSnapshot = await snapshot(final.storyId), closureState = disk(final.storyId).state
+  await start(false); assert.deepEqual(await snapshot(final.storyId), closureSnapshot)
+  const callsBeforeClose = calls.length
+  const concluded = await throughBrowser(() => browser.requestStoryTurn({ storyId: final.storyId,
+    revision: closure.revision, turnId: closure.turn.id, mode: 'conclude' }))
+  assert.equal(concluded.turn.isConclusion, true)
+  assert.deepEqual(concluded.history, closure.history)
+  assert.deepEqual(disk(final.storyId).state, closureState)
+  assert.equal(calls.length, callsBeforeClose)
+  const concludedSnapshot = await snapshot(final.storyId)
+  await start(false); assert.deepEqual(await snapshot(final.storyId), concludedSnapshot)
   // Separate historical shape fixture. Preserve the saved historical version;
   // remove only new contract fields in the isolated fixture, never production.
   await stop()

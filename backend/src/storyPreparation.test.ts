@@ -118,6 +118,15 @@ test('author review preserves exact original text and covers exactly the selecte
   assert.throws(() => parsePreparationReview({ ...review, originalText: '' }, ['count']), code('INVALID_REQUEST'))
 })
 
+test('editing an action invalidates its old derived possible result while preserving the original candidate', () => {
+  const p = { protocol: 1 as const, status: 'needs-review' as const, sources: [source], material, candidates: [candidate], questions: [], acceptedCandidateIds: [], executed: false as const }
+  const unchangedResult = { originalText: '改动行动。', candidates: [{ id: candidate.id, action: '方屿改为先清点借阅记录。', possibleResult: candidate.possibleResult }] }
+  assert.throws(() => acceptPreparation(p, [candidate.id], unchangedResult), code('STORY_PREPARATION_DERIVED_RESULT_STALE'))
+  const revised = { ...unchangedResult, candidates: [{ ...unchangedResult.candidates[0]!, possibleResult: '新的行动结果仍待作者确认。', resultBasisIds: [] }] }
+  assert.throws(() => acceptPreparation(p, [candidate.id], revised), code('STORY_PREPARATION_REVISION_BASIS_REQUIRED'))
+  assert.deepEqual(p.candidates, [candidate])
+})
+
 test('missing goal role is recovered only by model selection of active original material, without overwriting classification or author action', async () => {
   const originalFetch = globalThis.fetch
   const env = { key: process.env.DASHSCOPE_API_KEY, disable: process.env.STORY_DISABLE_MODEL }
@@ -125,7 +134,7 @@ test('missing goal role is recovered only by model selection of active original 
   const allFacts = material.map(m => m.role === 'goal' ? { ...m, role: 'fact' as const } : m)
   const curve = { id: 'goal-recovery', title: '待审', status: 'draft' as const, brief, beats: [], instructions: [], createdAt: 1, updatedAt: 1,
     preparation: { protocol: 1 as const, status: 'needs-review' as const, sources: [source], material: allFacts, candidates: [candidate], questions: [], acceptedCandidateIds: [], executed: false as const } }
-  const review = { originalText: '仅接受未来计数；尚未执行。', candidates: [{ id: candidate.id, action: '只计数，不改书。', possibleResult: candidate.possibleResult }] }
+  const review = { originalText: '仅接受未来计数；尚未执行。', candidates: [{ id: candidate.id, action: '只计数，不改书。', possibleResult: '只计数后的结果仍待作者确认。' }] }
   let goalId: string | null = 'm0', arrangements = 0
   globalThis.fetch = async (_url, init) => {
     const input = JSON.parse(String(init?.body)), user = JSON.parse(input.messages[1].content)
@@ -137,7 +146,7 @@ test('missing goal role is recovered only by model selection of active original 
       arrangements++
       assert.equal(user.acceptedCandidates[0].action, review.candidates[0]!.action)
       response = { steps: ['current-state','trigger','resolution'].map((kind, i) => {
-        const content = i === 0 ? material[0]!.quote : i === 1 ? review.candidates[0]!.action : candidate.possibleResult
+        const content = i === 0 ? material[0]!.quote : i === 1 ? review.candidates[0]!.action : review.candidates[0]!.possibleResult
         return { kind, title: content, text: content, candidateIds: i ? [candidate.id] : [], materialIds: ['m0','m1','m2','m3'] }
       }), supplements: [] }
     }

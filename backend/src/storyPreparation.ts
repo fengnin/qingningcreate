@@ -165,6 +165,18 @@ export function acceptPreparation(p: StoryPreparation, acceptedCandidateIds: str
     || acceptedCandidateIds.some(id => !p.candidates.some(c => c.id === id))) throw new AppError('请选择存在的结构候选。', 400, 'INVALID_REQUEST')
   if (p.candidates.some(c => acceptedCandidateIds.includes(c.id) && c.unknownIds.length)) throw new AppError('该行动仍依赖未知条件，请补充或选择独立方案。', 409, 'STORY_PREPARATION_UNKNOWN_DEPENDENCY')
   const authorReview = review === undefined ? undefined : parsePreparationReview(review, acceptedCandidateIds)
+  if (authorReview) {
+    for (const revised of authorReview.candidates) {
+      const original = p.candidates.find(candidate => candidate.id === revised.id)
+      if (!original) continue
+      // An edited action invalidates its derived possible result. Do not let a
+      // client carry the old prediction forward under the new action; the
+      // original candidate remains in originalCandidates for audit/history.
+      if (revised.action !== original.action && revised.possibleResult === original.possibleResult) {
+        throw new AppError('作者改动了行动，但仍沿用旧的可能结果；请重新审阅并明确新的结果或保留未知。', 409, 'STORY_PREPARATION_DERIVED_RESULT_STALE')
+      }
+    }
+  }
   if (authorReview?.supersededMaterialIds?.some(id => !p.material.some(m => m.id === id))) throw new AppError('修订引用的旧材料不存在。', 400, 'INVALID_REQUEST')
   const revised = { ...structuredClone(p), status: 'accepted-design' as const, acceptedCandidateIds, executed: false as const,
     ...(authorReview ? { authorReview, originalCandidates: structuredClone(p.candidates), candidates: p.candidates.map(c => ({ ...c, ...authorReview.candidates.find(r => r.id === c.id) })) } : {}) }
