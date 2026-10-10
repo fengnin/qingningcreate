@@ -9,6 +9,7 @@ import {
   regenerateAffectedCurveBeats,
   previewAffectedCurveBeats,
   resolveAffectedCurveBeats,
+  getDependentBeatIds,
   regenerateCurveBeat,
   previewClarificationCurveBeat,
   rejectCurveBeat,
@@ -2803,8 +2804,10 @@ export async function regenerateSessionCurveBeat(
   const session = getStorySession(request.storyId, request.revision)
   const curve = requireDraftCurve(session, request.curveId)
   const blocked = getClarificationsAffectingBeat(curve, request.beatId)
-  if (blocked.length) {
-    const result = await previewClarificationCurveBeat(session.idea, session.seed, curve, request.beatId, request.feedback)
+  const hasAuthorDependency = curve.beats.some((beat) => beat.source === 'user-edit'
+    && getDependentBeatIds(curve.beats, beat.id).includes(request.beatId))
+  if (blocked.length || hasAuthorDependency) {
+    const result = await previewClarificationCurveBeat(session.idea, session.seed, curve, request.beatId, request.feedback, request.replaceRejected === true)
     assertStorySessionRevision(session, request.revision)
     const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), pendingCurveRegeneration: result.preview })
     return { ...createCurveMutationResponse(saved, { curve, affectedBeatIds: result.affectedBeatIds }), pendingCurveRegeneration: result.preview }
@@ -2979,6 +2982,9 @@ export async function confirmSessionCurve(
   const curve = requireDraftCurve(session, request.curveId)
   if (getUnresolvedClarifications(curve).length) {
     throw new AppError('仍有节点依赖未确认的因果前提。', 400, 'STORY_CURVE_CLARIFICATIONS_UNRESOLVED')
+  }
+  if (session.pendingCurveRegeneration?.items.length) {
+    throw new AppError('请先逐项接受或拒绝重推预览，再确认主线。', 409, 'STORY_CURVE_REGENERATION_PENDING')
   }
   const result = confirmProvisionalCurve(curve)
   for (const clarification of curve.clarifications ?? []) {

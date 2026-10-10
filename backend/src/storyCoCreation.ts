@@ -558,6 +558,8 @@ interface GeneratedCurveBeatDetail {
   detail: string
   causalAnchor: string
   usedFallback: boolean
+  sourceFactIds?: string[]
+  notice?: string
 }
 
 async function generateCurveBeatDetail(
@@ -569,6 +571,9 @@ async function generateCurveBeatDetail(
 ): Promise<GeneratedCurveBeatDetail> {
   const seedWithAuthorEdits = applyCurrentCurveEditToSeed(seed, curve)
   const authorAnchor = getNearestAuthorEditAnchor(curve, target)
+  const planContract = authorAnchor && !isLocalFallbackAllowed()
+    ? createEditedBeatPlanContract(curve, target, authorAnchor)
+    : undefined
   const fallbackDetail = authorAnchor
     ? createAuthorDrivenReplacementDetail(
         target.kind,
@@ -597,26 +602,38 @@ async function generateCurveBeatDetail(
 
   try {
     const modelOutput = await requestQwenJson({
-      systemPrompt: curveBeatRegenerationSystemPrompt,
-      userPrompt: buildCurveBeatRegenerationPrompt(idea, seedWithAuthorEdits, curve, target, feedback),
-      temperature: 0.68,
+      systemPrompt: planContract ? editedBeatPlanSystemPrompt : curveBeatRegenerationSystemPrompt,
+      userPrompt: planContract
+        ? JSON.stringify({ targetKind: target.kind,
+          allowedAuthorAnchorIds: planContract.authorAnchors.map((item) => item.id),
+          allowedConstraintFactIds: planContract.constraints.map((item) => item.id),
+          authorAnchors: planContract.authorAnchors, constraints: planContract.constraints,
+          feedback: feedback ?? null,
+          output: '只输出 beatPlan；两个字段都必须填允许列表中的 ID 字符串，不得填 text。' })
+        : buildCurveBeatRegenerationPrompt(idea, seedWithAuthorEdits, curve, target, feedback),
+      temperature: planContract ? 0.2 : 0.68,
       maxTokens: 480,
       diagnosticStage: 'curve-beat-regeneration',
     })
+    const planned = planContract
+      ? renderEditedBeatPlan(modelOutput, planContract, target.kind, getStorySubject(seedWithAuthorEdits))
+      : undefined
+    let rejectionReason: string | undefined
     const modelDetail = parseRegeneratedBeatDetail(
-      modelOutput,
+      planned ? { detail: planned.detail } : modelOutput,
       target.kind,
       curve.brief,
       seedWithAuthorEdits,
       curve,
       target,
+      (reason) => { rejectionReason = reason },
     )
     if (modelDetail
       && isMeaningfullyDifferentRegeneration(modelDetail, target)
       && (!authorAnchor || hasAuthorCausalReference(modelDetail, target.kind, authorAnchor))) {
       return {
         detail: modelDetail,
-        causalAnchor: authorAnchor
+        causalAnchor: planned?.causalAnchor ?? (authorAnchor
           ? getAuthorDrivenCausalAnchor(target.kind, authorAnchor)
           : getFallbackCausalAnchor(
               target.kind,
@@ -624,8 +641,10 @@ async function generateCurveBeatDetail(
               getStoryGoal(seedWithAuthorEdits, seedWithAuthorEdits.activeSituation),
               curve.brief,
               getCausalAnchor(curve, target, modelDetail),
-            ),
+            )),
         usedFallback: false,
+        ...(planned ? { sourceFactIds: planned.sourceFactIds,
+          notice: '本轮重推由模型选择作者编辑锚点和约束 ID，服务端渲染待审阅文案；未知因果与代价仍待作者确认。' } : {}),
       }
     }
     throw new AppError(
@@ -638,8 +657,10 @@ async function generateCurveBeatDetail(
       {
         stage: 'curve-beat-validation',
         reason: !modelDetail
-          ? '节点结构、事实锚点或提案边界不合法'
-          : '新节点没有形成相对旧节点的有效因果差异',
+          ? rejectionReason ?? '节点结构、事实锚点或提案边界不合法'
+          : !isMeaningfullyDifferentRegeneration(modelDetail, target)
+            ? '新节点复述了旧节点，没有形成因果差异'
+            : '新节点没有承接作者编辑的因果锚点',
         response: summarizeModelResponse(modelOutput),
       },
     )
@@ -657,7 +678,83 @@ async function generateCurveBeatDetail(
   return { detail: fallbackDetail, causalAnchor: fallbackAnchor, usedFallback: true }
 }
 
+interface EditedBeatPlanContract {
+  authorAnchors: Array<{ id: string; text: string; status: 'proposal' }>
+  constraints: Array<{ id: string; text: string }>
+  decision: ReturnType<typeof getAuthorDecisionMaterial>
+}
+
+/** Only author text supplies the handles; a conditional edit never becomes a fact. */
+function createEditedBeatPlanContract(
+  curve: ProvisionalCurve,
+  target: CurveBeat,
+  authorAnchor: string,
+): EditedBeatPlanContract | undefined {
+  const facts = getClarificationGroundingFacts(curve)
+  const choiceFact = facts.find((fact) => /(?:决定|选择|判断)\s*(?:是否|要不要)/u.test(fact.text))
+  if (!choiceFact) return undefined
+  const authorBeat = getNearestAuthorEditedBeat(curve, target)!
+  const conditional = /(?:若|如果|假如|倘若)/u.test(authorBeat.detail)
+  const fullEdit = normalizeCausalText(authorBeat.detail)
+  const anchors = authorAnchor.split(/[，；]/u).map((text) => text.trim())
+    .filter((text) => text.length >= 4 && text.length <= 54
+      && normalizeCausalText(text) !== fullEdit
+      && authorBeat.detail.includes(text)
+      && !(conditional && /^(?:就|便|则|会|因此|所以|于是)/u.test(text)))
+  const constraints = facts.filter((fact) => fact.id !== choiceFact.id
+    && /(?:今晚|明早|明天|今天|周[一二三四五六日天]|期限|截止|归还|答应|承诺|约定|不再|缺少|缺失|无法|不能|拒绝|分歧)/u.test(fact.text)
+    && !/(?:若|如果|假如|可能|也许)/u.test(fact.text))
+    .map((fact) => ({ id: fact.id, text: fact.text }))
+  if (!anchors.length || !constraints.length) return undefined
+  return {
+    authorAnchors: [...new Set(anchors)].map((text, index) => ({ id: `author-anchor-${index + 1}`, text, status: 'proposal' })),
+    constraints,
+    decision: getAuthorDecisionMaterial(facts, choiceFact, choiceFact.text),
+  }
+}
+
+function renderEditedBeatPlan(
+  value: unknown,
+  contract: EditedBeatPlanContract,
+  kind: CurveBeatKind,
+  subject: string,
+): Pick<GeneratedCurveBeatDetail, 'detail' | 'causalAnchor' | 'sourceFactIds'> {
+  if (!isRecord(value) || Object.keys(value).length !== 1 || !isRecord(value.beatPlan)
+    || Object.keys(value.beatPlan).sort().join(',') !== 'authorAnchorId,constraintFactId') {
+    throwCurveModelValidationFailure('重推必须只返回 beatPlan 的作者锚点 ID 与约束事实 ID，不能返回或夹带文案', value)
+  }
+  const plan = value.beatPlan
+  const anchor = contract.authorAnchors.find((item) => item.id === plan.authorAnchorId)
+  const constraint = contract.constraints.find((item) => item.id === plan.constraintFactId)
+  if (!anchor || !constraint) throwCurveModelValidationFailure('重推选择了合同之外的作者锚点或约束事实 ID', value)
+  const material = contract.decision
+  const cost = material.riskFacts.length
+    ? `原文风险：${material.riskFacts.map((fact) => fact.text).join('、')}，是否由行动导致待确认`
+    : '具体代价待作者确认'
+  const context = `编辑待审：${anchor.text}`
+  const constraintText = `既有约束：${constraint.text}`
+  const details: Record<CurveBeatKind, string> = {
+    'current-state': `暂定：${context}；${constraintText}；当前处境仍需审阅。`,
+    'character-tension': `暂定：${subject}需要审阅${material.action}涉及的关系；${context}；${constraintText}；关系中的具体代价待确认。`,
+    trigger: `暂定：${context}；${constraintText}；该条件是否阻碍${material.action}仍待确认。`,
+    escalation: `暂定：继续审阅${anchor.text}；${constraintText}；约束怎样改变行动与代价仍待确认。`,
+    'midpoint-turn': `暂定：重新判断${material.action}的办法；${context}；${constraintText}；不预设新解法。`,
+    'climax-choice': `暂定：${context}；${subject}需要选择${material.action}还是${material.alternative}；${constraintText}；代价：${cost}`,
+    resolution: `暂定：${context}；${subject}对${material.action}的判断如何变化仍待审阅；${constraintText}；${cost}，不预设行动结果。`,
+  }
+  const detail = details[kind]
+  return { detail, causalAnchor: `待审：${anchor.text}`,
+    sourceFactIds: [...new Set([constraint.id,
+      ...(detail.includes(material.action) ? [material.fact.id] : []),
+      ...material.riskFacts.filter((fact) => detail.includes(fact.text)).map((fact) => fact.id)])] }
+}
+
 function getNearestAuthorEditAnchor(curve: ProvisionalCurve, target: CurveBeat): string | undefined {
+  const beat = getNearestAuthorEditedBeat(curve, target)
+  return beat ? compactAuthorMaterial(beat.detail) : undefined
+}
+
+function getNearestAuthorEditedBeat(curve: ProvisionalCurve, target: CurveBeat): CurveBeat | undefined {
   const visited = new Set<string>()
   // Carry the nearest live author edit through the whole affected chain. The
   // downstream renderer turns this root handle into a stage-specific
@@ -669,7 +766,7 @@ function getNearestAuthorEditAnchor(curve: ProvisionalCurve, target: CurveBeat):
     visited.add(beatId)
     const beat = curve.beats.find((candidate) => candidate.id === beatId)
     if (!beat || beat.status === 'rejected') continue
-    if (beat.source === 'user-edit') return compactAuthorMaterial(beat.detail)
+    if (beat.source === 'user-edit') return beat
     queue.push(...beat.dependsOn)
   }
   return undefined
@@ -940,9 +1037,9 @@ export async function regenerateCurveBeat(
           causalAnchor: replacement.causalAnchor,
         source: 'system-proposal' as const,
         status: 'proposed' as const,
-        sourceFactIds: curve.design
+        sourceFactIds: replacement.sourceFactIds ?? (curve.design
           ? deriveReplacementSourceFactIds(curve.design, beat, replacement.detail)
-          : beat.sourceFactIds,
+          : beat.sourceFactIds),
       }
     }
     return beat
@@ -968,7 +1065,9 @@ export async function regenerateCurveBeat(
               notice: '系统未能可靠重推这一节点，已保留原始材料并生成可编辑的结构草案。',
             },
           }
-        : {}),
+         : replacement.notice ? {
+             generation: { origin: 'model' as const, dramaticMechanism: getDramaticMechanism(curve.brief), notice: replacement.notice },
+           } : {}),
     }),
     affectedBeatIds,
   }
@@ -1112,17 +1211,22 @@ export async function previewClarificationCurveBeat(
   curve: ProvisionalCurve,
   beatId: string,
   feedback?: string,
+  replaceRejected = false,
 ): Promise<CurveRegenerationPreviewResult> {
   const target = requireCurveBeat(curve, beatId, '重推')
   assertDraftCurve(curve)
-  if (target.source !== 'system-proposal' || target.status === 'rejected') {
+  if (target.status === 'rejected' && !replaceRejected) {
+    throw new AppError('这条提案已被你拒绝，不能重新生成。请编辑其他节点，或创建一个新的主线版本。', 409, 'STORY_CURVE_REJECTED_IMMUTABLE')
+  }
+  if (target.source !== 'system-proposal') {
     throw new AppError('只有有效的系统提案可以生成替代预览。', 409, 'STORY_CLARIFICATION_AUTHOR_EDIT')
   }
   const blocking = getClarificationsForBeat(curve, beatId)
-  if (!blocking.length || blocking.some((item) => !item.resolution && item.status !== 'confirmed' && item.unknownHandling !== 'request-independent-proposal')) {
+  if ((!blocking.length && !getNearestAuthorEditedBeat(curve, target))
+    || blocking.some((item) => !item.resolution && item.status !== 'confirmed' && item.unknownHandling !== 'request-independent-proposal')) {
     throw new AppError('请先标记未知并选择生成独立提案。', 409, 'STORY_CLARIFICATION_REVIEW_REQUIRED')
   }
-  const result = await regenerateCurveBeat(idea, seed, curve, beatId, getClarificationFeedback(feedback, blocking))
+  const result = await regenerateCurveBeat(idea, seed, curve, beatId, getClarificationFeedback(feedback, blocking), replaceRejected)
   const replacement = result.curve.beats.find((beat) => beat.id === beatId)!
   for (const clarification of blocking) await reviewClarificationReplacement(curve, clarification, replacement)
   return {
@@ -2968,25 +3072,35 @@ function parseRegeneratedBeatDetail(
   seed: StorySeed,
   curve: ProvisionalCurve,
   target: CurveBeat,
+  onRejected?: (reason: string) => void,
 ): string | undefined {
-  if (!isRecord(value)) return undefined
+  const reject = (reason: string): undefined => {
+    onRejected?.(reason)
+    return undefined
+  }
+  if (!isRecord(value)) return reject('模型没有返回节点对象')
   const detail = readOptionalText(value.detail, maximumModelCurveBeatLength)
-  if (
-    !detail
-    || (!brief.allowSystemNamedCharacters && hasNewNamedCharacter(detail, seed))
-    || !isCurveDetailGroundedToContext(detail, seed, curve, target)
-    || !isSystemCurveProposalSafe(
+  if (!detail) return reject('模型没有返回长度合法的节点内容')
+  if (!brief.allowSystemNamedCharacters && hasNewNamedCharacter(detail, seed)) {
+    return reject('节点新增了作者未允许的具名人物')
+  }
+  if (!isCurveDetailGroundedToContext(detail, seed, curve, target)) {
+    return reject('节点没有承接已知事实或有效上游节点')
+  }
+  const safetyFailure = getCurveProposalSafetyFailure(
       kind,
       detail,
       curve.design?.sourceFacts
         .filter((fact) => fact.disposition !== 'parked')
         .map((fact) => fact.text) ?? [],
     )
-    || repeatsFullUpstreamDetail(detail, curve, target)
-    || hasNestedCurveQuotes(detail)
-    || hasUnboundGenericCausalPhrase(detail)
-    || repeatsRejectedProposal(detail, curve)
-  ) return undefined
+  if (safetyFailure) {
+    return reject(`节点越过系统提案边界：${safetyFailure.replace(/“[^”]*”/gu, '“未确认物件”')}`)
+  }
+  if (repeatsFullUpstreamDetail(detail, curve, target)) return reject('节点整句复述了上游内容')
+  if (hasNestedCurveQuotes(detail)) return reject('节点包含嵌套引号')
+  if (hasUnboundGenericCausalPhrase(detail)) return reject('节点使用了没有对象的模板化因果')
+  if (repeatsRejectedProposal(detail, curve)) return reject('节点重复了作者已拒绝的提案')
   return detail
 }
 
@@ -4035,6 +4149,9 @@ const curveGenerationSystemPrompt = `你是故事共创编辑。你的职责是�
 输出：{"title":"简短标题","beats":[{"kind":"current-state","title":"节点标题","detail":"节点内容","dependsOn":[],"sourceFactIds":["source-fact-1"],"causalAnchor":"一句短因果承接"},{"kind":"trigger","title":"节点标题","detail":"暂定：抽象阻碍","dependsOn":["beat-current-state"],"sourceFactIds":["source-fact-1"],"causalAnchor":"一句短因果承接"},{"kind":"escalation","title":"节点标题","detail":"暂定：抽象升级","dependsOn":["beat-trigger"],"sourceFactIds":["source-fact-1"],"causalAnchor":"一句短因果承接"},{"kind":"climax-choice","title":"节点标题","detail":"暂定：主动选择","dependsOn":["beat-escalation"],"sourceFactIds":["source-fact-1"],"causalAnchor":"一句短因果承接"},{"kind":"resolution","title":"节点标题","detail":"暂定：抽象变化","dependsOn":["beat-climax-choice"],"sourceFactIds":["source-fact-1"],"causalAnchor":"一句短因果承接"}],"foundation":{"conflictCore":{"goal":"保留的目标","obstacle":"具体阻碍如何卡住目标","tradeoff":"主角必须承担的取舍"},"preservedGoal":"保留的目标","predicament":{"title":"具体困境标题","variationAxis":"time|resource|relationship|commitment","immediateSituation":"当前处境","obstacle":"当前阻碍","tradeoff":"取舍","urgency":"为什么现在要处理","choice":"主角要作的选择","plausibleCost":"选择的代价"},"middleDevelopment":{"escalation":"阻碍如何升级","midpoint":"中段如何改变原办法","climaxPressure":"高潮压力"},"storyEnds":{"opening":"故事开端","openingClue":"开端钩子","climax":"高潮选择","resolution":"结局变化","cost":"承担的代价","promise":"故事承诺"},"approach":{"intent":"第一步设计方向","cost":"第一步代价"}}}`
 
 const curveBeatRegenerationSystemPrompt = `你是故事共创编辑。只重写一条暂定故事曲线节点，不写连续剧情。返回 JSON：{"detail":"暂定：一句可编辑的系统提案"}。detail 必须以“暂定：”开头，不得把提案写成既定事实、行动结果或长场景；未允许新增具名人物时不得新增名字。只提取上游节点的核心后果，用新的短语推进下一层；不要复制上游整句，不要出现嵌套引号。`
+
+const editedBeatPlanSystemPrompt = `你是作者编辑后的节点事实选择器。只返回 JSON 对象，顶层只允许 beatPlan；beatPlan 只允许 authorAnchorId、constraintFactId 两个字段。两个字段只能输出允许 ID 列表中的字符串，绝不能输出 text 文案或增加字段。
+authorAnchorId 从 allowedAuthorAnchorIds 逐字选择，constraintFactId 从 allowedConstraintFactIds 逐字选择。authorAnchors、constraints 的 text 只用于理解选择，不能作为返回值。作者编辑的 status=proposal 表示待审提案，不是已确认事实；条件句不能解释为必然。选择与 targetKind 最相关的已有约束，不得从旧节点、常识或作者偏好补事实。服务端会分开呈现行动、约束和未知代价，并继续事实与差异校验。`
 
 const curveGenerationRepairSystemPrompt = `你是故事结构校验修复器，不是小说作者。你必须把候选曲线改写成可审阅的抽象因果提案。
 
