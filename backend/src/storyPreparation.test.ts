@@ -118,6 +118,49 @@ test('author review preserves exact original text and covers exactly the selecte
   assert.throws(() => parsePreparationReview({ ...review, originalText: '' }, ['count']), code('INVALID_REQUEST'))
 })
 
+test('missing goal role is recovered only by model selection of active original material, without overwriting classification or author action', async () => {
+  const originalFetch = globalThis.fetch
+  const env = { key: process.env.DASHSCOPE_API_KEY, disable: process.env.STORY_DISABLE_MODEL }
+  process.env.DASHSCOPE_API_KEY = 'stub'; process.env.STORY_DISABLE_MODEL = 'false'
+  const allFacts = material.map(m => m.role === 'goal' ? { ...m, role: 'fact' as const } : m)
+  const curve = { id: 'goal-recovery', title: '待审', status: 'draft' as const, brief, beats: [], instructions: [], createdAt: 1, updatedAt: 1,
+    preparation: { protocol: 1 as const, status: 'needs-review' as const, sources: [source], material: allFacts, candidates: [candidate], questions: [], acceptedCandidateIds: [], executed: false as const } }
+  const review = { originalText: '仅接受未来计数；尚未执行。', candidates: [{ id: candidate.id, action: '只计数，不改书。', possibleResult: candidate.possibleResult }] }
+  let goalId: string | null = 'm0', arrangements = 0
+  globalThis.fetch = async (_url, init) => {
+    const input = JSON.parse(String(init?.body)), user = JSON.parse(input.messages[1].content)
+    let response
+    if (input.messages[0].content.includes('核对作者目标分类')) {
+      assert.ok(!user.knownMaterial.some((m: { id: string }) => m.id === 'm4'))
+      response = { goalMaterialId: goalId }
+    } else {
+      arrangements++
+      assert.equal(user.acceptedCandidates[0].action, review.candidates[0]!.action)
+      response = { steps: ['current-state','trigger','resolution'].map((kind, i) => {
+        const content = i === 0 ? material[0]!.quote : i === 1 ? review.candidates[0]!.action : candidate.possibleResult
+        return { kind, title: content, text: content, candidateIds: i ? [candidate.id] : [], materialIds: ['m0','m1','m2','m3'] }
+      }), supplements: [] }
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(response) } }] }), { status: 200 })
+  }
+  try {
+    const before = structuredClone(curve)
+    const mapped = await generateCurveFromPreparation(curve, [candidate.id], review)
+    assert.equal(mapped.reasoning!.goal!.text, material[0]!.quote)
+    assert.deepEqual(mapped.preparation!.material, allFacts)
+    assert.equal(mapped.beats[1]!.detail, review.candidates[0]!.action)
+    for (const id of ['m4','invented',null]) {
+      goalId = id
+      await assert.rejects(() => generateCurveFromPreparation(curve, [candidate.id], review), code('STORY_PREPARATION_INVALID_OUTPUT'))
+    }
+    assert.equal(arrangements, 1)
+    assert.deepEqual(curve, before)
+  } finally {
+    globalThis.fetch = originalFetch
+    for (const [key, value] of [['DASHSCOPE_API_KEY', env.key], ['STORY_DISABLE_MODEL', env.disable]]) { if (value === undefined) delete process.env[key!]; else process.env[key!] = value }
+  }
+})
+
 test('explicit supersession preserves originals, requires reviewed replacement basis and excludes old material', () => {
   const p = { protocol: 1 as const, status: 'needs-review' as const, sources: [source], material, candidates: [candidate], questions: [], acceptedCandidateIds: [], executed: false as const }
   const review = { originalText: '计数可能发现差异，尚未计数。', supersededMaterialIds: ['m1'], confirmedQuotes: ['计数可能发现差异'], candidates: [{ id: 'count', action: candidate.action, possibleResult: '可能发现差异，尚未确认。' }] }

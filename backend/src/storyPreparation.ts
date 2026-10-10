@@ -142,6 +142,23 @@ export function activePreparationMaterial(p: StoryPreparation): StoryPreparation
   }))]
 }
 
+/** Classification is model work, never a server keyword inference. A missing
+ * role can be recovered by selecting existing text without rewriting history. */
+async function resolvePreparationGoal(material: StoryPreparationItem[]): Promise<StoryPreparationItem> {
+  const classified = material.find(m => m.role === 'goal')
+  if (classified) return classified
+  const known = material.filter(m => m.role !== 'unknown')
+  const output = await requestQwenJson({
+    systemPrompt: '核对作者目标分类。输出精确 JSON {goalMaterialId}。只从输入 knownMaterial 中选择明确表达作者人物目标的一项 ID；不改写目标，不以行动候选或可能结果代替目标，不推断人物动机。没有明确目标时返回 goalMaterialId:null。此输出只是原文角色审阅，不是设计接受或执行事实。',
+    userPrompt: JSON.stringify({ knownMaterial: known }), temperature: 0.1, maxTokens: 200, diagnosticStage: 'preparation-goal-classification',
+  })
+  const r = object(output, ['goalMaterialId'])
+  const id = r.goalMaterialId === null ? null : text(r.goalMaterialId, 80)
+  const goal = known.find(m => m.id === id)
+  if (!goal) invalid('目标分类未给出有效的已知原文引用；模型需重新整理或返回问题审阅，不能用行动或未知材料补造目标。')
+  return goal!
+}
+
 export function acceptPreparation(p: StoryPreparation, acceptedCandidateIds: string[], review?: StoryPreparationReview): StoryPreparation {
   if (p.status !== 'needs-review') throw new AppError('结构已接受，请审阅当前曲线。', 409, 'STORY_PREPARATION_ALREADY_ACCEPTED')
   if (!acceptedCandidateIds.length || new Set(acceptedCandidateIds).size !== acceptedCandidateIds.length
@@ -171,6 +188,7 @@ export async function generateCurveFromPreparation(curve: ProvisionalCurve, acce
   const p = acceptPreparation(curve.preparation, acceptedIds, review)
   const selected = p.candidates.filter(c => acceptedIds.includes(c.id))
   const activeMaterial = activePreparationMaterial(p)
+  const goalMaterial = await resolvePreparationGoal(activeMaterial)
   const output = await requestQwenJson({ systemPrompt: `排列已接受未来行动，不写执行记录。严格输出 JSON {steps:[{kind,title,text,candidateIds,materialIds}],supplements:[{id,kind,text,question,materialIds}]}。
 核心 steps 只能引用输入中的逐字已知材料、已接受行动或可能结果；text 必须等于其中一条完整原文，不能改写、拼接或补因果。title 也必须逐字等于相应 text。3 至5段，依序 current-state,trigger,可选 escalation,可选 climax-choice,resolution；简单行动只需三段，不造高潮。current-state 无 candidateIds；其余引用已接受候选。resolution 只展示候选 possibleResult，仍是未来假设，不是已发生。
 trigger 的 text 必须逐字等于被引用候选的 action，不能改用材料 quote。resolution 的 text 必须逐字等于该候选的 possibleResult。每段 materialIds 非空；trigger 使用候选 materialIds，resolution 使用候选 resultBasisIds。materialIds 不可引用已取代材料。
@@ -201,7 +219,6 @@ trigger 的 text 必须逐字等于被引用候选的 action，不能改用材�
     || selected.some(c => !arrangements.some(s => s.refs.includes(c.id)))) invalid('曲线遗漏已接受结构或阶段顺序不正确。')
   const evidence = (ids: string[]) => ids.map(id => activeMaterial.find(m => m.id === id)!).map(m => ({ sourceId: m.id, quote: m.quote }))
   const basis = (ids: string[]) => ({ kind: 'design-proposal' as const, evidence: evidence(ids), unknownIds: [] })
-  const goalMaterial = activeMaterial.find(m => m.role === 'goal')
   const actions = selected.map(c => ({ id: c.id, text: c.action, basis: basis(c.materialIds), constraintIds: c.preconditionIds.map(id => `material-${id}`), relationIds: [`result-${c.id}`], unknownIds: [], respondsToEditIds: [] }))
   const relations = selected.map(c => ({ id: `result-${c.id}`, text: c.possibleResult, basis: basis(c.resultBasisIds), relation: 'cause' as const, fromIds: [c.id, ...c.preconditionIds], toIds: c.resultBasisIds }))
   const conditions = activeMaterial.filter(m => m.role !== 'unknown').map(m => ({ id: `material-${m.id}`, text: m.quote, basis: { kind: 'author-text' as const, evidence: [{ sourceId: m.id, quote: m.quote }] } }))

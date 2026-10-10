@@ -16,19 +16,19 @@ await build({entryPoints:[resolve(backend,'../frontend/src/story/storyApi.ts')],
 const idea='齐朔想整理底片；按编号分类不会改动底片；没有期限；拍摄日期尚未确定。'
 const material=idea.split('；').map((quote,i)=>({id:'m'+i,sourceId:'author-input',quote,role:i===0?'goal':i===3?'unknown':'condition'}))
 const candidate={id:'sort',action:'齐朔按编号分类底片。',materialIds:['m0','m1'],preconditionIds:['m1'],possibleResult:'按编号分类后，底片可能按编号归组而不被改动；日期仍未知。',resultBasisIds:['m1'],unknownIds:[]}
-let child,base,calls=0,bad=false,hold,release,expectedReview
+let child,base,calls=0,bad=false,hold,release,expectedReview,missingGoal=false,invalidGoal=false
 const stub=createServer(async(req,res)=>{
  const chunks=[];for await(const c of req)chunks.push(c)
  const request=JSON.parse(Buffer.concat(chunks));calls++;assert.equal(request.model,'qwen-plus')
  const prompt=request.messages[0].content
- if(expectedReview && !prompt.includes('先整理作者材料') && !prompt.includes('最小行动候选')) {
+ if(expectedReview && !prompt.includes('先整理作者材料') && !prompt.includes('最小行动候选') && !prompt.includes('核对作者目标分类')) {
    const input=JSON.parse(request.messages[1].content)
    assert.deepEqual(input.authorReview,expectedReview)
    assert.equal(input.acceptedCandidates[0].possibleResult,expectedReview.candidates[0].possibleResult)
    assert.equal(input.brief,undefined)
  }
  if(hold){hold();await new Promise(r=>release=r)}
- const out=prompt.includes('先整理作者材料')?{material}:prompt.includes('最小行动候选')?{candidates:[candidate,{...candidate,id:'date',action:'按拍摄日期归档',unknownIds:['q']}],questions:[{id:'q',question:'这些底片的拍摄日期是什么？',materialIds:['m3']}]}
+ const out=prompt.includes('核对作者目标分类')?{goalMaterialId:invalidGoal?'m3':'m0'}:prompt.includes('先整理作者材料')?{material:missingGoal?material.map(m=>m.role==='goal'?{...m,role:'fact'}:m):material}:prompt.includes('最小行动候选')?{candidates:[candidate,{...candidate,id:'date',action:'按拍摄日期归档',unknownIds:['q']}],questions:[{id:'q',question:'这些底片的拍摄日期是什么？',materialIds:['m3']}]}
  :{steps:['current-state','trigger','resolution'].map((kind,i)=>{const content=i===0?material[0].quote:i===1?candidate.action:(expectedReview?.candidates[0].possibleResult??candidate.possibleResult);return {kind,title:content,text:content,candidateIds:i?[bad?'not-reviewed':'sort']:[],materialIds:['m0','m1','m2']}}),supplements:[
    {id:'check',kind:'criterion',text:'建议增加分组检查标准。',question:'作者是否希望增加这个标准？',materialIds:['m1']},
    {id:'observe',kind:'observation',text:'建议观察底片编号。',question:'作者是否增加观察步骤？',materialIds:['m1']},
@@ -138,5 +138,22 @@ try{
  assert.deepEqual(await snapshot(failureStart.storyId),failureBefore)
  assert.equal(readFileSync(store,'utf8'),failureDisk)
  await start();assert.deepEqual(await snapshot(failureStart.storyId),failureBefore)
+ // Missing classification is a generator error, not absent author intent.
+ // Recovery selects original text and must preserve API/storage atomicity.
+ missingGoal=true;store=join(artifact,'goal-recovery-sessions.json');await start()
+ const goalStart=await api('/api/story/co-create/start',startBody)
+ const goalBefore=await snapshot(goalStart.storyId),goalDisk=readFileSync(store,'utf8')
+ invalidGoal=true
+ await api('/api/story/preparation/accept',{...ref(goalStart),acceptedCandidateIds:['sort'],authorReview:expectedReview},502,'STORY_PREPARATION_INVALID_OUTPUT')
+ assert.deepEqual(await snapshot(goalStart.storyId),goalBefore)
+ assert.equal(readFileSync(store,'utf8'),goalDisk)
+ invalidGoal=false
+ const recovered=await api('/api/story/preparation/accept',{...ref(goalStart),acceptedCandidateIds:['sort'],authorReview:expectedReview})
+ assert.equal(recovered.revision,goalStart.revision+1)
+ assert.equal(recovered.curve.reasoning.goal.text,material[0].quote)
+ assert.equal(recovered.curve.preparation.material[0].role,'fact')
+ assert.equal(recovered.curve.preparation.executed,false)
+ const recoveredSnapshot=await snapshot(goalStart.storyId)
+ await start();assert.deepEqual(await snapshot(goalStart.storyId),recoveredSnapshot)
  console.log(JSON.stringify({ok:true,artifact,calls,model:'local stub; not real content acceptance'}))
 }finally{if(child?.exitCode===null)await new Promise(r=>{child.once('exit',r);child.kill()});await new Promise(r=>stub.close(r))}
