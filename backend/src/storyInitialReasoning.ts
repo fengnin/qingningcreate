@@ -57,7 +57,7 @@ export function mapInitialReasoningProposal(proposal: StoryReasoningProposal, de
   } : undefined
   const nextDesign: StoryDesignRecord = { ...design, foundation, sourceFacts: design.sourceFacts.map(f => {
     const coveredByBeatIds = beats.filter(b => b.sourceFactIds?.includes(f.id)).map(b => b.id)
-    return { ...f, coveredByBeatIds, disposition: coveredByBeatIds.length ? 'integrated' : 'needs-author-decision' }
+    return { ...f, coveredByBeatIds, disposition: f.disposition === 'parked' ? 'parked' : coveredByBeatIds.length ? 'integrated' : 'needs-author-decision' }
   }) }
   const now = Date.now()
   return { id: `curve-${randomUUID()}`, title: '待审阅的故事设计', status: 'draft', brief, beats, instructions: [],

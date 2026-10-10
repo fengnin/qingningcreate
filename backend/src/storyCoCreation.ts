@@ -1397,7 +1397,12 @@ export function updateCurveSourceFactDisposition(
     disposition === 'parked' ? '作者明确暂不把这条原始材料纳入当前主线。' : '作者要求把这条原始材料纳入当前主线。',
   )
   return {
-    curve: finalizeCurveMutation({ ...curve, design: updatedDesign }, beats, instruction),
+    // An explicit disposition of unused material does not change the reviewed
+    // structure. Keep its foundation; dependent nodes still become stale.
+    curve: affectedBeatIds.length === 0 && curve.reasoning
+      ? { ...curve, design: updateStoryDesignCoverage(updatedDesign, beats),
+          beats, instructions: [...curve.instructions, instruction], updatedAt: Date.now() }
+      : finalizeCurveMutation({ ...curve, design: updatedDesign }, beats, instruction),
     affectedBeatIds,
   }
 }

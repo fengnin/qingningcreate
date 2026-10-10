@@ -10,7 +10,8 @@ export function createStoryProposalContext(
   selectedFocus: string[],
 ) {
   const authorTexts = curve.preparation
-    ? activePreparationMaterial(curve.preparation).filter(item => item.role !== 'unknown').map(item => item.quote)
+    ? activePreparationMaterial(curve.preparation).filter(item => item.role !== 'unknown'
+        && curve.design?.sourceFacts.find(f => f.id === item.id)?.disposition !== 'parked').map(item => item.quote)
     : [...new Set([
     seed.lockedGoal ?? '', ...seed.lockedFacts,
     ...(curve.design?.sourceFacts.filter((f) => f.disposition === 'integrated').map((f) => f.text) ?? []),
