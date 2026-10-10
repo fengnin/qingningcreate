@@ -2,7 +2,7 @@ import { AppError, requestQwenJson, summarizeModelResponse, withModelDiagnostic 
 import { createNarrativeStateMachine, type StoryValidationContext } from './storyState.js'
 import { formatStoryRealityContractContext, storyRealityContractInstruction } from './storyRealityContract.js'
 import { getAuthorDecisionMaterial } from './storyDecision.js'
-import { createStoryProposalContext, storyProposalGenerationInstruction } from './storyProposalContext.js'
+import { createStoryProposalContext, storyProposalGenerationInstruction, validateProposalFactReferences } from './storyProposalContext.js'
 import {
   confirmProvisionalCurve,
   generateProvisionalCurve,
@@ -5572,7 +5572,7 @@ async function generateCoCreationCandidateTurn(request: StoryTurnRequest, state:
   const focus = state.focus?.sourceTexts ?? selected?.narrativeAction.focusSourceTexts ?? []
   const context = createStoryProposalContext(request.seed, request.confirmedCurve!, request.history, focus)
   const { sourceFacts } = context
-  const sourceIds = new Set(sourceFacts.map((fact) => fact.id))
+  const proposalEvidenceIds = sourceFacts.map((fact) => fact.id)
   let repair: string | undefined
   for (let attempt = 0; attempt < maxStoryTurnGenerationAttempts; attempt++) {
     try {
@@ -5582,8 +5582,8 @@ async function generateCoCreationCandidateTurn(request: StoryTurnRequest, state:
           ...(repair ? { repair } : {}),
           schema: { candidatePlan: { options: [1, 2, 3].map(() => ({
             label: '行动短名称', action: '待作者审阅的具体行动', proposedConsequence: '待审阅的可能承接',
-            sourceFactIds: ['引用sourceFacts中的ID，不等于因果证据'],
-            causalClaims: [{ statement: '需要作者核对的前提或因果', sourceFactIds: ['材料引用ID'] }],
+            sourceFactIds: proposalEvidenceIds.slice(0, 1),
+            causalClaims: [{ statement: '需要作者核对的前提或因果；没有作者依据时引用为空', sourceFactIds: [] }],
             questions: ['尚未确定时如实询问作者，不补答案'],
           })) } },
         }), temperature: attempt === 0 ? 0.45 : 0.3, maxTokens: 2_400, diagnosticStage: 'candidate-action-preview',
@@ -5593,22 +5593,16 @@ async function generateCoCreationCandidateTurn(request: StoryTurnRequest, state:
       assertProposalKeys(plan, ['options'])
       if (!Array.isArray(plan.options) || plan.options.length !== 3) throw new AppError('候选行动必须有三项待审提案。', 502, 'INVALID_MODEL_OUTPUT')
       const turnId = `turn-${request.history.length + 1}`, nodeId = `node-${request.history.length + 1}`
-      const refs = (value: unknown) => {
-        if (!Array.isArray(value) || value.length > sourceFacts.length
-          || value.some((id) => typeof id !== 'string' || !sourceIds.has(id)) || new Set(value).size !== value.length) {
-          throw new AppError('待审提案引用了不存在或重复的作者材料 ID。', 502, 'INVALID_MODEL_OUTPUT')
-        }
-        return value as string[]
-      }
+      const refs = (value: unknown, path: string) => validateProposalFactReferences(value, proposalEvidenceIds, path)
       const options: StoryTurnOption[] = plan.options.map((value, index) => {
         const raw = expectRecord(value, '候选行动结构不完整。', invalidModelOutputContext)
         assertProposalKeys(raw, ['label', 'action', 'proposedConsequence', 'sourceFactIds', 'causalClaims', 'questions'])
-        const sourceFactIds = refs(raw.sourceFactIds)
+        const sourceFactIds = refs(raw.sourceFactIds, `options[${index}].sourceFactIds`)
         if (!Array.isArray(raw.causalClaims) || raw.causalClaims.length > 4) throw new AppError('待审因果声明结构不完整。', 502, 'INVALID_MODEL_OUTPUT')
-        const causalClaims = raw.causalClaims.map((value) => {
+        const causalClaims = raw.causalClaims.map((value, claimIndex) => {
           const claim = expectRecord(value, '待审因果声明结构不完整。', invalidModelOutputContext)
           assertProposalKeys(claim, ['statement', 'sourceFactIds'])
-          return { statement: readText(claim, 'statement', '待审因果声明缺少内容。', 180, invalidModelOutputContext), sourceFactIds: refs(claim.sourceFactIds) }
+          return { statement: readText(claim, 'statement', '待审因果声明缺少内容。', 180, invalidModelOutputContext), sourceFactIds: refs(claim.sourceFactIds, `options[${index}].causalClaims[${claimIndex}].sourceFactIds`) }
         })
         const id = `${turnId}-option-${index + 1}`, actionId = `${id}-action`
         const action = readText(raw, 'action', '候选行动缺少内容。', 180, invalidModelOutputContext)

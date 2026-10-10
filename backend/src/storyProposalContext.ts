@@ -1,5 +1,15 @@
 import type { ConfirmedCurve, StorySeed, StoryTurnHistoryItem } from '../../shared/story-contract.js'
 import { activePreparationMaterial } from './storyPreparation.js'
+import { AppError } from './qwen.js'
+
+export function validateProposalFactReferences(value: unknown, sourceIds: readonly string[], path: string): string[] {
+  if (!Array.isArray(value) || value.length > sourceIds.length || value.some(id => typeof id !== 'string') || new Set(value).size !== value.length) {
+    throw new AppError(`${path}：事实引用必须是无重复的 ID 数组。`, 502, 'INVALID_MODEL_OUTPUT')
+  }
+  const missing = value.filter(id => !sourceIds.includes(id))
+  if (missing.length) throw new AppError(`${path}：非法事实 ID ${missing.join(', ')}；只允许 ${sourceIds.join(', ') || '空数组'}。designBeats 和 authorEdits 的 ID 不属于事实证据；不能替换为相似事实或补造依据。`, 502, 'INVALID_MODEL_OUTPUT')
+  return value as string[]
+}
 
 /** Generation context separates narrative evidence from reviewed story design.
  * None of these roles is inferred from a date, an object name or a keyword. */
@@ -49,6 +59,8 @@ export function createStoryProposalContext(
     authorEdits, designBeats, unresolvedQuestions, selectedFocus,
     executedHistory,
     lastAuthorConfirmedResult: executedHistory.at(-1) ?? null,
+    referenceContract: { sourceFactIds: sourceFacts.map(f => f.id),
+      designOnlyIds: designBeats.map(b => b.id), unconfirmedQuestionIds: unresolvedQuestions.map(q => q.id) },
     priorities: [
       '承接最近已确认的实际结果，不把已执行行动重新当作待执行行动。',
       '保留作者编辑的行动对象、约束及尚待决定的部分，系统节点不覆盖作者编辑。',
@@ -60,6 +72,7 @@ export function createStoryProposalContext(
 
 export const storyProposalGenerationInstruction = `你是中文故事共创提案编辑。生成具体、成立、可审阅的下一步行动，不生成既成事件或事实状态。
 先读完整上下文：sourceFacts 是作者材料或逐字确认的实际结果；authorEdits 是作者设计意图而非已发生事实；designBeats 只给结构方向，不能替代因果证据。executedHistory 是已确认行动结果。selectedFocus 是关注角度，不是执行授权，也不能使作者编辑的核心问题消失。
+引用编码：options[].sourceFactIds 与 causalClaims[].sourceFactIds 只能照抄 referenceContract.sourceFactIds。禁止填 designOnlyIds、未确认问题 ID、材料原来的 ID 或示例占位词。引用一个设计节点不是事实依据；没有作者依据的待审假设用空数组并明确提出问题，不能把设计节点转换为事实引用。
 行动、约束和代价分开：行动须说明谁针对什么对象做什么；目标与期限、承诺、资源条件都不是行动选项。比较解决同一当前问题的不同做法，不把可同时满足的条件硬写成二选一。没有期限就不制造倒计时；已有条件可兼容就不声称必然冲突。
 因果依据：事实并列不等于因果，引用 ID 不等于证明。仅作者明确写出的因果关系可以作为成立的理由；从物件用途、关系身份、期限或承诺推断出的能力、动机、权限、回应和代价都不是已知。不要通过新增人员、机构、设备、流程或便利权限绕开核心问题。
 给三项有实质差异的候选。优先使用已有行动对象和条件。若一项行动依赖未知前提，把整项写成条件性候选，同时在 causalClaims 列出每个依赖，在 questions 提出能核对它的具体问题；不得把未知前提写成确定句。资料不足时可以给围绕该缺口的具体核对行动，明确哪些决定尚不能作出，不能凑出三个伪选择。作者明确保留未知时，提供不依赖该前提的审阅行动，不替作者回答。

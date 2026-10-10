@@ -38,6 +38,8 @@ const stub = createServer(async (request, response) => {
       if (mode === 'unsafe-state') payload.candidatePlan.options[0].transition = { introducedFacts: [{ statement: '投影仪已经通电。' }] }
       if (mode === 'fake-review') payload.review = { supported: true }
       if (mode === 'unknown-id') payload.candidatePlan.options[0].sourceFactIds = ['unknown-id']
+      if (mode === 'design-id') payload.candidatePlan.options[0].sourceFactIds = ['beat-trigger']
+      if (mode === 'design-claim-id') payload.candidatePlan.options[0].causalClaims[0].sourceFactIds = ['beat-resolution']
     }
     response.writeHead(200, { 'Content-Type': 'application/json' })
     response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] }))
@@ -96,7 +98,7 @@ try {
   await api('/api/story/curve/start-spine', ref(confirmed))
   const before = await snapshot(draft.storyId), stateBefore = disk(draft.storyId).state, fileBefore = readFileSync(store, 'utf8')
   assert.equal(before.currentTurn.presentation, 'focus-selection')
-  for (mode of ['unsafe-state', 'fake-review', 'unknown-id']) {
+  for (mode of ['unsafe-state', 'fake-review', 'unknown-id', 'design-id', 'design-claim-id']) {
     await api('/api/story-spine/turn', click(before), 502, 'STORY_TURN_RETRY_EXHAUSTED')
     assert.deepEqual(await snapshot(before.storyId), before); assert.equal(readFileSync(store, 'utf8'), fileBefore)
   }

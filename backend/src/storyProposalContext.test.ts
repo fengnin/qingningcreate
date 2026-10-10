@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { ConfirmedCurve, StorySeed, StoryTurnHistoryItem } from '../../shared/story-contract.js'
-import { createStoryProposalContext } from './storyProposalContext.js'
+import { createStoryProposalContext, validateProposalFactReferences } from './storyProposalContext.js'
 
 const seed: StorySeed = { subject: '许沅', activeSituation: '修复陶碗', lockedGoal: '修复陶碗',
   lockedFacts: ['陶碗裂口缺一块', '邻居提供同色碎片'], worldMode: 'realistic-default', expansionScope: 'keep-scale', unknowns: [] }
@@ -38,4 +38,17 @@ test('only exact author result receipts feed continuation; model history and tam
   assert.deepEqual(input.executedHistory.map((entry) => entry.resultText), ['测量后确认碎片比缺口窄。'])
   assert.equal(input.lastAuthorConfirmedResult!.resultText, '测量后确认碎片比缺口窄。')
   assert.ok(!input.sourceFacts.some((f) => f.text === '陶碗已经修好。' || f.text === '碎片已经粘牢。'))
+})
+
+test('continuation references cannot promote reviewed design or unknown questions to fact evidence', () => {
+  const context = createStoryProposalContext(seed, curve, [history('executed')], [])
+  assert.deepEqual(context.referenceContract.sourceFactIds, context.sourceFacts.map(f => f.id))
+  assert.deepEqual(context.referenceContract.designOnlyIds, ['b'])
+  const path = 'options[1].causalClaims[0].sourceFactIds'
+  for (const refs of [['b'], ['q'], ['unknown-id'], ['result','result']]) {
+    assert.throws(() => validateProposalFactReferences(refs, context.referenceContract.sourceFactIds, path),
+      (e: unknown) => e instanceof Error && e.message.includes(path))
+  }
+  assert.deepEqual(validateProposalFactReferences(['result'], context.referenceContract.sourceFactIds, path), ['result'])
+  assert.deepEqual(validateProposalFactReferences([], context.referenceContract.sourceFactIds, path), [])
 })
