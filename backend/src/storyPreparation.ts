@@ -44,9 +44,10 @@ export const preparationCandidatesPrompt = `你只设计曲线之前的最小行
 输出精确 JSON {candidates:[{id,action,materialIds,preconditionIds,possibleResult,resultBasisIds,unknownIds}],questions:[{id,question,materialIds}]}。
 引用合同：materialIds、preconditionIds、resultBasisIds 只能取 referenceContract.knownMaterialIds；即使描述行动对象，也不能引用 role=unknown 的材料。questions[].materialIds 可取 referenceContract.questionMaterialIds（含未知材料）。unknownIds 只取本次 questions[].id，不能填材料 ID。缺少已知对象时允许 candidates=[]，用具体问题恢复，不必凑行动。
 合法编码示例（仅示意引用，不是故事设定）：若已知材料 k1、未知材料 u1，问题 {id:"q1",question:"请明确尚未确定的对象。",materialIds:["u1"]}；依赖该问题的候选使用 materialIds:["k1"],preconditionIds:[],resultBasisIds:[],unknownIds:["q1"]；没有独立行动就仅返回 questions。不能把 u1 放入候选的三个依据数组，也不能为了通过校验补造 k1 或结果依据。
-最多3个具体候选，不要求凑满。action 说明谁对已有对象做什么；materialIds 指向支持行动对象及目标的已知原文。preconditionIds 逐项列出行动成立所需、作者已明确的条件。possibleResult 是行动的条件性可能结果，resultBasisIds 引用支持该结果的明确作者条件或目标；引用本身不能证明因果。不要保证态度变化、取得许可或关系改善。没有结果依据时，保留结果未知并提出具体问题，unknownIds 引用 questions 的 ID；这类候选不可接受为成立结构。
-条件不存在时不发明条件：机构规则、物件能力、许可范围和人物反应没有原文依据就提问。未知材料不能当已知证据。可以设计使用已有材料的新做法，但新增规则或新因果必须先向作者询问，不能包装成已有依据。已有明确拒绝不改写成可能同意。条件可兼容时设计兼容行动，不硬写无法兼得；没有期限不制造倒计时。
-若关键条件不足，给能具体回答的问题，或不依赖该条件的独立候选。questions 不能把生成失误归咎于作者，不能要求作者重复已有明确答案。候选和可能结果都是未来待审设计，接受不意味着执行。`
+本次只给1个最小行动候选，不生成额外备选及其调查问题；用户不采用时会再请求不同提案。action 说明谁对已有对象做什么；materialIds 指向支持行动对象及目标的已知原文。preconditionIds 逐项列出行动成立所需、作者已明确的条件。possibleResult 是行动的条件性可能结果，必须使用“可能”“尝试”或“如果…则…”表达开放发展，resultBasisIds 引用支持该结果的明确作者条件或目标；引用本身不能证明因果。不要保证态度变化、取得许可或关系改善。没有结果依据时，保留结果未知并提出具体问题，unknownIds 引用 questions 的 ID；这类候选不可接受为成立结构。
+这是共同构思故事，不是现实任务的可行性认证。短想法优先提出一个具体、可编辑、可拒绝的未来创意：让主角针对原文目标选择一个新做法，或一个有反差的尝试；不能只复述“去完成目标”。新做法是系统提案，不是作者事实。可用目标原文作为 resultBasisIds，但可能发展只表达围绕该目标的尝试及开放结果，不保证成功、不新增因果规则。不能将未建立的许可、资源、他人态度或场所规则当作已有事实。
+条件不存在时不发明条件，也不枚举通用现实核查：不主动调查年龄、监护、交通、费用、营业、健康等事项，除非作者明确使它成为当前故事阻碍。优先换成不依赖额外规则、权限或他人回应的创意尝试，不为了证明日常目标可行而提问。物件能力或新增规则确实支撑当前关键因果且没有原文依据时，不能包装成已有依据。
+信息丰富时保留全部作者边界，针对现有目标、矛盾和可兼容条件提出行动，不硬造冲突、代价或倒计时。已有明确拒绝不改写成可能同意。若确实没有独立提案，questions 只问当前最关键的一个创作问题（例如目标或关键对象不清），不用核查清单，也不重复已有答案。已有独立候选时，不再附加与候选无关的问题；questions 中每个问题必须是某个候选的真实 unknownIds 依赖（除非 candidates 为空）。不要把零花钱、陪同人或交通等清单合成一条问题规避此要求。候选和可能结果都是未来待审设计，接受不意味着执行。遵循 brief 的感觉和反馈，但 brief 不提供事实、许可或结果依据。`
 
 export function parsePreparationMaterial(value: unknown, sources: StoryPreparation['sources']): StoryPreparationItem[] {
   const r = object(value, ['material'])
@@ -121,7 +122,7 @@ export async function generateStoryPreparation(idea: string, brief: CreativeBrie
   const output = await requestQwenJson({ systemPrompt: preparationCandidatesPrompt, userPrompt: JSON.stringify({ sources, material, brief, referenceContract: preparationReferenceContract(material) }), temperature: 0.25, maxTokens: 3000, diagnosticStage: 'preparation-candidates' })
   const candidates = parsePreparationCandidates(output, material)
   const now = Date.now()
-  return { id: `curve-${randomUUID()}`, title: '先审阅行动与条件', status: 'draft', brief, beats: [], instructions: [],
+  return { id: `curve-${randomUUID()}`, title: '一起构思故事方向', status: 'draft', brief, beats: [], instructions: [],
     preparation: { protocol: 1, status: 'needs-review', sources, material, ...candidates, acceptedCandidateIds: [], executed: false }, createdAt: now, updatedAt: now,
     generation: { origin: 'model', dramaticMechanism: '原文整理与行动候选分开生成；尚未生成曲线，也未确认事实' } }
 }

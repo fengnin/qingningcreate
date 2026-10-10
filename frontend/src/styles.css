@@ -5128,6 +5128,35 @@ textarea:focus-visible {
   }
 }
 
+.preparation-workspace { max-width: none; width: 100%; }
+.preparation-workspace > * { max-width: 984px; }
+.preparation-workspace h1 { margin: 36px 0 12px; font-size: clamp(28px, 4vw, 44px); }
+.preparation-original { margin: 28px 0; padding-left: 18px; border-left: 2px solid #6b8069; }
+.preparation-original blockquote { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.preparation-proposal { padding: 30px 0; border-top: 1px solid #36483e; }
+.preparation-proposal h2 { max-width: 760px; font-size: clamp(22px, 3vw, 30px); line-height: 1.55; }
+.preparation-development { max-width: 760px; font-size: 17px; line-height: 1.85; white-space: pre-wrap; }
+.preparation-actions { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; margin-top: 26px; }
+.preparation-actions button, .preparation-question button { min-height: 44px; }
+.preparation-note, .preparation-editor > p { font-size: 13px; line-height: 1.7; color: #aab9ad; }
+.preparation-evidence { margin: 22px 0; color: #b7c6b9; font-size: 14px; overflow-wrap: anywhere; }
+.preparation-actions .text-action { color: #b7c6b9; }
+.preparation-evidence summary, .preparation-question summary { cursor: pointer; padding: 12px 0; }
+.preparation-evidence dl { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 12px; line-height: 1.7; }
+.preparation-evidence dd { margin: 0; }
+.preparation-editor { display: grid; gap: 16px; max-width: 760px; margin: 24px 0; }
+.preparation-editor label { display: grid; gap: 8px; }
+.preparation-editor textarea { box-sizing: border-box; width: 100%; min-height: 96px; padding: 12px; border: 1px solid #52665a; background: #1a3026; color: #edf3ec; border-radius: 8px; font: inherit; line-height: 1.7; resize: vertical; }
+.preparation-question { padding: 24px 0; border-top: 1px solid #36483e; }
+.preparation-question .text-action { margin-right: 16px; }
+@media (max-width: 700px) {
+  .preparation-workspace .setup-header { flex-wrap: wrap; gap: 12px; }
+  .preparation-actions { gap: 8px 16px; }
+  .preparation-actions .primary-action { width: 100%; justify-content: center; }
+  .preparation-evidence dl { grid-template-columns: 1fr; gap: 6px; }
+  .preparation-evidence dd { margin-bottom: 12px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
