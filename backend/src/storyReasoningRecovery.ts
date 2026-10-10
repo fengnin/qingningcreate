@@ -3,6 +3,7 @@ import { AppError, requestQwenJson, withModelDiagnostic } from './qwen.js'
 import { mapInitialReasoningProposal } from './storyInitialReasoning.js'
 import { storyReasoningSystemPrompt } from './storyReasoningPrompt.js'
 import { validateStoryReasoningProposal } from './storyReasoningContract.js'
+import { parseStoryReasoningWire } from './storyReasoningWire.js'
 import type { StoryReasoningProposal, StoryReasoningDesignStep, StoryReasoningStatement, StoryReasoningValidationContext } from '../../shared/story-reasoning-contract.js'
 import type { ProvisionalCurve, StorySeed, StoryCurveRegenerationPreview, StoryCurveRegenerationDecision } from '../../shared/story-contract.js'
 
@@ -75,7 +76,7 @@ export async function previewReasoningRecovery(idea:string,seed:StorySeed,curve:
         userPrompt:JSON.stringify({idea,brief:curve.brief,context,prefix,targets,authorEdits:context.protectedSteps,
           currentSteps:curve.beats.filter(b=>!targets.includes(b.id)&&b.status!=='rejected'),questions:curve.clarifications,feedback,validationFailure:failure?.message}),
         temperature:attempt?0.1:0.35,maxTokens:6500,diagnosticStage:'reasoning-edit-preview'})
-      const p=validateStoryReasoningProposal(output,context)
+      const p=parseStoryReasoningWire(output,context)
       if(p.outcome==='proposal'&&'steps'in p){
         if(p.steps.length!==targets.length||targets.some(id=>!p.steps.some(s=>s.id===id)))invalid('重推必须覆盖指定节点，不得修改范围外节点。')
         if(p.steps.some(s=>s.id!==`beat-${s.kind}`))invalid('节点类型和 ID 不一致。')

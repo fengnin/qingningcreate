@@ -3,6 +3,7 @@ import test from 'node:test'
 import { createStoryDesignRecord, isStoryCurveFoundationCurrent } from './storyDesign.js'
 import { createInitialReasoningContext, mapInitialReasoningProposal } from './storyInitialReasoning.js'
 import { validateStoryReasoningProposal } from './storyReasoningContract.js'
+import { storyReasoningWireExample } from './storyReasoningWire.js'
 import { confirmProvisionalCurve, generateProvisionalCurve, materializeConfirmedCurve, regenerateCurveBeat, updateCurveBeat } from './storyCoCreation.js'
 import { AppError } from './qwen.js'
 import type { CreativeBrief, StorySeed } from '../../shared/story-contract.js'
@@ -64,7 +65,10 @@ test('online initial entry requests direct structure; legacy IDs, invalid author
       const request = JSON.parse(String(init?.body)); calls++
       assert.match(request.messages[0].content,/服务端不会补写因果/u)
       assert.equal(JSON.parse(request.messages[1].content).context.stage,'initial-design')
-      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] }), { status: 200 })
+      const context = JSON.parse(request.messages[1].content).context
+      let wire: unknown = payload
+      try { wire = storyReasoningWireExample(payload, context) } catch { /* Deliberately malformed fixture remains rejected. */ }
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(wire) } }] }), { status: 200 })
     }
     const curve = await generateProvisionalCurve(c.text,seed,brief)
     assert.equal(curve.generation!.origin,'model'); assert.deepEqual(curve.reasoning,payload)

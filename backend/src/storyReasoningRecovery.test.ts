@@ -9,6 +9,7 @@ import { attachReasoningQuestions, createRecoveryContext, previewReasoningRecove
 import { updateCurveBeat, confirmProvisionalCurve, materializeConfirmedCurve } from './storyCoCreation.js'
 import { changeCurveClarification, confirmCurveClarification } from './storyClarification.js'
 import { AppError } from './qwen.js'
+import { storyReasoningWireExample } from './storyReasoningWire.js'
 import type { StoryReasoningProposal, StoryReasoningValidationContext } from '../../shared/story-reasoning-contract.js'
 import type { ProvisionalCurve } from '../../shared/story-contract.js'
 const env={...process.env}, fetchBefore=globalThis.fetch
@@ -33,7 +34,7 @@ function payload(context:StoryReasoningValidationContext,prefix='initial',target
 function model(){process.env.STORY_DISABLE_MODEL='false';process.env.DASHSCOPE_API_KEY='contract-stub';process.env.DASHSCOPE_BASE_URL='https://stub.invalid'
  globalThis.fetch=async(_url,init)=>{const body=JSON.parse(String(init?.body));const prompt=JSON.parse(body.messages[1].content);requests.push(prompt)
    if(entered){entered();entered=undefined;return new Promise<Response>(r=>{hold=r})}
-   return response(malformed?{curvePlan:{}}:payload(prompt.context,prompt.prefix,prompt.targets))}
+   return response(malformed?{curvePlan:{}}:storyReasoningWireExample(payload(prompt.context,prompt.prefix,prompt.targets),prompt.context))}
 }
 const response=(p:unknown)=>new Response(JSON.stringify({choices:[{message:{content:JSON.stringify(p)}}]}),{status:200})
 const code=(name:string)=>(e:unknown)=>e instanceof AppError&&e.code===name
@@ -104,7 +105,7 @@ test('malformed output and in-flight revision changes leave session intact; pers
  let signal!:()=>void;const seen=new Promise<void>(r=>{signal=r});entered=signal
  const pending=service.regenerateSessionCurveDependencies({storyId:s.storyId,revision:edited.revision,curveId:s.curve.id});const rejected=assert.rejects(pending,code('STORY_SESSION_CONFLICT'))
  await seen;edited=await service.updateSessionCurveBeat({storyId:s.storyId,revision:edited.revision,curveId:s.curve.id,beatId:'beat-trigger',detail:'作者编辑：保留并编号图纸。'})
- const req=requests.at(-1)!;hold!(response(payload(req.context,req.prefix,req.targets)));await rejected
+ const req=requests.at(-1)!;hold!(response(storyReasoningWireExample(payload(req.context,req.prefix,req.targets),req.context)));await rejected
  assert.equal(service.getStorySessionSnapshot(s.storyId).pendingCurveRegeneration,undefined)
  const preview=await service.regenerateSessionCurveDependencies({storyId:s.storyId,revision:edited.revision,curveId:s.curve.id})
  before=service.getStorySessionSnapshot(s.storyId);const persisted=readFileSync(store,'utf8');mkdirSync(store+'.tmp')

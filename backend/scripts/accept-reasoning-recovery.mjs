@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { setTimeout as delay } from 'node:timers/promises'
 const backend=resolve(fileURLToPath(new URL('..',import.meta.url)))
+const { storyReasoningWireExample }=await import('../dist/storyReasoningWire.js')
 const artifacts=mkdtempSync(join(tmpdir(),'story-initial-reasoning-')), store=join(artifacts,'sessions.json')
 const { build }=createRequire(new URL('../../frontend/package.json',import.meta.url))('esbuild')
 const browserModule=join(artifacts,'browser-api.mjs')
@@ -21,6 +22,7 @@ const stub=createServer(async(req,res)=>{
     const chunks=[]; for await(const chunk of req) chunks.push(chunk)
     const request=JSON.parse(Buffer.concat(chunks).toString('utf8')); assert.equal(request.model,'qwen-plus')
     assert.match(request.messages[0].content,/服务端不会补写因果/u)
+    assert.match(request.messages[0].content,/protocol=2/u)
     const { context,prefix,targets }=JSON.parse(request.messages[1].content); calls++
     const evidence=context.sources.filter(s=>s.authority!=='unknown').map(s=>({sourceId:s.id,quote:s.text}))
     const nid=id=>prefix?`${prefix}-${id}`:id
@@ -32,7 +34,7 @@ const stub=createServer(async(req,res)=>{
     if(questions) payload.questions=[{unknownId:nid('gap'),dependentIds:[]}]
     else payload.steps=(targets??['beat-current-state','beat-trigger','beat-escalation','beat-climax-choice','beat-resolution']).map((id,i,all)=>({id,kind:id.replace('beat-',''),title:'待审设计',text:`待审设计节点${i}：先记录原始材料。`,basis,
       actionIds:[nid('action')],relationIds:[],dependsOn:i?[all[i-1]]:context.requiredEditIds,respondsToEditIds:context.requiredEditIds}))
-    res.writeHead(200,{'Content-Type':'application/json'}); res.end(JSON.stringify({choices:[{message:{content:JSON.stringify(invalid?{curvePlan:{}}:payload)}}]}))
+    res.writeHead(200,{'Content-Type':'application/json'}); res.end(JSON.stringify({choices:[{message:{content:JSON.stringify(invalid?{curvePlan:{}}:storyReasoningWireExample(payload,context))}}]}))
   } catch(e){res.writeHead(500);res.end(String(e))}
 })
 await new Promise(r=>stub.listen(0,'127.0.0.1',r))
@@ -112,5 +114,5 @@ try{
   questions=false;invalid=true
   await api('/api/story/co-create/start',{idea:'温晴想整理船模图纸；没有期限；条件可以兼容。',brief},502,'STORY_CURVE_MODEL_GENERATION_FAILED')
   invalid=false;await start(false);assert.equal((await snapshot(legacy.storyId)).curve.reasoning,undefined)
-  console.log(`Reasoning recovery HTTP and browser parser contracts passed (${calls} local stub calls; disabled legacy + protocol 1; NOT real content acceptance). Artifacts: ${artifacts}`)
+  console.log(`Reasoning recovery HTTP and browser parser contracts passed (${calls} local stub calls; disabled legacy + model wire2/stored protocol1; NOT real content acceptance). Artifacts: ${artifacts}`)
 }finally{await stop();await new Promise(r=>stub.close(r))}
