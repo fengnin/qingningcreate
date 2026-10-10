@@ -866,7 +866,12 @@ export function parseStoryCurveDependenciesRegenerationRequest(body: unknown): S
 }
 
 export function parseStoryCurveRegenerationResolutionRequest(body: unknown): StoryCurveRegenerationResolutionRequest {
-  const record = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'previewId', 'decisions'])
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'previewId', 'decisions', 'independentUnknownIds'])
+  if (record.independentUnknownIds !== undefined && (!Array.isArray(record.independentUnknownIds)
+    || record.independentUnknownIds.some(id => typeof id !== 'string' || !id.trim())
+    || new Set(record.independentUnknownIds).size !== record.independentUnknownIds.length)) {
+    throw new AppError('独立提案审阅记录格式不正确。', 400, 'INVALID_REQUEST')
+  }
   const decisionsRecord = record.decisions
   if (!isPlainRecord(decisionsRecord)) {
     throw new AppError('批量重推的逐项决定格式不正确，请刷新后重试。', 400, 'INVALID_REQUEST')
@@ -883,6 +888,7 @@ export function parseStoryCurveRegenerationResolutionRequest(body: unknown): Sto
     curveId: readIdentifier(record, 'curveId', '暂定故事曲线不完整，请刷新后重试。', invalidRequestContext),
     previewId: readIdentifier(record, 'previewId', '批量重推预览已经失效，请刷新后重试。', invalidRequestContext),
     decisions,
+    ...(record.independentUnknownIds === undefined ? {} : { independentUnknownIds: record.independentUnknownIds as string[] }),
   }
 }
 
@@ -2774,6 +2780,12 @@ async function updateSessionCurveBeatInternal(
   const session = getStorySession(request.storyId, request.revision)
   const curve = requireDraftCurve(session, request.curveId)
   const result = updateCurveBeat(curve, request.beatId, request.detail)
+  if (curve.reasoning) {
+    const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), provisionalCurve: result.curve, pendingCurveRegeneration: undefined })
+    const response = createCurveMutationResponse(saved, result)
+    writeCachedStoryOperation(completedCurveBeatUpdates, operationKey, response)
+    return response
+  }
   const previouslyBlocked = getClarificationsForBeat(curve, request.beatId)
   if (previouslyBlocked.length) {
     if (previouslyBlocked.some((item) => !item.resolution && item.status !== 'confirmed' && item.unknownHandling !== 'request-independent-proposal')) {
@@ -2802,6 +2814,13 @@ export async function regenerateSessionCurveBeat(
 ): Promise<StoryCurveMutationResponse> {
   const session = getStorySession(request.storyId, request.revision)
   const curve = requireDraftCurve(session, request.curveId)
+  if (curve.reasoning) {
+    const result = await previewClarificationCurveBeat(session.idea, session.seed, curve, request.beatId, request.feedback, request.replaceRejected === true)
+    assertStorySessionRevision(session, request.revision)
+    const nextCurve = result.questionCurve ?? curve
+    const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), provisionalCurve: nextCurve, pendingCurveRegeneration: result.preview })
+    return { ...createCurveMutationResponse(saved, { curve: nextCurve, affectedBeatIds: result.affectedBeatIds }), pendingCurveRegeneration: result.preview }
+  }
   const blocked = getClarificationsAffectingBeat(curve, request.beatId)
   const hasAuthorDependency = curve.beats.some((beat) => beat.source === 'user-edit'
     && getDependentBeatIds(curve.beats, beat.id).includes(request.beatId))
@@ -2840,6 +2859,10 @@ export async function rejectSessionCurveBeat(
   const session = getStorySession(request.storyId, request.revision)
   const curve = requireDraftCurve(session, request.curveId)
   const result = rejectCurveBeat(curve, request.beatId, request.reason)
+  if (curve.reasoning) {
+    const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), provisionalCurve: result.curve, pendingCurveRegeneration: undefined })
+    return createCurveMutationResponse(saved, result)
+  }
   session.provisionalCurve = result.curve
   session.pendingCurveRegeneration = undefined
   commitStorySessionChanges(session)
@@ -2853,6 +2876,11 @@ export async function regenerateSessionCurveDependencies(
   const curve = requireDraftCurve(session, request.curveId)
   const result = await previewAffectedCurveBeats(session.idea, session.seed, curve, request.feedback)
   assertStorySessionRevision(session, request.revision)
+  if (curve.reasoning) {
+    const nextCurve = result.questionCurve ?? curve
+    const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), provisionalCurve: nextCurve, pendingCurveRegeneration: result.preview })
+    return { ...createCurveMutationResponse(saved, { curve: nextCurve, affectedBeatIds: result.affectedBeatIds }), pendingCurveRegeneration: result.preview }
+  }
   let saved = session
   if (curve.clarifications?.length) {
     saved = commitClarificationSessionChanges(session, { ...structuredClone(session), pendingCurveRegeneration: result.preview })
@@ -2874,6 +2902,11 @@ export async function resolveSessionCurveDependencies(
   const preview = session.pendingCurveRegeneration
   if (!preview || preview.id !== request.previewId) {
     throw new AppError('批量重推预览已经失效，请重新生成预览。', 409, 'STORY_CURVE_REGENERATION_PREVIEW_NOT_FOUND')
+  }
+  if (curve.reasoning) {
+    const result = resolveAffectedCurveBeats(curve, preview, request.decisions, request.independentUnknownIds)
+    const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), provisionalCurve: result.curve, pendingCurveRegeneration: undefined })
+    return createCurveMutationResponse(saved, result)
   }
   for (const item of preview.items) {
     if (request.decisions[item.id] !== 'accept') continue
@@ -2912,6 +2945,10 @@ export async function updateSessionSourceFactDisposition(
   const session = getStorySession(request.storyId, request.revision)
   const curve = requireDraftCurve(session, request.curveId)
   const result = updateCurveSourceFactDisposition(curve, request.factId, request.disposition)
+  if (curve.reasoning) {
+    const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), provisionalCurve: result.curve, pendingCurveRegeneration: undefined })
+    return createCurveMutationResponse(saved, result)
+  }
   session.provisionalCurve = result.curve
   session.pendingCurveRegeneration = undefined
   commitStorySessionChanges(session)
@@ -2987,6 +3024,7 @@ export async function confirmSessionCurve(
   }
   const result = confirmProvisionalCurve(curve)
   for (const clarification of curve.clarifications ?? []) {
+    if (curve.reasoning) continue // Protocol 1 is reviewed by the author, never certified by a model reviewer.
     const affected = curve.beats.filter((beat) => beat.status !== 'rejected'
       && getClarificationsForBeat(curve, beat.id).some((item) => item.id === clarification.id))
     if (!affected.length) continue
@@ -2998,7 +3036,7 @@ export async function confirmSessionCurve(
     })
   }
   assertStorySessionRevision(session, request.revision)
-  if (curve.clarifications?.length) {
+  if (curve.reasoning || curve.clarifications?.length) {
     const saved = commitClarificationSessionChanges(session, {
       ...structuredClone(session), provisionalCurve: result.curve, confirmedCurve: result.confirmedCurve,
       pendingCurveRegeneration: undefined, seed: { ...session.seed, creativeBrief: result.confirmedCurve.brief },

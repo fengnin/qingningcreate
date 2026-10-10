@@ -74,7 +74,7 @@ export interface StorySessionActions {
   regenerateCurveBeat: (beatId: string, feedback?: string, replaceRejected?: boolean) => Promise<void>
   rejectCurveBeat: (beatId: string, reason?: string) => Promise<void>
   regenerateAffectedCurveBeats: (feedback?: string) => Promise<void>
-  resolveAffectedCurveBeats: (decisions: Record<string, StoryCurveRegenerationDecision>) => Promise<void>
+  resolveAffectedCurveBeats: (decisions: Record<string, StoryCurveRegenerationDecision>, independentUnknownIds?: string[]) => Promise<void>
   setSourceFactDisposition: (factId: string, disposition: 'parked' | 'integrated') => Promise<void>
   changeCurveClarification: (action: StoryAuthorClarificationAction, fields?: {
     clarificationId?: string; targetBeatId?: string; prompt?: string; causalGap?: string; answerText?: string
@@ -244,7 +244,7 @@ function createCoCreationActions(
     )
   }
 
-  const resolveAffectedCurveBeats = async (decisions: Record<string, StoryCurveRegenerationDecision>) => {
+  const resolveAffectedCurveBeats = async (decisions: Record<string, StoryCurveRegenerationDecision>, independentUnknownIds?: string[]) => {
     const curve = state.provisionalCurve
     const preview = state.pendingCurveRegeneration
     if (!curve || !preview || !state.storyId) return
@@ -257,6 +257,7 @@ function createCoCreationActions(
         curveId: curve.id,
         previewId: preview.id,
         decisions,
+        ...(independentUnknownIds ? { independentUnknownIds } : {}),
       }),
       (result) => {
         applyCurveMutationState(state, result)

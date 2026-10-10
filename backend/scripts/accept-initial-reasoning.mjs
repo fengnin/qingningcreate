@@ -59,11 +59,17 @@ try{
   const edited=await api('/api/story/curve/beat',{...ref(s),beatId:'beat-trigger',detail:'作者编辑：先测量，不修补。'})
   assert.equal(edited.curve.foundation,undefined);assert.equal(edited.curve.beats.find(b=>b.id==='beat-trigger').source,'user-edit')
   const before=await snapshot(s.storyId)
-  await api('/api/story/curve/beat/regenerate',{...ref(edited),beatId:'beat-escalation'},409,'STORY_REASONING_REGENERATION_NOT_CONNECTED')
+  invalid=true
+  await api('/api/story/curve/beat/regenerate',{...ref(edited),beatId:'beat-escalation'},502,'STORY_REASONING_PREVIEW_FAILED')
+  invalid=false
   await api('/api/story/curve/confirm',ref(edited),409,'STORY_CURVE_FOUNDATION_OUT_OF_DATE');assert.deepEqual(await snapshot(s.storyId),before)
   unknown=true
   const pending=await api('/api/story/co-create/start',{idea:'余禾想修补陶杯；没有完成期限；代价是否成立未确定。',brief})
-  await api('/api/story/curve/confirm',ref(pending),409,'STORY_REASONING_UNKNOWN_DEPENDENCY')
+  // Unknowns now have actionable clarification records; the earlier review
+  // gate rejects before the reasoning dependency gate. This remains rejection.
+  const blockedBefore=await snapshot(pending.storyId)
+  await api('/api/story/curve/confirm',ref(pending),400,'STORY_CURVE_CLARIFICATIONS_UNRESOLVED')
+  assert.deepEqual(await snapshot(pending.storyId),blockedBefore)
   unknown=false;questions=true
   const q=await api('/api/story/co-create/start',{idea:'余禾想修补陶杯；具体代价尚未确定。',brief});assert.equal(q.curve.reasoning.outcome,'questions');assert.equal(q.curve.foundation,undefined)
   questions=false;invalid=true

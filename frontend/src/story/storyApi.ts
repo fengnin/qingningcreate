@@ -1,3 +1,4 @@
+import type { StoryReasoningProposal } from '../../../shared/story-reasoning-contract.js'
 import type {
   ApiErrorResponse,
   GeneratedStory,
@@ -302,6 +303,8 @@ function parseCurveRegenerationPreview(value: unknown): StoryCurveRegenerationPr
   const items = record.items
   if (!Array.isArray(items)) throwInvalidResponse()
   return {
+    ...(record.reasoning === undefined ? {} : { reasoning: parseReasoning(record.reasoning) }),
+    ...(record.excludedUnknownIds === undefined ? {} : { excludedUnknownIds: readIdentifierList(record, 'excludedUnknownIds') }),
     id: readIdentifier(record, 'id'),
     curveId: readIdentifier(record, 'curveId'),
     items: items.map((item) => {
@@ -316,7 +319,7 @@ function parseCurveRegenerationPreview(value: unknown): StoryCurveRegenerationPr
         beatId: readIdentifier(itemRecord, 'beatId'),
         title: readText(itemRecord, 'title'),
         kind,
-        oldDetail: readText(itemRecord, 'oldDetail'),
+        oldDetail: record.reasoning === undefined ? readText(itemRecord, 'oldDetail') : readDesignSlot(itemRecord, 'oldDetail'),
         newDetail: readText(itemRecord, 'newDetail'),
         newSourceFactIds: readIdentifierList(itemRecord, 'newSourceFactIds'),
         ...(itemRecord.newCausalAnchor === undefined ? {} : { newCausalAnchor: readText(itemRecord, 'newCausalAnchor') }),
@@ -590,10 +593,11 @@ function parseConfirmedCurve(value: unknown): ConfirmedCurve {
 
 type ParsedCurveFields = Pick<
   ProvisionalCurve,
-  'id' | 'title' | 'brief' | 'beats' | 'rejectedProposals' | 'design' | 'foundation' | 'generation' | 'clarifications'
+  'id' | 'title' | 'brief' | 'beats' | 'rejectedProposals' | 'design' | 'foundation' | 'generation' | 'clarifications' | 'reasoning'
 >
 
 function parseCurveFields(record: Record<string, unknown>): ParsedCurveFields {
+  const reasoning = record.reasoning === undefined ? undefined : parseReasoning(record.reasoning)
   const rejectedProposals = record.rejectedProposals === undefined
     ? undefined
     : parseCurveBeatList(record.rejectedProposals, 0, 100)
@@ -601,7 +605,8 @@ function parseCurveFields(record: Record<string, unknown>): ParsedCurveFields {
     id: readIdentifier(record, 'id'),
     title: readText(record, 'title'),
     brief: parseCreativeBrief(record.brief),
-    beats: parseCurveBeats(record.beats),
+    beats: reasoning?.outcome === 'questions' ? parseCurveBeatList(record.beats, 0, 7) : parseCurveBeats(record.beats),
+    ...(reasoning ? { reasoning } : {}),
     ...(rejectedProposals ? { rejectedProposals } : {}),
     ...(record.design === undefined ? {} : { design: parseStoryDesignRecord(record.design) }),
     ...(record.foundation === undefined ? {} : { foundation: parseStoryCurveFoundation(record.foundation) }),
@@ -627,6 +632,7 @@ function parseClarifications(value: unknown): StoryAuthorClarification[] {
     return {
       id: readIdentifier(record, 'id'),
       prompt: readText(record, 'prompt'),
+      ...(record.reasoningUnknownId === undefined ? {} : { reasoningUnknownId: readIdentifier(record, 'reasoningUnknownId') }),
       status,
       ...(record.answerText === undefined ? {} : { answerText: readVerbatimAnswer(record.answerText) }),
       ...(unknownHandling === undefined ? {} : { unknownHandling }),
@@ -647,6 +653,9 @@ function parseClarifications(value: unknown): StoryAuthorClarification[] {
 
 function parseStoryCurveFoundation(value: unknown): StoryCurveFoundation {
   const record = expectRecord(value)
+  const reasoning = record.reasoning === undefined ? undefined : parseReasoning(record.reasoning)
+  // New protocol intentionally leaves undeclared urgency/cost/conflict empty.
+  const slot = reasoning ? readDesignSlot : readText
   const conflictCore = expectRecord(record.conflictCore)
   const predicament = expectRecord(record.predicament)
   const middleDevelopment = expectRecord(record.middleDevelopment)
@@ -663,23 +672,23 @@ function parseStoryCurveFoundation(value: unknown): StoryCurveFoundation {
   return {
     conflictCore: {
       goal: readText(conflictCore, 'goal'),
-      obstacle: readText(conflictCore, 'obstacle'),
-      tradeoff: readText(conflictCore, 'tradeoff'),
+      obstacle: slot(conflictCore, 'obstacle'),
+      tradeoff: slot(conflictCore, 'tradeoff'),
     },
     preservedGoal: readText(record, 'preservedGoal'),
     predicament: {
       title: readText(predicament, 'title'),
       variationAxis: readStoryVariationAxis(predicament.variationAxis),
       immediateSituation: readText(predicament, 'immediateSituation'),
-      obstacle: readText(predicament, 'obstacle'),
-      tradeoff: readText(predicament, 'tradeoff'),
-      urgency: readText(predicament, 'urgency'),
+      obstacle: slot(predicament, 'obstacle'),
+      tradeoff: slot(predicament, 'tradeoff'),
+      urgency: slot(predicament, 'urgency'),
       choice: readText(predicament, 'choice'),
-      plausibleCost: readText(predicament, 'plausibleCost'),
+      plausibleCost: slot(predicament, 'plausibleCost'),
     },
     middleDevelopment: {
       escalation: readText(middleDevelopment, 'escalation'),
-      midpoint: readText(middleDevelopment, 'midpoint'),
+      midpoint: slot(middleDevelopment, 'midpoint'),
       climaxPressure: readText(middleDevelopment, 'climaxPressure'),
     },
     storyEnds: {
@@ -687,12 +696,12 @@ function parseStoryCurveFoundation(value: unknown): StoryCurveFoundation {
       openingClue: readText(storyEnds, 'openingClue'),
       climax: readText(storyEnds, 'climax'),
       resolution: readText(storyEnds, 'resolution'),
-      cost: readText(storyEnds, 'cost'),
-      promise: readText(storyEnds, 'promise'),
+      cost: slot(storyEnds, 'cost'),
+      promise: slot(storyEnds, 'promise'),
     },
     approach: {
       intent: readText(approach, 'intent'),
-      cost: readText(approach, 'cost'),
+      cost: slot(approach, 'cost'),
     },
     ...(sourceFactIdsRecord ? {
       sourceFactIds: {
@@ -703,6 +712,7 @@ function parseStoryCurveFoundation(value: unknown): StoryCurveFoundation {
       },
     } : {}),
     ...(beatSignatures ? { beatSignatures } : {}),
+    ...(reasoning ? { reasoning } : {}),
   }
 }
 
@@ -1248,6 +1258,23 @@ function readText(record: Record<string, unknown>, field: string): string {
   const value = record[field]
   if (typeof value !== 'string' || !value.trim()) throwInvalidResponse()
   return value.trim()
+}
+
+function readDesignSlot(record: Record<string, unknown>, field: string): string {
+  if (typeof record[field] !== 'string') throwInvalidResponse()
+  return record[field] as string
+}
+
+/** Response shape checking only. Authority and acceptance are server validated. */
+function parseReasoning(value: unknown): StoryReasoningProposal {
+  const r = expectRecord(value)
+  if (r.protocol !== 1 || !['initial-design','edit-preview','action-candidates'].includes(String(r.stage))
+    || r.status !== 'needs-review' || !['proposal','questions'].includes(String(r.outcome))) throwInvalidResponse()
+  for (const key of ['constraints','actions','relations','unknowns']) if (!Array.isArray(r[key])) throwInvalidResponse()
+  if (r.goal !== null) expectRecord(r.goal)
+  if (r.outcome === 'questions') { if (!Array.isArray(r.questions)) throwInvalidResponse() }
+  else if (!Array.isArray(r.stage === 'action-candidates' ? r.options : r.steps)) throwInvalidResponse()
+  return r as unknown as StoryReasoningProposal
 }
 
 function readVerbatimAnswer(value: unknown): string {

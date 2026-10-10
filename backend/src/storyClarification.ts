@@ -55,8 +55,9 @@ function requireClarification(curve: ProvisionalCurve, id: string | undefined): 
 
 export function getUnresolvedClarifications(curve: ProvisionalCurve): StoryAuthorClarification[] {
   return (curve.clarifications ?? []).filter((item) => !item.resolution
-    && item.dependency.beatIds.some((id) => [id, ...getDependentBeatIds(curve.beats, id)]
+    && ((curve.reasoning && item.dependency.beatIds.length === 0) || item.dependency.beatIds.some((id) => [id, ...getDependentBeatIds(curve.beats, id)]
       .some((beatId) => curve.beats.some((beat) => beat.id === beatId && beat.status !== 'rejected'))))
+    )
 }
 
 export function getClarificationsAffectingBeat(curve: ProvisionalCurve, beatId: string): StoryAuthorClarification[] {
@@ -124,7 +125,7 @@ export function changeCurveClarification(
     throw new AppError('已确认或已解决的问题不能原地改写，请另建主线版本。', 409, 'STORY_CLARIFICATION_IMMUTABLE')
   }
   const target = curve.beats.find((beat) => beat.id === current.dependency.beatIds[0])
-  if (!target) throw new AppError('相关节点已不存在，请刷新。', 409, 'STORY_CLARIFICATION_INVALID_TARGET')
+  if (!target && !current.reasoningUnknownId) throw new AppError('相关节点已不存在，请刷新。', 409, 'STORY_CLARIFICATION_INVALID_TARGET')
   let next: StoryAuthorClarification
   switch (request.action) {
     case 'save-answer': {
@@ -151,15 +152,18 @@ export function changeCurveClarification(
       break
     }
     case 'abandon-dependent-proposal': {
-      if (target.source !== 'system-proposal') {
+      if (!target && current.reasoningUnknownId) return {
+        curve: { ...curve, clarifications: curve.clarifications?.map(c => c.id === current.id ? { ...c, resolution: 'proposal-abandoned' as const, unknownHandling: 'abandon-dependent-proposal' as const, updatedAt: now } : c) }, affectedBeatIds: [],
+      }
+      if (target!.source !== 'system-proposal') {
         throw new AppError('作者编辑的节点只能由作者修改，系统不能删除或覆盖。', 409, 'STORY_CLARIFICATION_AUTHOR_EDIT')
       }
-      const rejected = rejectSystemBeat(curve, target.id)
+      const rejected = rejectSystemBeat(curve, target!.id)
       return {
         curve: {
           ...rejected.curve,
           clarifications: curve.clarifications?.map((item) => !item.resolution
-            && item.dependency.beatIds.every((id) => id === target.id)
+            && item.dependency.beatIds.every((id) => id === target!.id)
             ? { ...item,
                 ...(item.id === current.id ? { status: 'author-unknown' as const } : {}),
                 unknownHandling: 'abandon-dependent-proposal' as const,

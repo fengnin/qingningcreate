@@ -135,6 +135,8 @@ export interface StoryClarificationDependency {
  * only after the author explicitly confirms it.
  */
 export interface StoryAuthorClarification {
+  /** Links a protocol-1 question to its review record; never a fact ID. */
+  reasoningUnknownId?: string
   id: string
   prompt: string
   status: StoryAuthorClarificationStatus
@@ -668,6 +670,9 @@ export interface StoryCurveRegenerationPreviewItem {
 }
 
 export interface StoryCurveRegenerationPreview {
+  reasoning?: import('./story-reasoning-contract.js').StoryReasoningProposal
+  baseFingerprint?: string
+  excludedUnknownIds?: string[]
   id: string
   curveId: string
   items: StoryCurveRegenerationPreviewItem[]
@@ -676,6 +681,8 @@ export interface StoryCurveRegenerationPreview {
 }
 
 export interface StoryCurveRegenerationResolutionRequest extends StorySessionVersion {
+  /** Explicit author review, not supplied or certified by the model. */
+  independentUnknownIds?: string[]
   curveId: string
   previewId: string
   decisions: Record<string, StoryCurveRegenerationDecision>

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { attachReasoningQuestions, previewReasoningRecovery, acceptReasoningRecovery } from './storyReasoningRecovery.js'
 import { generateInitialReasoningCurve } from './storyInitialReasoning.js'
 import { acceptStoryReasoningDesign } from './storyReasoningContract.js'
 import { getAuthorDecisionMaterial, renderAuthorDecisionChoice } from './storyDecision.js'
@@ -224,6 +225,7 @@ export interface CurveMutationResult {
 }
 
 export interface CurveRegenerationPreviewResult {
+  questionCurve?: ProvisionalCurve
   preview: StoryCurveRegenerationPreview
   affectedBeatIds: string[]
 }
@@ -353,7 +355,7 @@ export async function generateProvisionalCurve(
 ): Promise<ProvisionalCurve> {
   // Disabled-model contracts remain explicit local drafts, never model success.
   if (isModelDisabled()) return generateLegacyProvisionalCurve(idea, seed, brief, excludedProposalDetails)
-  return generateInitialReasoningCurve(idea, seed, brief, createStoryDesignRecord(idea, seed), excludedProposalDetails, maxCurveGenerationAttempts)
+  return attachReasoningQuestions(await generateInitialReasoningCurve(idea, seed, brief, createStoryDesignRecord(idea, seed), excludedProposalDetails, maxCurveGenerationAttempts))
 }
 
 /** Historical protocol entry point. New online sessions never call this.
@@ -1178,6 +1180,7 @@ export async function previewAffectedCurveBeats(
   curve: ProvisionalCurve,
   feedback?: string,
 ): Promise<CurveRegenerationPreviewResult> {
+  if (curve.reasoning) return previewReasoningRecovery(idea, seed, curve, undefined, feedback)
   assertLegacyRegenerationProtocol(curve)
   assertDraftCurve(curve)
   let working = structuredClone(curve)
@@ -1237,6 +1240,7 @@ export async function previewClarificationCurveBeat(
   feedback?: string,
   replaceRejected = false,
 ): Promise<CurveRegenerationPreviewResult> {
+  if (curve.reasoning) return previewReasoningRecovery(idea, seed, curve, [beatId], feedback, replaceRejected)
   assertLegacyRegenerationProtocol(curve)
   const target = requireCurveBeat(curve, beatId, '重推')
   assertDraftCurve(curve)
@@ -1279,7 +1283,9 @@ export function resolveAffectedCurveBeats(
   curve: ProvisionalCurve,
   preview: StoryCurveRegenerationPreview,
   decisions: Record<string, StoryCurveRegenerationDecision>,
+  independentUnknownIds?: string[],
 ): CurveMutationResult {
+  if (curve.reasoning) return acceptReasoningRecovery(curve, preview, decisions, independentUnknownIds)
   assertDraftCurve(curve)
   if (preview.curveId !== curve.id) {
     throw new AppError('批量重推预览不属于当前主线，请刷新后重试。', 409, 'STORY_SESSION_CONFLICT')
