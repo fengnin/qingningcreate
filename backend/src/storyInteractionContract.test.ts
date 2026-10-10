@@ -34,11 +34,13 @@ function stub(payload: unknown) {
     const system = body.messages[0].content
     const input = system.includes('共创提案编辑') ? JSON.parse(body.messages[1].content) : {}
     calls.push({ system, input })
-    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] }), { status: 200 })
+    const reply = structuredClone(payload) as any
+    if (reply.candidatePlan?.basis) reply.candidatePlan.basis.latestResultFactId = input.lastAuthorConfirmedResult?.factId ?? null
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(reply) } }] }), { status: 200 })
   }
 }
 function plan() {
-  return { candidatePlan: { options: [
+  return { candidatePlan: { basis: { latestResultFactId: null, unresolved: { kind: 'existing', text: '投影仪供电仍未解决。', sourceFactIds: ['author-1'] }, reason: '承接现有供电缺口，审阅行动条件。', contradictions: [] }, options: [
     { label: '拆展板的候选', action: '青柠考虑拆掉自己的展板供电。' },
     { label: '保留展板的候选', action: '青柠考虑保留自己的展板。' },
     { label: '保留未知', action: '青柠暂不决定是否拆掉展板，先审阅行动条件。' },
@@ -112,8 +114,8 @@ test('unconfirmed mainline still rejects before any call; malformed model propos
   const before = await opening(), disk = readFileSync(store, 'utf8')
   for (const bad of [
     { ...plan(), review: { supported: true } },
-    { candidatePlan: { options: plan().candidatePlan.options.map((o) => ({ ...o, transition: { introducedFacts: [] } })) } },
-    { candidatePlan: { options: plan().candidatePlan.options.map((o) => ({ ...o, sourceFactIds: ['unknown-id'] })) } },
+    { candidatePlan: { ...plan().candidatePlan, options: plan().candidatePlan.options.map((o) => ({ ...o, transition: { introducedFacts: [] } })) } },
+    { candidatePlan: { ...plan().candidatePlan, options: plan().candidatePlan.options.map((o) => ({ ...o, sourceFactIds: ['unknown-id'] })) } },
     { needsAuthorDetail: ['模型猜测作者缺资料'] },
   ]) {
     stub(bad)

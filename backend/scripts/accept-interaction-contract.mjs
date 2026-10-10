@@ -19,7 +19,7 @@ const idea = '青柠要在周五毕业展前把祖母留下的投影仪送到学
 const brief = { tones: ['growth'], dramaticForces: ['cost'], allowSystemNamedCharacters: false }
 let mode = 'valid', child, base, launch = 0
 const calls = []
-const plan = () => ({ candidatePlan: { options: ['青柠考虑拆掉自己的展板供电。', '青柠考虑保留自己的展板。', '青柠保留未知，先审阅行动条件。'].map((action, i) => ({
+const plan = () => ({ candidatePlan: { basis: { latestResultFactId: null, unresolved: { kind: 'existing', text: '投影仪供电仍未解决。', sourceFactIds: ['author-1'] }, reason: '承接最新结果，继续审阅供电条件。', contradictions: [] }, options: ['青柠考虑拆掉自己的展板供电。', '青柠考虑保留自己的展板。', '青柠保留未知，先审阅行动条件。'].map((action, i) => ({
   label: ['拆展板候选', '保留展板候选', '保留未知'][i], action, proposedConsequence: '设备是否可用、署名风险与行动的关联仍待作者确认。',
   sourceFactIds: ['author-1'], causalClaims: [{ statement: '拆展板能否为投影仪供电尚未确定。', sourceFactIds: ['author-1'] }],
   questions: ['这项行动是否可行？'],
@@ -35,11 +35,16 @@ const stub = createServer(async (request, response) => {
     else {
       assert.match(system, /共创提案编辑/u)
       payload = plan()
+      payload.candidatePlan.basis.latestResultFactId = JSON.parse(body.messages[1].content).lastAuthorConfirmedResult?.factId ?? null
+      if (mode === 'stale-result-basis') payload.candidatePlan.basis.latestResultFactId = 'author-1'
+      if (mode === 'optional-as-fact') payload.candidatePlan.basis.unresolved.kind = 'optional-design'
       if (mode === 'unsafe-state') payload.candidatePlan.options[0].transition = { introducedFacts: [{ statement: '投影仪已经通电。' }] }
       if (mode === 'fake-review') payload.review = { supported: true }
       if (mode === 'unknown-id') payload.candidatePlan.options[0].sourceFactIds = ['unknown-id']
       if (mode === 'design-id') payload.candidatePlan.options[0].sourceFactIds = ['beat-trigger']
       if (mode === 'design-claim-id') payload.candidatePlan.options[0].causalClaims[0].sourceFactIds = ['beat-resolution']
+      if (mode === 'single') payload.candidatePlan.options = payload.candidatePlan.options.slice(0, 1)
+      if (mode === 'empty') payload.candidatePlan.options = []
     }
     response.writeHead(200, { 'Content-Type': 'application/json' })
     response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(payload) } }] }))
@@ -98,7 +103,7 @@ try {
   await api('/api/story/curve/start-spine', ref(confirmed))
   const before = await snapshot(draft.storyId), stateBefore = disk(draft.storyId).state, fileBefore = readFileSync(store, 'utf8')
   assert.equal(before.currentTurn.presentation, 'focus-selection')
-  for (mode of ['unsafe-state', 'fake-review', 'unknown-id', 'design-id', 'design-claim-id']) {
+  for (mode of ['unsafe-state', 'fake-review', 'unknown-id', 'design-id', 'design-claim-id', 'empty', 'stale-result-basis', 'optional-as-fact']) {
     await api('/api/story-spine/turn', click(before), 502, 'STORY_TURN_RETRY_EXHAUSTED')
     assert.deepEqual(await snapshot(before.storyId), before); assert.equal(readFileSync(store, 'utf8'), fileBefore)
   }
@@ -119,10 +124,13 @@ try {
   await api('/api/story/action-proposal/confirm', receipt, 409, 'STORY_EXECUTED_RESULT_CONFIRMATION_REQUIRED')
   const pending = await snapshot(before.storyId)
   await start(false); assert.deepEqual(await snapshot(before.storyId), pending)
+  mode = 'single'
   const confirmedResult = await throughBrowser(() => browser.requestStoryActionProposalConfirmation({ ...receipt,
     authorConfirmation: { actionText: proposal.action, resultText: '合同作者确认：只审阅了条件，设备仍未通电。' } }))
   assert.equal(confirmedResult.history.at(-1).selectedOption.narrativeAction.mode, 'executed')
   assert.equal(confirmedResult.history.at(-1).selectedOption.transition.authorConfirmation.resultText, '合同作者确认：只审阅了条件，设备仍未通电。')
+  assert.equal(confirmedResult.turn.options.length, 1)
+  assert.equal(confirmedResult.turn.node.event, '作者最近明确提交的结果：合同作者确认：只审阅了条件，设备仍未通电。')
   const newFacts = disk(before.storyId).state.facts.filter((f) => !stateBefore.facts.some((old) => old.id === f.id))
   assert.deepEqual(newFacts.map((f) => f.statement), ['合同作者确认：只审阅了条件，设备仍未通电。'])
   const final = await snapshot(before.storyId); await start(false); assert.deepEqual(await snapshot(before.storyId), final)
@@ -137,6 +145,7 @@ try {
   savedStore.sessions.push(legacy); writeFileSync(store, JSON.stringify(savedStore))
   await start(false)
   const historical = await snapshot(legacy.id), historicalBefore = disk(legacy.id).state
+  mode = 'valid'
   const compatible = await throughBrowser(() => browser.requestStoryTurn(click(historical)))
   assert.equal(compatible.turn.presentation, 'candidate-actions')
   assert.equal(compatible.history[0].selectedOption.narrativeAction.mode, 'focus')

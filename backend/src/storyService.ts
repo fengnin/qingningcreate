@@ -2,7 +2,7 @@ import { AppError, requestQwenJson, summarizeModelResponse, withModelDiagnostic 
 import { createNarrativeStateMachine, type StoryValidationContext } from './storyState.js'
 import { formatStoryRealityContractContext, storyRealityContractInstruction } from './storyRealityContract.js'
 import { getAuthorDecisionMaterial } from './storyDecision.js'
-import { createStoryProposalContext, storyProposalGenerationInstruction, validateProposalFactReferences } from './storyProposalContext.js'
+import { createStoryProposalContext, storyProposalGenerationInstruction, validateProposalFactReferences, validateContinuationBasis } from './storyProposalContext.js'
 import {
   confirmProvisionalCurve,
   generateProvisionalCurve,
@@ -5580,7 +5580,9 @@ async function generateCoCreationCandidateTurn(request: StoryTurnRequest, state:
         systemPrompt: storyProposalGenerationInstruction,
         userPrompt: JSON.stringify({ ...context,
           ...(repair ? { repair } : {}),
-          schema: { candidatePlan: { options: [1, 2, 3].map(() => ({
+          schema: { candidatePlan: { basis: { latestResultFactId: context.lastAuthorConfirmedResult?.factId ?? null,
+            unresolved: { kind: 'existing | optional-design | next-goal', text: '仍未解决的作者事项，或可拒绝建议，或请求下一目标', sourceFactIds: [] },
+            reason: '依据最新结果解释本次为何推进到这里', contradictions: [] }, options: [1, 2, 3].map(() => ({
             label: '行动短名称', action: '待作者审阅的具体行动', proposedConsequence: '待审阅的可能承接',
             sourceFactIds: proposalEvidenceIds.slice(0, 1),
             causalClaims: [{ statement: '需要作者核对的前提或因果；没有作者依据时引用为空', sourceFactIds: [] }],
@@ -5590,8 +5592,9 @@ async function generateCoCreationCandidateTurn(request: StoryTurnRequest, state:
       }, '模型没有返回待审阅行动提案。')
       assertProposalKeys(record, ['candidatePlan'])
       const plan = expectRecord(record.candidatePlan, '候选行动缺少 candidatePlan。', invalidModelOutputContext)
-      assertProposalKeys(plan, ['options'])
-      if (!Array.isArray(plan.options) || plan.options.length !== 3) throw new AppError('候选行动必须有三项待审提案。', 502, 'INVALID_MODEL_OUTPUT')
+      assertProposalKeys(plan, ['basis', 'options'])
+      const continuationBasis = validateContinuationBasis(plan.basis, context)
+      if (!Array.isArray(plan.options) || plan.options.length < 1 || plan.options.length > 3) throw new AppError('候选行动必须有一至三项待审提案，不应为了凑数新增条件。', 502, 'INVALID_MODEL_OUTPUT')
       const turnId = `turn-${request.history.length + 1}`, nodeId = `node-${request.history.length + 1}`
       const refs = (value: unknown, path: string) => validateProposalFactReferences(value, proposalEvidenceIds, path)
       const options: StoryTurnOption[] = plan.options.map((value, index) => {
@@ -5616,10 +5619,12 @@ async function generateCoCreationCandidateTurn(request: StoryTurnRequest, state:
         }
       })
       ensureUniqueValues(options.map((option) => option.action), '候选行动不能逐字重复。', invalidModelOutputContext)
-      const event = focus.length ? focus.map((text) => `「${text}」`).join('；') : sourceFacts.slice(0, 3).map((fact) => `「${fact.text}」`).join('；')
+      const latestResult = context.lastAuthorConfirmedResult
+      const event = latestResult ? `作者最近明确提交的结果：${latestResult.resultText}`
+        : focus.length ? focus.map((text) => `「${text}」`).join('；') : sourceFacts.slice(0, 3).map((fact) => `「${fact.text}」`).join('；')
       return { id: turnId, phase: 'development', presentation: 'candidate-actions',
-        node: { id: nodeId, title: '审阅下一步行动', event, purpose: '当前只展示作者材料和候选行动，新增因果仍待作者审阅。', goalState: 'trying' },
-        conflict: { nodeId, conflict: '下列行动的条件、约束与代价分别待审，不把并列事实当作必然冲突。',
+        node: { id: nodeId, title: '审阅下一步行动', event, purpose: continuationBasis.reason, goalState: 'trying' },
+        conflict: { nodeId, conflict: `${continuationBasis.unresolved.kind === 'optional-design' ? '可拒绝的新增建议（不影响原目标完成）' : continuationBasis.unresolved.kind === 'next-goal' ? '收束或下一目标' : '尚未解决'}：${continuationBasis.unresolved.text}${continuationBasis.contradictions.length ? `；作者依据矛盾：${continuationBasis.contradictions.map(c => c.text).join('；')}` : ''}`,
           action: '选择一项提案进行审阅；只有另行确认实际行动和结果才能进入事实状态。',
           consequence: '当前没有新增已执行结果。', intensity: 1, anchor: '提案审阅' },
         question: '你想先审阅哪项候选行动？', options, narrativeAction: null, transition: null, canConclude: false, isConclusion: false }

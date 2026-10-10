@@ -38,7 +38,7 @@ const stub = createServer(async (request, response) => {
       const context = JSON.parse(body.messages[1].content)
       assert.ok(context.selectedFocus.length)
       const sourceFactIds = [context.sourceFacts[0].id]
-      payload = { candidatePlan: { options: ['审阅拆展板供电的条件', '审阅保留展板的条件', '保留未知，核对缺少电源线的问题'].map((action, i) => ({
+      payload = { candidatePlan: { basis: { latestResultFactId: context.lastAuthorConfirmedResult?.factId ?? null, unresolved: { kind: 'existing', text: '供电可行性未知。', sourceFactIds }, reason: '尚未执行，先核对真实缺口。', contradictions: [] }, options: ['审阅拆展板供电的条件', '审阅保留展板的条件', '保留未知，核对缺少电源线的问题'].map((action, i) => ({
         label: ['拆展板待审', '保留展板待审', '核对条件'][i], action,
         proposedConsequence: '供电可行性及署名风险仍未确定，尚未执行。', sourceFactIds,
         causalClaims: [{ statement: '拆展板是否能供电仍未知。', sourceFactIds }], questions: ['拆展板是否能够供电？'],

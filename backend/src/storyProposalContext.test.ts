@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { ConfirmedCurve, StorySeed, StoryTurnHistoryItem } from '../../shared/story-contract.js'
-import { createStoryProposalContext, validateProposalFactReferences } from './storyProposalContext.js'
+import { createStoryProposalContext, validateProposalFactReferences, validateContinuationBasis } from './storyProposalContext.js'
 
 const seed: StorySeed = { subject: '许沅', activeSituation: '修复陶碗', lockedGoal: '修复陶碗',
   lockedFacts: ['陶碗裂口缺一块', '邻居提供同色碎片'], worldMode: 'realistic-default', expansionScope: 'keep-scale', unknowns: [] }
@@ -51,4 +51,16 @@ test('continuation references cannot promote reviewed design or unknown question
   }
   assert.deepEqual(validateProposalFactReferences(['result'], context.referenceContract.sourceFactIds, path), ['result'])
   assert.deepEqual(validateProposalFactReferences([], context.referenceContract.sourceFactIds, path), [])
+})
+
+test('continuation basis carries the latest receipt and separates optional design from existing obligations', () => {
+  const context = createStoryProposalContext(seed, curve, [history('executed')], [])
+  const basis = { latestResultFactId: 'result', unresolved: { kind: 'optional-design', text: '可以拒绝的展示建议。', sourceFactIds: [] as string[] }, reason: '承接测量结果；展示建议不阻止原任务。', contradictions: [] as unknown[] }
+  assert.equal(validateContinuationBasis(basis, context).unresolved.kind, 'optional-design')
+  assert.throws(() => validateContinuationBasis({ ...basis, latestResultFactId: null }, context), /最近作者确认/)
+  assert.throws(() => validateContinuationBasis({ ...basis, unresolved: { ...basis.unresolved, kind: 'existing' } }, context), /必须提供作者依据/)
+  assert.throws(() => validateContinuationBasis({ ...basis, unresolved: { ...basis.unresolved, sourceFactIds: ['result'] } }, context), /不是已有事实要求/)
+  assert.throws(() => validateContinuationBasis({ ...basis, contradictions: [{ text: '矛盾', sourceFactIds: ['result'] }] }, context), /至少两项/)
+  assert.throws(() => validateContinuationBasis({ ...basis, contradictions: [{ text: '矛盾', sourceFactIds: ['result','b'] }] }, context), /非法事实 ID/)
+  assert.equal(validateContinuationBasis({ ...basis, unresolved: { kind: 'next-goal', text: '请作者决定下一目标或收束。', sourceFactIds: [] } }, context).unresolved.kind, 'next-goal')
 })

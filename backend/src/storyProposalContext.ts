@@ -11,6 +11,34 @@ export function validateProposalFactReferences(value: unknown, sourceIds: readon
   return value as string[]
 }
 
+/** Auditable generation basis, not a model certificate of semantic truth. */
+export function validateContinuationBasis(value: unknown, context: ReturnType<typeof createStoryProposalContext>) {
+  const invalid = (message: string): never => { throw new AppError(`candidatePlan.basis：${message}`, 502, 'INVALID_MODEL_OUTPUT') }
+  const record = (v: unknown, keys: string[]) => {
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return invalid('缺少推进依据。')
+    const r = v as Record<string, unknown>
+    if (Object.keys(r).some(k => !keys.includes(k))) return invalid('推进依据含未允许字段。')
+    return r
+  }
+  const text = (v: unknown) => typeof v === 'string' && v.trim() && v.length <= 240 ? v : invalid('说明必须是1至240字。')
+  const refs = (v: unknown, path: string) => validateProposalFactReferences(v, context.referenceContract.sourceFactIds, `candidatePlan.basis.${path}`)
+  const b = record(value, ['latestResultFactId', 'unresolved', 'reason', 'contradictions'])
+  if (b.latestResultFactId !== (context.lastAuthorConfirmedResult?.factId ?? null)) invalid('必须承接最近作者确认的结果 ID；没有结果时为 null。')
+  const u = record(b.unresolved, ['kind', 'text', 'sourceFactIds'])
+  if (!['existing', 'optional-design', 'next-goal'].includes(String(u.kind))) invalid('未解决事项类型不合法。')
+  const sourceFactIds = refs(u.sourceFactIds, 'unresolved.sourceFactIds')
+  if (u.kind === 'existing' && !sourceFactIds.length) invalid('现有未解决事项必须提供作者依据；新建议不能伪装成现有要求。')
+  if (u.kind !== 'existing' && sourceFactIds.length) invalid('新增建议或下一目标不是已有事实要求，引用应为空。')
+  if (!Array.isArray(b.contradictions) || b.contradictions.length > 3) invalid('矛盾说明必须是至多三项的数组。')
+  const contradictions = (b.contradictions as unknown[]).map((v, i) => {
+    const c = record(v, ['text', 'sourceFactIds']), ids = refs(c.sourceFactIds, `contradictions[${i}].sourceFactIds`)
+    if (ids.length < 2) invalid('矛盾必须指出至少两项具体作者依据。')
+    return { text: text(c.text), sourceFactIds: ids }
+  })
+  return { unresolved: { kind: u.kind as 'existing' | 'optional-design' | 'next-goal', text: text(u.text), sourceFactIds },
+    reason: text(b.reason), contradictions }
+}
+
 /** Generation context separates narrative evidence from reviewed story design.
  * None of these roles is inferred from a date, an object name or a keyword. */
 export function createStoryProposalContext(
@@ -59,6 +87,9 @@ export function createStoryProposalContext(
     authorEdits, designBeats, unresolvedQuestions, selectedFocus,
     executedHistory,
     lastAuthorConfirmedResult: executedHistory.at(-1) ?? null,
+    chronology: { initialMaterial: '行动前作者材料，保留原文；其中的尚未执行描述不能覆盖之后的明确执行结果。',
+      confirmedResults: '按执行历史顺序排列；同一事项的最新明确结果优先，未写出的后果仍未知。',
+      reviewedDesign: '未来安排及假设结果，不能覆盖实际结果或增设验收条件。' },
     referenceContract: { sourceFactIds: sourceFacts.map(f => f.id),
       designOnlyIds: designBeats.map(b => b.id), unconfirmedQuestionIds: unresolvedQuestions.map(q => q.id) },
     priorities: [
@@ -75,7 +106,10 @@ export const storyProposalGenerationInstruction = `你是中文故事共创提�
 引用编码：options[].sourceFactIds 与 causalClaims[].sourceFactIds 只能照抄 referenceContract.sourceFactIds。禁止填 designOnlyIds、未确认问题 ID、材料原来的 ID 或示例占位词。引用一个设计节点不是事实依据；没有作者依据的待审假设用空数组并明确提出问题，不能把设计节点转换为事实引用。
 行动、约束和代价分开：行动须说明谁针对什么对象做什么；目标与期限、承诺、资源条件都不是行动选项。比较解决同一当前问题的不同做法，不把可同时满足的条件硬写成二选一。没有期限就不制造倒计时；已有条件可兼容就不声称必然冲突。
 因果依据：事实并列不等于因果，引用 ID 不等于证明。仅作者明确写出的因果关系可以作为成立的理由；从物件用途、关系身份、期限或承诺推断出的能力、动机、权限、回应和代价都不是已知。不要通过新增人员、机构、设备、流程或便利权限绕开核心问题。
-给三项有实质差异的候选。优先使用已有行动对象和条件。若一项行动依赖未知前提，把整项写成条件性候选，同时在 causalClaims 列出每个依赖，在 questions 提出能核对它的具体问题；不得把未知前提写成确定句。资料不足时可以给围绕该缺口的具体核对行动，明确哪些决定尚不能作出，不能凑出三个伪选择。作者明确保留未知时，提供不依赖该前提的审阅行动，不替作者回答。
+给一至三项有实质差异的候选，不为凑数制造新问题。优先使用已有行动对象和条件。若一项行动依赖未知前提，把整项写成条件性候选，同时在 causalClaims 列出每个依赖，在 questions 提出能核对它的具体问题；不得把未知前提写成确定句。资料不足时可以给围绕该缺口的具体核对行动，明确哪些决定尚不能作出，不能凑出三个伪选择。作者明确保留未知时，提供不依赖该前提的审阅行动，不替作者回答。
+先依据 lastAuthorConfirmedResult 及 executedHistory 确定仍未解决的具体事项，再生成候选。原始材料是较早状态，不得以其中的尚未开始、未来安排否定明确执行结果。作者明确确认完成的目标或满足的条件不需要再次举证、测量或追问成立机制。不得新增稳定时长、物理检查、他人评价等标准作为目标完成或续推的必要条件。若没有作者已提供的未解决事项，可以只提供一项请作者审阅收束或给出下一目标的候选；不要凭空续造障碍。独立新增设计只能自愿审阅，不得伪装成必须解决的现有缺口。
 编辑承接：优先推进 authorEdits 指向的行动与问题；期限仍作约束，不把编辑后的任务变成归还安排等旁支。最近确认结果已解决的事项不能再重复，不推断其未写出的其他后果；后续行动要处理作者仍未解决的部分。
 action 是候选行动，不是执行结果；proposedConsequence 须区分作者已有因果与待核对的条件性承接，不能保证未获证实的效果。整个候选留在待审区不意味着内容合格。不要引用系统模板作为理由。
+先输出 candidatePlan.basis，再给 options。basis.latestResultFactId 逐字使用 lastAuthorConfirmedResult.factId，无执行结果时为 null。basis.unresolved={kind,text,sourceFactIds}：existing 仅用于作者事实仍未解决的事项，引用具体依据；optional-design 是可拒绝且不阻碍原目标完成的新增建议，引用为空；next-goal 表示现有事项已完成或无已知未解决事项，请作者收束或提出新目标，引用为空。basis.reason 解释为何从刚才结果推进到该事项；basis.contradictions=[{text,sourceFactIds}] 只列真正矛盾的作者依据，没有则为空。较早的未开始和较晚的完成只是时序变化，不是矛盾。
+options 只能处理 basis.unresolved；新编号、签收、装帧、检查或他人认可等要求若没有作者依据，只能属于 optional-design，不得称为完成原目标的必需条件。既有目标已明确完成时优先收束，不再让作者证明完成；结果未知时只核对真实未解决事项，不发明验收标准。引用 ID 不能证明语义正确；不能通过 basis 标签包装新增因果。
 严格输出 JSON 对象 candidatePlan，不输出 turn、transition、introducedFacts、review 或任何确认凭证。`
