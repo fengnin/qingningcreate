@@ -534,7 +534,9 @@ export interface StoryTurn {
   transition: StoryTransition | null
   canConclude: boolean
   isConclusion: boolean
-  presentation?: 'focus-selection' | 'candidate-actions' | 'closure-review'
+  presentation?: 'focus-selection' | 'candidate-actions' | 'closure-review' | 'author-review'
+  /** Author-level clarification/design review; it never represents a role action. */
+  authorReview?: { summary: string; questions: string[] }
 }
 
 export interface StoryTurnHistoryItem {

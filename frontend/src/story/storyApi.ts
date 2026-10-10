@@ -937,6 +937,7 @@ function parseStoryTurn(value: unknown): StoryTurn {
     canConclude,
     isConclusion,
     ...(record.presentation === undefined ? {} : { presentation: parseTurnPresentation(record.presentation) }),
+    ...(record.authorReview === undefined ? {} : { authorReview: parseTurnAuthorReview(record.authorReview) }),
   }
 
   validateStoryTurnShape(turn)
@@ -959,8 +960,18 @@ function parseStoryTurnConclusionPayload(
   }
 }
 
+function parseTurnAuthorReview(value: unknown): NonNullable<StoryTurn['authorReview']> {
+  const record = expectRecord(value)
+  if (!Array.isArray(record.questions) || record.questions.length < 1 || record.questions.length > 4
+    || record.questions.some(q => typeof q !== 'string' || !q.trim() || q.length > 140)) throwInvalidResponse()
+  return { summary: readText(record, 'summary'), questions: record.questions as string[] }
+}
+
 function validateStoryTurnShape(turn: StoryTurn) {
   if (turn.conflict.nodeId !== turn.node.id) throwInvalidResponse()
+  if (turn.presentation === 'author-review') {
+    if (!turn.authorReview || turn.isConclusion || turn.canConclude || turn.options.length || turn.narrativeAction !== null || turn.transition !== null) throwInvalidResponse()
+  } else if (turn.authorReview) throwInvalidResponse()
 
   if (turn.isConclusion) {
     validateConclusionTurnShape(turn)
@@ -985,7 +996,7 @@ function validateOngoingTurnShape(turn: StoryTurn) {
   const hasInvalidShape = turn.phase === 'resolution'
     || turn.node.goalState === 'resolved'
     || !turn.question
-    || (turn.presentation === 'closure-review' ? turn.options.length !== 0 : turn.presentation === 'candidate-actions' ? turn.options.length < 1 || turn.options.length > GENERATED_OPTION_COUNT : turn.options.length !== GENERATED_OPTION_COUNT)
+    || (turn.presentation === 'closure-review' || turn.presentation === 'author-review' ? turn.options.length !== 0 : turn.presentation === 'candidate-actions' ? turn.options.length < 1 || turn.options.length > GENERATED_OPTION_COUNT : turn.options.length !== GENERATED_OPTION_COUNT)
     || turn.narrativeAction !== null
     || turn.transition !== null
 
@@ -1035,7 +1046,7 @@ function readRequiredBoolean(value: unknown): boolean {
 }
 
 function parseTurnPresentation(value: unknown): NonNullable<StoryTurn['presentation']> {
-  if (value !== 'focus-selection' && value !== 'candidate-actions' && value !== 'closure-review') throwInvalidResponse()
+  if (value !== 'focus-selection' && value !== 'candidate-actions' && value !== 'closure-review' && value !== 'author-review') throwInvalidResponse()
   return value
 }
 

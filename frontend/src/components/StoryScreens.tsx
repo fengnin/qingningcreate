@@ -941,7 +941,7 @@ function CurrentStoryTurn({ currentTurn, selectedOptionId, onSelect, onRefineOpt
   return (
     <section className={`current-story-turn ${currentTurn.isConclusion ? 'is-conclusion' : ''}`} aria-label={currentTurn.isConclusion ? '故事结局' : '当前故事情境'}>
       <header className="turn-section-heading">
-        <span>{currentTurn.isConclusion ? '故事结局' : currentTurn.presentation === 'candidate-actions' ? '待审阅行动提案' : currentTurn.presentation === 'closure-review' ? '收束审阅' : currentTurn.presentation === 'focus-selection' ? '选择审阅关注点' : '当前情境'}</span>
+        <span>{currentTurn.isConclusion ? '故事结局' : currentTurn.presentation === 'author-review' ? '作者补充与设计审阅' : currentTurn.presentation === 'candidate-actions' ? '待审阅行动提案' : currentTurn.presentation === 'closure-review' ? '收束审阅' : currentTurn.presentation === 'focus-selection' ? '选择审阅关注点' : '当前情境'}</span>
         <small>{turnPhaseLabel[currentTurn.phase]} · 目标：{goalStateLabel[node.goalState]} · {conflict.anchor}</small>
       </header>
       <div className="current-turn-copy">
@@ -1049,7 +1049,7 @@ function StoryControlPanel({ session, currentTurn }: {
         </div>
       </div>
 
-      {!currentTurn.isConclusion && (
+      {!currentTurn.isConclusion && currentTurn.presentation !== 'author-review' && (
         <div className="role-action-block">
           <header className="control-block-heading">
             <span><Send size={15} /> 提出角色行动</span>
@@ -1104,7 +1104,8 @@ function TurnActions({ canConclude, disabled, onContinue, onConclude, reviewMode
       {reviewMode === 'closure-review' ? <p className="conclusion-note">已没有新的待执行行动；请在作者调整入口提出下一目标，或直接结束当前主线。</p> : null}
       {reviewMode === 'closure-review' && canConclude && <button className="primary-action" type="button" onClick={onConclude} disabled={disabled}>按已确认路径收束 <Check size={15} /></button>}
       {reviewMode !== 'closure-review' && canConclude && <button className="text-action" type="button" onClick={onConclude} disabled={disabled}>确认这次选择，开始写结尾 <ArrowRight size={15} /></button>}
-      {reviewMode !== 'closure-review' && <button className="primary-action" type="button" onClick={onContinue} disabled={disabled}>{reviewMode === 'focus-selection' ? '选择关注点，生成待审行动' : reviewMode === 'candidate-actions' ? '打开这项提案审阅' : '确认选择，继续发展'} <ArrowRight size={18} /></button>}
+      {reviewMode === 'author-review' && <p className="conclusion-note">请在“作者调整主线”中补充信息、明确保留未知或提出独立替代；重新审阅后继续。问题审阅不算角色执行。</p>}
+      {reviewMode !== 'closure-review' && reviewMode !== 'author-review' && <button className="primary-action" type="button" onClick={onContinue} disabled={disabled}>{reviewMode === 'focus-selection' ? '选择关注点，生成待审行动' : reviewMode === 'candidate-actions' ? '打开这项提案审阅' : '确认选择，继续发展'} <ArrowRight size={18} /></button>}
     </div>
   )
 }

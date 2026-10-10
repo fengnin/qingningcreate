@@ -3233,6 +3233,8 @@ export async function createSessionStoryActionProposal(
     throw new AppError('这更像是在改故事。请使用“作者调整主线”，不要把作者指令当成角色行动。', 400, 'AUTHOR_INSTRUCTION_REQUIRED')
   }
 
+  if (session.workflow === 'co-creation' && currentTurn.presentation === 'author-review') throw new AppError('当前是作者问题审阅，请先补充、保留未知或调整主线；不能提交角色行动。', 409, 'STORY_AUTHOR_REVIEW_REQUIRED')
+
   const proposal = createGroundedActionProposal(session, currentTurn, state, request.action, predicament, approach)
   if (session.workflow === 'co-creation') {
     const candidate = makeReviewOnlyOption(proposal.option)
@@ -3256,6 +3258,7 @@ export async function confirmSessionStoryActionProposal(
   }
   const proposal = session.pendingActionProposal
   const currentTurn = session.currentTurn
+  if (session.workflow === 'co-creation' && currentTurn?.presentation === 'author-review') throw new AppError('作者问题审阅不能确认执行结果。', 409, 'STORY_AUTHOR_REVIEW_REQUIRED')
   const { predicament, approach } = requireStoryTurnContext(session)
   if (!proposal || proposal.id !== request.proposalId || !currentTurn || proposal.turnId !== currentTurn.id) {
     throw new AppError('这份角色行动提案已经失效，请重新提出。', 409, 'STORY_ACTION_PROPOSAL_NOT_FOUND')
@@ -5587,13 +5590,26 @@ async function generateCoCreationCandidateTurn(request: StoryTurnRequest, state:
             sourceFactIds: proposalEvidenceIds.slice(0, 1),
             causalClaims: [{ statement: '需要作者核对的前提或因果；没有作者依据时引用为空', sourceFactIds: [] }],
             questions: ['尚未确定时如实询问作者，不补答案'],
-          })) } },
+          })), authorReview: { summary: '需要作者补充或审阅的事项；无则为 null', questions: ['具体作者问题'] } } },
         }), temperature: attempt === 0 ? 0.45 : 0.3, maxTokens: 2_400, diagnosticStage: 'candidate-action-preview',
       }, '模型没有返回待审阅行动提案。')
       assertProposalKeys(record, ['candidatePlan'])
       const plan = expectRecord(record.candidatePlan, '候选行动缺少 candidatePlan。', invalidModelOutputContext)
-      assertProposalKeys(plan, ['basis', 'options'])
+      assertProposalKeys(plan, ['basis', 'options', 'authorReview'])
       const continuationBasis = validateContinuationBasis(plan.basis, context)
+      if (plan.authorReview !== undefined && plan.authorReview !== null) {
+        if (continuationBasis.unresolved.kind === 'next-goal' || !Array.isArray(plan.options) || plan.options.length) throw new AppError('作者审阅与收束或角色行动出口不能混用。', 502, 'INVALID_MODEL_OUTPUT')
+        const review = expectRecord(plan.authorReview, '作者审阅结构不完整。', invalidModelOutputContext)
+        assertProposalKeys(review, ['summary', 'questions'])
+        const authorReview = { summary: readText(review, 'summary', '作者审阅缺少说明。', 240, invalidModelOutputContext),
+          questions: readRequiredTextList(review, 'questions', 1, 4, 140, '作者审阅缺少具体问题。', invalidModelOutputContext) }
+        const turnId = `turn-${request.history.length + 1}`, nodeId = `node-${request.history.length + 1}`
+        return { id: turnId, phase: 'development', presentation: 'author-review', authorReview,
+          node: { id: nodeId, title: '作者补充与设计审阅', event: context.lastAuthorConfirmedResult ? `作者最近明确提交的结果：${context.lastAuthorConfirmedResult.resultText}` : '尚未确认新的执行结果。', purpose: continuationBasis.reason, goalState: 'trying' },
+          conflict: { nodeId, conflict: authorReview.summary, action: '请通过作者调整入口补充、保留未知或选择独立替代，再审阅主线。', consequence: '问题审阅不执行角色行动，不新增故事事实。', intensity: 1, anchor: '作者审阅' },
+          question: authorReview.questions.join('；'), options: [], narrativeAction: null, transition: null, canConclude: false, isConclusion: false }
+      }
+      if (continuationBasis.unresolved.kind === 'optional-design') throw new AppError('新增设计必须走 authorReview，不能作为角色执行候选。', 502, 'INVALID_MODEL_OUTPUT')
       // A completed result or an absent next goal is a review boundary, not
       // another executable candidate round. Keep it visible to the author so
       // they can decide whether to close or state a new goal; do not turn
@@ -5642,7 +5658,7 @@ async function generateCoCreationCandidateTurn(request: StoryTurnRequest, state:
         : focus.length ? focus.map((text) => `「${text}」`).join('；') : sourceFacts.slice(0, 3).map((fact) => `「${fact.text}」`).join('；')
       return { id: turnId, phase: 'development', presentation: 'candidate-actions',
         node: { id: nodeId, title: '审阅下一步行动', event, purpose: continuationBasis.reason, goalState: 'trying' },
-        conflict: { nodeId, conflict: `${continuationBasis.unresolved.kind === 'optional-design' ? '可拒绝的新增建议（不影响原目标完成）' : '尚未解决'}：${continuationBasis.unresolved.text}${continuationBasis.contradictions.length ? `；作者依据矛盾：${continuationBasis.contradictions.map(c => c.text).join('；')}` : ''}`,
+        conflict: { nodeId, conflict: `尚未解决：${continuationBasis.unresolved.text}${continuationBasis.contradictions.length ? `；作者依据矛盾：${continuationBasis.contradictions.map(c => c.text).join('；')}` : ''}`,
           action: '选择一项提案进行审阅；只有另行确认实际行动和结果才能进入事实状态。',
           consequence: '当前没有新增已执行结果。', intensity: 1, anchor: '提案审阅' },
         question: '你想先审阅哪项候选行动？', options, narrativeAction: null, transition: null, canConclude: false, isConclusion: false }
@@ -7416,6 +7432,7 @@ async function continueSessionStoryTurn(
   }
 
   validateSessionTurnRequest(session, request, currentTurn)
+  if (session.workflow === 'co-creation' && currentTurn.presentation === 'author-review') throw new AppError('请先通过作者入口审阅问题或调整主线，不把问答记录为执行行动。', 409, 'STORY_AUTHOR_REVIEW_REQUIRED')
   if (session.workflow === 'co-creation' && currentTurn.presentation === 'closure-review') {
     if (request.mode !== 'conclude' || request.optionId || !currentTurn.canConclude) {
       throw new AppError('收束审阅不执行候选；请作者明确选择按已确认路径收束，或调整下一目标。', 409, 'STORY_RESULT_REVIEW_REQUIRED')

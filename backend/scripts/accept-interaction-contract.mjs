@@ -44,6 +44,12 @@ const stub = createServer(async (request, response) => {
       if (mode === 'design-id') payload.candidatePlan.options[0].sourceFactIds = ['beat-trigger']
       if (mode === 'design-claim-id') payload.candidatePlan.options[0].causalClaims[0].sourceFactIds = ['beat-resolution']
       if (mode === 'single') payload.candidatePlan.options = payload.candidatePlan.options.slice(0, 1)
+      if (mode.startsWith('author-review')) {
+        payload.candidatePlan.options = mode === 'author-review-mixed' ? payload.candidatePlan.options : []
+        payload.candidatePlan.authorReview = { summary: '供电条件尚未确定；请作者选择补充或保留未知。', questions: ['是否提供供电条件，或保持未知并改选独立行动？'] }
+        if (mode === 'author-review-facts') payload.candidatePlan.authorReview.introducedFacts = ['设备已经通电。']
+        if (mode === 'author-review-empty') payload.candidatePlan.authorReview.questions = []
+      }
       if (mode === 'empty') payload.candidatePlan.options = []
       if (mode === 'closure' || mode === 'closure-with-action') {
         payload.candidatePlan.basis.unresolved = { kind: 'next-goal', text: '已无未解决事项，请作者选择收束或下一目标。', sourceFactIds: [] }
@@ -107,7 +113,7 @@ try {
   await api('/api/story/curve/start-spine', ref(confirmed))
   const before = await snapshot(draft.storyId), stateBefore = disk(draft.storyId).state, fileBefore = readFileSync(store, 'utf8')
   assert.equal(before.currentTurn.presentation, 'focus-selection')
-  for (mode of ['unsafe-state', 'fake-review', 'unknown-id', 'design-id', 'design-claim-id', 'empty', 'stale-result-basis', 'optional-as-fact']) {
+  for (mode of ['unsafe-state', 'fake-review', 'unknown-id', 'design-id', 'design-claim-id', 'empty', 'stale-result-basis', 'optional-as-fact', 'author-review-mixed', 'author-review-facts', 'author-review-empty']) {
     await api('/api/story-spine/turn', click(before), 502, 'STORY_TURN_RETRY_EXHAUSTED')
     assert.deepEqual(await snapshot(before.storyId), before); assert.equal(readFileSync(store, 'utf8'), fileBefore)
   }
@@ -181,5 +187,43 @@ try {
   assert.equal(compatible.history[0].selectedOption.narrativeAction.mode, 'focus')
   assert.deepEqual(disk(legacy.id).state.facts, historicalBefore.facts)
   assert.deepEqual(disk(legacy.id).state.actions, historicalBefore.actions)
+  // Dedicated author-review branch from the same frozen opening: asking the
+  // author cannot create an execution proposal, fact, or executed history.
+  await stop()
+  const reviewStore = JSON.parse(readFileSync(store, 'utf8')), authorFixture = structuredClone(legacy)
+  authorFixture.id = 'author-review-fixture'
+  reviewStore.sessions.push(authorFixture); writeFileSync(store, JSON.stringify(reviewStore))
+  await start(false)
+  mode = 'author-review'
+  const authorStart = await snapshot(authorFixture.id)
+  const authorTurn = await throughBrowser(() => browser.requestStoryTurn(click(authorStart)))
+  assert.equal(authorTurn.turn.presentation, 'author-review')
+  assert.deepEqual(authorTurn.turn.options, [])
+  assert.equal(authorTurn.turn.narrativeAction, null)
+  assert.equal(authorTurn.turn.transition, null)
+  assert.equal(authorTurn.pendingActionProposal, undefined)
+  assert.deepEqual(disk(authorFixture.id).state, { ...historicalBefore, focus: {
+    actionId: authorTurn.history[0].selectedOption.narrativeAction.id,
+    sourceTexts: authorTurn.history[0].selectedOption.narrativeAction.focusSourceTexts,
+  } })
+  assert.ok(authorTurn.history.every(h => h.selectedOption.narrativeAction.mode === 'focus'))
+  const authorSnapshot = await snapshot(authorFixture.id), authorDisk = readFileSync(store, 'utf8'), authorCalls = calls.length
+  for (const [path, body] of [
+    ['/api/story-spine/turn', { storyId: authorFixture.id, revision: authorSnapshot.revision, turnId: authorTurn.turn.id, mode: 'continue', optionId: 'fake' }],
+    ['/api/story/action-proposal', { storyId: authorFixture.id, revision: authorSnapshot.revision, turnId: authorTurn.turn.id, action: '青柠检查已有展板。' }],
+    ['/api/story/action-proposal/confirm', { storyId: authorFixture.id, revision: authorSnapshot.revision, proposalId: 'fake', mode: 'continue', authorConfirmation: { actionText: '作者回答问题。', resultText: '回答已提交。' } }],
+  ]) await api(path, body, 409, 'STORY_AUTHOR_REVIEW_REQUIRED')
+  assert.deepEqual(await snapshot(authorFixture.id), authorSnapshot)
+  assert.equal(readFileSync(store, 'utf8'), authorDisk)
+  assert.equal(calls.length, authorCalls)
+  await start(false); assert.deepEqual(await snapshot(authorFixture.id), authorSnapshot)
+  // Explicit synthetic author choice: keep the missing condition unknown and
+  // revise the design through the author channel. Preserve the old path.
+  const adjusted = await api('/api/story/author-instruction', { storyId: authorFixture.id, revision: authorSnapshot.revision,
+    targetBeatId: authorSnapshot.curve.beats[1].id, text: '供电条件保留未知；改为先审阅是否保留展板，不确认设备可用。' })
+  const adjustedSnapshot = await snapshot(authorFixture.id)
+  assert.equal(adjustedSnapshot.confirmedCurve, undefined)
+  assert.equal(adjustedSnapshot.currentTurn, undefined)
+  assert.ok(adjusted.curveVersions.some(v => v.path?.currentTurn?.presentation === 'author-review'))
   console.log(`Interaction HTTP/browser contract passed (disabled draft + model stub; historical shape replay, restart, stale-page revision). Artifacts: ${artifacts}`)
 } finally { await stop(); stub.closeAllConnections(); await new Promise((r) => stub.close(r)) }
