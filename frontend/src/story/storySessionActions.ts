@@ -6,6 +6,8 @@ import {
   requestStoryTurn,
   requestStoryTurnOptionRefinement,
   requestStoryCoCreationStart,
+  requestPreparationAcceptance,
+  requestPreparationSupplement,
   requestCurveBeatUpdate,
   requestCurveBeatRegeneration,
   requestCurveBeatRejection,
@@ -64,6 +66,8 @@ interface ConflictCoreGenerationOptions {
 }
 
 export interface StorySessionActions {
+  reviewPreparationSupplement: (supplementId: string, decision: 'accepted-design' | 'rejected' | 'keep-unknown', authorText: string) => Promise<void>
+  acceptPreparation: (candidateIds: string[], authorReview?: import('../../../shared/story-preparation.js').StoryPreparationReview) => Promise<void>
   updateIdea: (idea: string) => void
   useExample: () => void
   openConflictCorePicker: () => Promise<void>
@@ -108,7 +112,7 @@ export interface StorySessionActions {
   selectCurveVersion: (versionId: string) => Promise<void>
   applyAuthorInstruction: (targetBeatId: string, text: string) => Promise<void>
   proposeStoryAction: (action: string) => Promise<void>
-  confirmStoryActionProposal: (mode: Extract<StoryTurnMode, 'continue' | 'conclude'>) => Promise<void>
+  confirmStoryActionProposal: (mode: Extract<StoryTurnMode, 'continue' | 'conclude'>, authorConfirmation?: { actionText: string; resultText: string }) => Promise<void>
 }
 
 const previousViewByView: Partial<Record<StoryView, StoryView>> = {
@@ -154,6 +158,8 @@ function createCoCreationActions(
   | 'openCreativeBrief'
   | 'updateCreativeBrief'
   | 'generateProvisionalCurve'
+  | 'acceptPreparation'
+  | 'reviewPreparationSupplement'
   | 'updateCurveBeat'
   | 'regenerateCurveBeat'
   | 'rejectCurveBeat'
@@ -188,6 +194,7 @@ function createCoCreationActions(
       state,
       stage,
       () => requestStoryCoCreationStart({
+        generationMode: 'review-actions',
         idea: state.trimmedIdea,
         brief,
         operationId: createClientOperationId(),
@@ -209,6 +216,13 @@ function createCoCreationActions(
     await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => (
       requestCurveBeatUpdate({ storyId, revision, curveId, beatId, detail, operationId })
     ))
+  }
+
+  const acceptPreparation = async (candidateIds: string[], authorReview?: import('../../../shared/story-preparation.js').StoryPreparationReview) => {
+    await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => requestPreparationAcceptance({ storyId, revision, curveId, acceptedCandidateIds: candidateIds, ...(authorReview ? { authorReview } : {}) }))
+  }
+  const reviewPreparationSupplement = async (supplementId: string, decision: 'accepted-design' | 'rejected' | 'keep-unknown', authorText: string) => {
+    await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => requestPreparationSupplement({ storyId, revision, curveId, supplementId, decision, authorText }))
   }
 
   const regenerateCurveBeat = async (beatId: string, feedback?: string, replaceRejected = false) => {
@@ -346,6 +360,8 @@ function createCoCreationActions(
     openCreativeBrief,
     updateCreativeBrief: state.setCreativeBrief,
     generateProvisionalCurve,
+    acceptPreparation,
+    reviewPreparationSupplement,
     updateCurveBeat,
     regenerateCurveBeat,
     rejectCurveBeat,
@@ -677,7 +693,7 @@ function applyStoryTurnState(state: StorySessionState, result: StoryTurnResponse
   state.setTurnHistory(result.history)
   state.setCurrentTurn(result.turn)
   state.setGeneratedStory(undefined)
-  state.setPendingActionProposal(undefined)
+  state.setPendingActionProposal(result.pendingActionProposal)
 }
 
 function applyCurveMutationState(
@@ -789,7 +805,7 @@ function createAuthorControlActions(
     )
   }
 
-  const confirmStoryActionProposal = async (mode: Extract<StoryTurnMode, 'continue' | 'conclude'>) => {
+  const confirmStoryActionProposal = async (mode: Extract<StoryTurnMode, 'continue' | 'conclude'>, authorConfirmation?: { actionText: string; resultText: string }) => {
     const proposal = state.pendingActionProposal
     if (!state.storyId || !proposal) return
     await runStorySessionStageRequest(
@@ -800,6 +816,7 @@ function createAuthorControlActions(
         revision: state.revision,
         proposalId: proposal.id,
         mode,
+        ...(authorConfirmation ? { authorConfirmation } : {}),
       }),
       (result) => applyStoryTurnState(state, result),
     )

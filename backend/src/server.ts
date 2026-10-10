@@ -15,6 +15,10 @@ import {
   generateSessionStoryTurn,
   generateSessionStoryTurnOptionRefinement,
   startStoryCoCreation,
+  acceptSessionPreparation,
+  parseStoryPreparationAcceptanceRequest,
+  parseStoryPreparationSupplementRequest,
+  reviewSessionPreparationSupplement,
   updateSessionCurveBeat,
   regenerateSessionCurveBeat,
   rejectSessionCurveBeat,
@@ -108,6 +112,16 @@ registerStoryStage(
   updateSessionCurveBeat,
   (result) => result satisfies StoryCurveMutationResponse,
 )
+
+registerStoryStage(
+  '/api/story/preparation/accept',
+  parseStoryPreparationAcceptanceRequest,
+  acceptSessionPreparation,
+  (result) => result satisfies StoryCurveMutationResponse,
+)
+
+registerStoryStage('/api/story/preparation/supplement', parseStoryPreparationSupplementRequest, reviewSessionPreparationSupplement,
+  (result) => result satisfies StoryCurveMutationResponse)
 
 registerStoryStage(
   '/api/story/curve/beat/regenerate',

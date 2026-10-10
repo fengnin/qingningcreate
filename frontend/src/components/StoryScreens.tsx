@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import {
   ArrowLeft,
   ArrowRight,
@@ -427,8 +427,8 @@ export function StorySpineScreen({ session }: { session: StorySession }) {
     <StoryWorkspace
       step={step}
       eyebrow={hasConclusion ? '05 / 06 · 故事收束' : '04 / 06 · 逐步发展'}
-      title={hasConclusion ? '这些确认的选择，已经让故事可以走向结局。' : '先让这一段发生，再决定下一步。'}
-      lead={hasConclusion ? '回看这条由你确认的因果链；结尾会在它之后自然完成。' : '每次只处理当前局面。选定行动后，下一段会承接它的实际后果。'}
+      title={hasConclusion ? '这些确认的选择，已经让故事可以走向结局。' : '先审阅行动，再确认实际结果。'}
+      lead={hasConclusion ? '回看这条由你确认的因果链；结尾会在它之后自然完成。' : '关注点选择不执行动作。候选行动与因果均待审阅，只有你明确确认的实际结果才能进入故事事实。'}
       session={session}
       aside={<ProgressSummary option={session.selectedHeadTail} history={session.turnHistory} currentTurn={currentTurn} hasGeneratedStory={Boolean(story)} />}
     >
@@ -463,6 +463,7 @@ export function StorySpineScreen({ session }: { session: StorySession }) {
           {currentTurnPanel}
           {session.confirmedCurve && currentTurn && <StoryControlPanel session={session} currentTurn={currentTurn} />}
           <TurnActions
+            reviewMode={currentTurn?.presentation}
             canConclude={canConclude}
             disabled={!canAdvance}
             onContinue={() => void session.continueStory()}
@@ -897,7 +898,7 @@ function StoryTurnHistory({ history }: { history: StoryTurnHistoryItem[] }) {
 
   return (
     <section className="turn-history" aria-label="已确认的故事路径">
-      <header className="turn-section-heading"><span>已经发生</span><small>这些行动和后果会成为下一段的前因。</small></header>
+      <header className="turn-section-heading"><span>审阅与确认记录</span><small>关注点不属于已执行行动；实际结果另行确认。</small></header>
       <ol className="story-spine-chain">
         {history.map((item, index) => <ConfirmedTurnRow item={item} index={index} key={item.turnId} />)}
       </ol>
@@ -906,6 +907,7 @@ function StoryTurnHistory({ history }: { history: StoryTurnHistoryItem[] }) {
 }
 
 function ConfirmedTurnRow({ item, index }: { item: StoryTurnHistoryItem; index: number }) {
+  const isFocus = item.selectedOption.narrativeAction.mode === 'focus'
   return (
     <li className="story-spine-row is-confirmed">
       <span className="story-spine-marker">{String(index + 1).padStart(2, '0')}</span>
@@ -918,8 +920,8 @@ function ConfirmedTurnRow({ item, index }: { item: StoryTurnHistoryItem; index: 
         <p>{item.node.event}</p>
         <dl className="story-spine-consequences">
           <div><dt>当时阻力</dt><dd>{item.conflict.conflict}</dd></div>
-          <div><dt>主角选择</dt><dd>{item.selectedOption.action}</dd></div>
-          <div><dt>当下结果</dt><dd>{item.selectedOption.immediateConsequence}</dd></div>
+          <div><dt>{isFocus ? '审阅关注点' : '确认行动'}</dt><dd>{item.selectedOption.action}</dd></div>
+          <div><dt>{isFocus ? '事实状态' : '作者确认结果'}</dt><dd>{isFocus ? '未执行动作，未改变故事事实。' : item.selectedOption.immediateConsequence}</dd></div>
         </dl>
       </div>
     </li>
@@ -939,7 +941,7 @@ function CurrentStoryTurn({ currentTurn, selectedOptionId, onSelect, onRefineOpt
   return (
     <section className={`current-story-turn ${currentTurn.isConclusion ? 'is-conclusion' : ''}`} aria-label={currentTurn.isConclusion ? '故事结局' : '当前故事情境'}>
       <header className="turn-section-heading">
-        <span>{currentTurn.isConclusion ? '故事结局' : '当前情境'}</span>
+        <span>{currentTurn.isConclusion ? '故事结局' : currentTurn.presentation === 'candidate-actions' ? '待审阅行动提案' : currentTurn.presentation === 'focus-selection' ? '选择审阅关注点' : '当前情境'}</span>
         <small>{turnPhaseLabel[currentTurn.phase]} · 目标：{goalStateLabel[node.goalState]} · {conflict.anchor}</small>
       </header>
       <div className="current-turn-copy">
@@ -986,9 +988,12 @@ function TurnOption({ option, selected, onSelect, onRefineOption, disabled }: {
     <div className="turn-option-group">
       <button className={`branch-option ${selected ? 'is-selected' : ''}`} type="button" onClick={() => onSelect(option.id)} aria-pressed={selected} disabled={disabled}>
         <span className="branch-choice-mark">{selected ? <Check size={15} /> : null}</span>
-        <span><strong>{option.label}</strong><small>{option.action}</small><em><b>立即</b>{option.immediateConsequence}</em><em><b>可能影响</b>{option.laterEffect}</em></span>
+        <span><strong>{option.label}</strong><small>{option.action}</small><em><b>{option.narrativeAction.mode === 'focus' ? '关注点' : option.proposal ? '待审状态' : '立即'}</b>{option.immediateConsequence}</em><em><b>{option.proposal ? '待审因果' : '可能影响'}</b>{option.laterEffect}</em>
+          {option.proposal?.causalClaims.map((claim, index) => <em key={index}><b>待核对</b>{claim.statement}</em>)}
+          {option.proposal?.questions.map((question, index) => <em key={index}><b>作者问题</b>{question}</em>)}
+        </span>
       </button>
-      <StoryTurnOptionRefinementControl option={option} disabled={disabled} onRefine={onRefineOption} />
+      {!option.narrativeAction.mode && <StoryTurnOptionRefinementControl option={option} disabled={disabled} onRefine={onRefineOption} />}
     </div>
   )
 }
@@ -1001,10 +1006,13 @@ function StoryControlPanel({ session, currentTurn }: {
   const [authorBeatId, setAuthorBeatId] = useState(confirmedBeats[0]?.id ?? '')
   const [authorText, setAuthorText] = useState('')
   const [roleAction, setRoleAction] = useState('')
+  const [executedResult, setExecutedResult] = useState('')
+  const [confirmExecuted, setConfirmExecuted] = useState(false)
   const pendingProposal = session.pendingActionProposal?.turnId === currentTurn.id
     ? session.pendingActionProposal
     : undefined
   const disabled = session.stageStatus === 'loading'
+  useEffect(() => { setExecutedResult(''); setConfirmExecuted(false) }, [pendingProposal?.id])
 
   const submitAuthorInstruction = async () => {
     if (!authorBeatId || !authorText.trim()) return
@@ -1062,12 +1070,19 @@ function StoryControlPanel({ session, currentTurn }: {
               <p>{pendingProposal.action}</p>
               <dl>
                 <div><dt>依据</dt><dd>{pendingProposal.grounding}</dd></div>
-                <div><dt>眼前结果</dt><dd>{pendingProposal.immediateConsequence}</dd></div>
-                <div><dt>后续影响</dt><dd>{pendingProposal.laterEffect}</dd></div>
+                <div><dt>审阅状态</dt><dd>{pendingProposal.immediateConsequence}</dd></div>
+                <div><dt>待审承接</dt><dd>{pendingProposal.laterEffect}</dd></div>
+                {pendingProposal.option.proposal?.causalClaims.map((claim, index) => <div key={index}><dt>待核对因果</dt><dd>{claim.statement}</dd></div>)}
+                {pendingProposal.option.proposal?.questions.map((question, index) => <div key={index}><dt>作者问题</dt><dd>{question}</dd></div>)}
               </dl>
+              {pendingProposal.requiresExecutedResultConfirmation && <>
+                <p>结果尚未确定时，保留待审状态，或重新提出不依赖未知前提的行动。材料引用与模型提案不代表事实确认。</p>
+                <label><span>作者确认的实际结果原文</span><textarea value={executedResult} onChange={(event) => setExecutedResult(event.target.value)} maxLength={180} placeholder="仅填写你确认已发生的结果；不要复制模型预测代替判断。" disabled={disabled} /></label>
+                <label><input type="checkbox" checked={confirmExecuted} onChange={(event) => setConfirmExecuted(event.target.checked)} disabled={disabled} />我明确确认上述行动已执行，填写的是实际结果。</label>
+              </>}
               <div className="pending-action-buttons">
-                <button className="text-action" type="button" onClick={() => void session.confirmStoryActionProposal('continue')} disabled={disabled}>接受并继续发展 <ArrowRight size={14} /></button>
-                {currentTurn.canConclude && <button className="text-action" type="button" onClick={() => void session.confirmStoryActionProposal('conclude')} disabled={disabled}>接受并进入收束 <Check size={14} /></button>}
+                <button className="text-action" type="button" onClick={() => void session.confirmStoryActionProposal('continue', pendingProposal.requiresExecutedResultConfirmation ? { actionText: pendingProposal.action, resultText: executedResult.trim() } : undefined)} disabled={disabled || Boolean(pendingProposal.requiresExecutedResultConfirmation && (!confirmExecuted || !executedResult.trim()))}>{pendingProposal.requiresExecutedResultConfirmation ? '确认实际行动与结果，审阅下一步' : '接受并继续发展'} <ArrowRight size={14} /></button>
+                {!pendingProposal.requiresExecutedResultConfirmation && currentTurn.canConclude && <button className="text-action" type="button" onClick={() => void session.confirmStoryActionProposal('conclude')} disabled={disabled}>接受并进入收束 <Check size={14} /></button>}
               </div>
             </div>
           )}
@@ -1077,7 +1092,8 @@ function StoryControlPanel({ session, currentTurn }: {
   )
 }
 
-function TurnActions({ canConclude, disabled, onContinue, onConclude }: {
+function TurnActions({ canConclude, disabled, onContinue, onConclude, reviewMode }: {
+  reviewMode?: StoryTurn['presentation']
   canConclude: boolean
   disabled: boolean
   onContinue: () => void
@@ -1086,7 +1102,7 @@ function TurnActions({ canConclude, disabled, onContinue, onConclude }: {
   return (
     <div className="stage-actions turn-actions">
       {canConclude && <button className="text-action" type="button" onClick={onConclude} disabled={disabled}>确认这次选择，开始写结尾 <ArrowRight size={15} /></button>}
-      <button className="primary-action" type="button" onClick={onContinue} disabled={disabled}>确认选择，继续发展 <ArrowRight size={18} /></button>
+      <button className="primary-action" type="button" onClick={onContinue} disabled={disabled}>{reviewMode === 'focus-selection' ? '选择关注点，生成待审行动' : reviewMode === 'candidate-actions' ? '打开这项提案审阅' : '确认选择，继续发展'} <ArrowRight size={18} /></button>
     </div>
   )
 }

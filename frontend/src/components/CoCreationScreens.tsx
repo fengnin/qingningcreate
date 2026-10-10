@@ -204,7 +204,9 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
   const unresolvedFacts = sourceFacts.filter((fact) => fact.disposition === 'needs-author-decision')
   const unresolvedClarifications = curve?.clarifications?.filter((item) => !item.resolution) ?? []
   const hasStartedStoryPath = Boolean(session.currentTurn)
-  const missingDesignSections = getMissingStoryDesignSectionLabels(
+  // Prepared simple actions need no invented climax or middle-development slot.
+  // All fact, stale-node and explicit design-review gates remain below.
+  const missingDesignSections = curve?.preparation ? [] : getMissingStoryDesignSectionLabels(
     curve?.design,
     new Set(curve?.beats.filter((beat) => beat.status !== 'rejected').map((beat) => beat.id)),
   )
@@ -224,6 +226,7 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
   if (!curve) {
     return <ProvisionalCurveEmptyState session={session} isLoading={isLoading} />
   }
+  if (curve.preparation?.status === 'needs-review') return <PreparationReview session={session} />
 
   const beginEdit = (beat: CurveBeat) => {
     setEditingBeatId(beat.id)
@@ -321,6 +324,10 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
           {session.stageError && <p className="cocreation-error" role="alert"><CircleAlert size={16} /> {session.stageError}</p>}
           {curve.generation && <div className={`curve-generation-notice ${curve.generation.origin === 'fact-preserving-fallback' ? 'is-fallback' : ''}`}><Sparkles size={15} /><span><strong>{curve.generation.origin === 'fact-preserving-fallback' ? '已使用保留原始材料的结构草案' : '已完成一版结构提案'}</strong>{curve.generation.notice ?? '新增内容仍是提案，尚未成为故事事实。'}</span></div>}
           <CurveDesignSummary curve={curve} />
+          {curve.preparation && <section><h3>已接受的行动结构与保留未知</h3><p>结构接受不是执行确认。未选择的候选没有进入曲线。</p>{curve.preparation.material.filter(m => m.role === 'unknown').map(m => <p key={m.id}>仍未知：{m.quote}</p>)}
+            {curve.preparation.authorReview?.supersededMaterialIds?.map(id => <p key={id}>被作者明确取代（保留原文，不再作为依据）：{curve.preparation!.material.find(m => m.id === id)?.quote}</p>)}
+            {!!curve.preparation.supplements?.length && <aside aria-label="独立待审新增设计"><h4>独立待审新增设计</h4><p>这些内容不属于行动必需条件。接受只保存未来设计；若要纳入行动，仍需显式修订并再次审阅。</p>{curve.preparation.supplements.map(s => <PreparationSupplementReview key={s.id} item={s} disabled={isLoading || curve.status !== 'draft'} onReview={session.reviewPreparationSupplement} />)}</aside>}
+          </section>}
           {curve.reasoning && <ReasoningDesignReview reasoning={curve.reasoning} acceptedIds={acceptedDesignIds} onChange={setAcceptedDesignIds} disabled={isLoading || Boolean(session.confirmedCurve)} />}
           {curve.reasoning?.outcome === 'questions' && <p>这版尚未形成可接受的设计。以下问题等待作者决定；生成失败不等于作者资料不足。</p>}
           {(curve.clarifications ?? []).filter(c => c.dependency.beatIds.length === 0).map(c => <CurveClarificationReview
@@ -689,6 +696,41 @@ function CurveRegenerationReview({
 function designReviewItems(p: StoryReasoningProposal): StoryReasoningStatement[] {
   return [...(p.goal ? [p.goal] : []), ...p.constraints, ...p.actions, ...p.relations, ...('steps' in p ? p.steps : [])]
 }
+
+function PreparationReview({ session }: { session: StorySession }) {
+  const [selected, setSelected] = useState<string[]>([])
+  const [originalText, setOriginalText] = useState('')
+  const [superseded, setSuperseded] = useState<string[]>([])
+  const [quotes, setQuotes] = useState('')
+  const [resultBases, setResultBases] = useState<Record<string, string[]>>({})
+  const [reviewed, setReviewed] = useState<Record<string, { action: string; possibleResult: string }>>({})
+  const p = session.provisionalCurve!.preparation!
+  const busy = session.stageStatus === 'loading'
+  const material = (ids: string[]) => ids.map(id => p.material.find(m => m.id === id)?.quote ?? id).join('；')
+  return <main className="app-shell setup-shell cocreation-shell"><button type="button" onClick={session.goBackToOpening} disabled={busy}>返回修改作者材料</button>
+    <h1>先审阅行动、条件和可能结果</h1><p>尚未生成曲线。以下分类与因果需要你核对；接受结构只记录未来设计，不表示行动或结果已经发生。</p>
+    {session.stageError && <p role="alert">{session.stageError}</p>}
+    <section><h2>作者原文整理</h2>{p.material.map(m => <div key={m.id}><p>{({ fact: '原文事实', condition: '原文条件', goal: '原文目标', unknown: '原文未知' })[m.role]}：{m.quote}</p><label><input type="checkbox" disabled={busy} checked={superseded.includes(m.id)} onChange={e => setSuperseded(e.target.checked ? [...superseded, m.id] : superseded.filter(id => id !== m.id))} />本次明确修订取代这条旧依据，原文保留</label></div>)}</section>
+    <section><h2>行动候选</h2>{p.candidates.map(c => <article key={c.id}><h3>{c.action}</h3><p>行动依据：{material(c.materialIds)}</p><p>前置条件：{material(c.preconditionIds) || '未声明额外条件，仍需核对'}</p><p>可能结果（未发生）：{c.possibleResult}</p><p>结果依据：{material(c.resultBasisIds) || '没有已知依据'}</p>
+      <label>审定的未来行动<textarea disabled={busy} value={reviewed[c.id]?.action ?? c.action} onChange={e => setReviewed({ ...reviewed, [c.id]: { action: e.target.value, possibleResult: reviewed[c.id]?.possibleResult ?? c.possibleResult } })} /></label>
+      <label>审定的可能结果（未发生）<textarea disabled={busy} value={reviewed[c.id]?.possibleResult ?? c.possibleResult} onChange={e => setReviewed({ ...reviewed, [c.id]: { action: reviewed[c.id]?.action ?? c.action, possibleResult: e.target.value } })} /></label>
+      {quotes.split('\n').filter(q => q.trim()).map((q, i) => { const id = `author-review-${i + 1}`; return <label key={id}><input type="checkbox" disabled={busy} checked={(resultBases[c.id] ?? []).includes(id)} onChange={e => setResultBases({ ...resultBases, [c.id]: e.target.checked ? [...(resultBases[c.id] ?? []), id] : (resultBases[c.id] ?? []).filter(v => v !== id) })} />将明确确认的条件用于审阅可能结果：{q}</label> })}
+      {c.unknownIds.length ? <p>仍依赖问题：{c.unknownIds.map(id => p.questions.find(q => q.id === id)?.question).join('；')}。请修改材料补充，或选择独立方案。</p> : <label><input type="checkbox" disabled={busy} checked={selected.includes(c.id)} onChange={e => setSelected(e.target.checked ? [...selected, c.id] : selected.filter(id => id !== c.id))} />我已核对这项行动的条件及因果，只接受未来设计</label>}
+    </article>)}</section>
+    <section><h2>具体待补问题</h2>{p.questions.length ? p.questions.map(q => <p key={q.id}>{q.question}</p>) : <p>模型未列出问题；这不证明内容正确。</p>}</section>
+    <label>本次作者确认原文<textarea value={originalText} onChange={e => setOriginalText(e.target.value)} disabled={busy} placeholder="写明确认的条件、接受的未来行动及仍未发生的结果；原文会保留。" /></label>
+    <label>明确确认的对象、许可和条件（每行一条，必须逐字摘自上面的确认原文；不填写未来执行或可能结果）<textarea value={quotes} onChange={e => setQuotes(e.target.value)} disabled={busy} /></label>
+    <button type="button" className="primary-action" disabled={busy || !selected.length || !originalText.trim() || selected.some(id => { const c = p.candidates.find(c => c.id === id)!; const r = reviewed[id] ?? c; return !r.action.trim() || !r.possibleResult.trim() })} onClick={() => void session.acceptPreparation(selected, { originalText, supersededMaterialIds: superseded, confirmedQuotes: quotes.split('\n').filter(q => q.trim()), candidates: selected.map(id => { const c = p.candidates.find(c => c.id === id)!; return { id, ...(resultBases[id]?.length ? { resultBasisIds: [...c.resultBasisIds.filter(v => !superseded.includes(v)), ...resultBases[id]!] } : {}), action: reviewed[id]?.action ?? c.action, possibleResult: reviewed[id]?.possibleResult ?? c.possibleResult } }) })}>{busy ? '正在排列已接受结构…' : '接受所选结构，再生成待审曲线'}</button>
+    <p>不成立的候选可以全部不采用并返回修改材料；系统不会为了曲线完整而补条件。</p>
+  </main>
+}
+function PreparationSupplementReview({ item, disabled, onReview }: { item: import('../../../shared/story-preparation.js').StoryPreparationSupplement; disabled: boolean; onReview: (id: string, decision: 'accepted-design'|'rejected'|'keep-unknown', text: string) => Promise<void> }) {
+  const [authorText, setAuthorText] = useState('')
+  return <article><p>待审 {item.kind}：{item.text}</p><p>{item.question}</p><p>审阅状态：{item.status}（不表示执行或结果发生）</p>{item.authorText && <blockquote>{item.authorText}</blockquote>}
+    {item.status === 'needs-review' && <><label>独立审阅原文<textarea value={authorText} disabled={disabled} onChange={e => setAuthorText(e.target.value)} /></label>{(['accepted-design','rejected','keep-unknown'] as const).map((decision, i) => <button key={decision} type="button" disabled={disabled || !authorText.trim()} onClick={() => void onReview(item.id, decision, authorText)}>{['仅接受未来设计','拒绝这项设计','保留未知，不依赖它'][i]}</button>)}</>}
+  </article>
+}
+
 function ReasoningDesignReview({ reasoning, acceptedIds, onChange, disabled }: { reasoning: StoryReasoningProposal; acceptedIds: string[]; onChange: (ids: string[]) => void; disabled: boolean }) {
   return <section aria-label="事实、创意与未知审阅">
     <h3>事实、创意与未知</h3><p>引用只证明来源，不证明因果。新增规则或代价是可拒绝的创意；接受它只记录未来设计，不代表规则已生效、人物已执行或后果已发生。</p>

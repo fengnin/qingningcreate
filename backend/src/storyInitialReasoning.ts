@@ -15,7 +15,7 @@ export function createInitialReasoningContext(design: StoryDesignRecord, seed: S
 /** Projection only: no role detection, causal joins or inferred cost/urgency.
  * The complete proposal is retained; strings are compatibility display slots,
  * not authority for narrative facts. Empty slots deliberately remain empty. */
-export function mapInitialReasoningProposal(proposal: StoryReasoningProposal, design: StoryDesignRecord, brief: CreativeBrief): ProvisionalCurve {
+export function mapInitialReasoningProposal(proposal: StoryReasoningProposal, design: StoryDesignRecord, brief: CreativeBrief, options: { allowSimplePlan?: boolean } = {}): ProvisionalCurve {
   if (proposal.stage !== 'initial-design') throw new AppError('初次生成协议阶段不匹配。', 502, 'STORY_REASONING_INVALID_OUTPUT')
   const nodes = [...(proposal.goal ? [proposal.goal] : []), ...proposal.constraints, ...proposal.actions, ...proposal.relations,
     ...(proposal.outcome === 'proposal' && 'steps' in proposal ? proposal.steps : [])]
@@ -29,9 +29,10 @@ export function mapInitialReasoningProposal(proposal: StoryReasoningProposal, de
     return [...new Set([...evidence, ...refs.flatMap((id: string) => byId.has(id) ? sourcesFor(byId.get(id)!, seen) : [])])]
   }
   const steps = proposal.outcome === 'proposal' && 'steps' in proposal ? proposal.steps : []
-  if (steps.length && (steps.length < 5 || new Set(steps.map(s => s.kind)).size !== steps.length
+  const requiredKinds = options.allowSimplePlan ? ['current-state','trigger','resolution'] : ['current-state','trigger','escalation','climax-choice','resolution']
+  if (steps.length && (steps.length < requiredKinds.length || new Set(steps.map(s => s.kind)).size !== steps.length
     || steps.some(s => s.id !== `beat-${s.kind}`)
-    || !['current-state','trigger','escalation','climax-choice','resolution'].every(kind => steps.some(s => s.kind === kind))
+    || !requiredKinds.every(kind => steps.some(s => s.kind === kind))
     || steps.some(s => s.dependsOn.some(id => !steps.some(parent => parent.id === id))))) {
     throw new AppError('初次设计必须保留唯一、完整且可追踪的曲线节点。', 502, 'STORY_REASONING_INVALID_OUTPUT')
   }

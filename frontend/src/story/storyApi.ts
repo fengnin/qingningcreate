@@ -85,6 +85,13 @@ export function requestStoryCoCreationStart(request: StoryCoCreationStartRequest
   return postJson('/api/story/co-create/start', request, parseStoryCoCreationResponse)
 }
 
+export function requestPreparationAcceptance(request: import('../../../shared/story-preparation-request.js').StoryPreparationAcceptanceRequest): Promise<StoryCurveMutationResponse> {
+  return postJson('/api/story/preparation/accept', request, parseStoryCurveMutationResponse)
+}
+export function requestPreparationSupplement(request: import('../../../shared/story-preparation-request.js').StoryPreparationSupplementRequest): Promise<StoryCurveMutationResponse> {
+  return postJson('/api/story/preparation/supplement', request, parseStoryCurveMutationResponse)
+}
+
 export function requestCurveBeatUpdate(request: StoryCurveBeatUpdateRequest): Promise<StoryCurveMutationResponse> {
   return postJson('/api/story/curve/beat', request, parseStoryCurveMutationResponse)
 }
@@ -411,6 +418,7 @@ function parseStoryTurnResponse(payload: unknown): StoryTurnResponse {
     ...parseStorySessionVersion(record),
     history: parseTurnHistory(record.history),
     turn: parseStoryTurn(record.turn),
+    ...(record.pendingActionProposal === undefined ? {} : { pendingActionProposal: parseStoryActionProposal(record.pendingActionProposal) }),
   }
 }
 
@@ -435,6 +443,9 @@ function parseStoryActionProposal(value: unknown): StoryActionProposal {
     laterEffect: readText(record, 'laterEffect'),
     option: parseStoryTurnOption(record.option),
     createdAt: readTimestamp(record, 'createdAt'),
+    ...(record.requiresExecutedResultConfirmation === undefined ? {} : {
+      requiresExecutedResultConfirmation: readRequiredBoolean(record.requiresExecutedResultConfirmation),
+    }),
   }
 }
 
@@ -593,10 +604,11 @@ function parseConfirmedCurve(value: unknown): ConfirmedCurve {
 
 type ParsedCurveFields = Pick<
   ProvisionalCurve,
-  'id' | 'title' | 'brief' | 'beats' | 'rejectedProposals' | 'design' | 'foundation' | 'generation' | 'clarifications' | 'reasoning'
+  'id' | 'title' | 'brief' | 'beats' | 'rejectedProposals' | 'design' | 'foundation' | 'generation' | 'clarifications' | 'reasoning' | 'preparation'
 >
 
 function parseCurveFields(record: Record<string, unknown>): ParsedCurveFields {
+  const preparation = record.preparation === undefined ? undefined : parsePreparation(record.preparation)
   const reasoning = record.reasoning === undefined ? undefined : parseReasoning(record.reasoning)
   const rejectedProposals = record.rejectedProposals === undefined
     ? undefined
@@ -605,7 +617,8 @@ function parseCurveFields(record: Record<string, unknown>): ParsedCurveFields {
     id: readIdentifier(record, 'id'),
     title: readText(record, 'title'),
     brief: parseCreativeBrief(record.brief),
-    beats: reasoning?.outcome === 'questions' ? parseCurveBeatList(record.beats, 0, 7) : parseCurveBeats(record.beats),
+    beats: preparation ? parseCurveBeatList(record.beats, preparation.status === 'needs-review' ? 0 : 3, 7) : reasoning?.outcome === 'questions' ? parseCurveBeatList(record.beats, 0, 7) : parseCurveBeats(record.beats),
+    ...(preparation ? { preparation } : {}),
     ...(reasoning ? { reasoning } : {}),
     ...(rejectedProposals ? { rejectedProposals } : {}),
     ...(record.design === undefined ? {} : { design: parseStoryDesignRecord(record.design) }),
@@ -683,18 +696,18 @@ function parseStoryCurveFoundation(value: unknown): StoryCurveFoundation {
       obstacle: slot(predicament, 'obstacle'),
       tradeoff: slot(predicament, 'tradeoff'),
       urgency: slot(predicament, 'urgency'),
-      choice: readText(predicament, 'choice'),
+      choice: slot(predicament, 'choice'),
       plausibleCost: slot(predicament, 'plausibleCost'),
     },
     middleDevelopment: {
-      escalation: readText(middleDevelopment, 'escalation'),
+      escalation: slot(middleDevelopment, 'escalation'),
       midpoint: slot(middleDevelopment, 'midpoint'),
-      climaxPressure: readText(middleDevelopment, 'climaxPressure'),
+      climaxPressure: slot(middleDevelopment, 'climaxPressure'),
     },
     storyEnds: {
       opening: readText(storyEnds, 'opening'),
       openingClue: readText(storyEnds, 'openingClue'),
-      climax: readText(storyEnds, 'climax'),
+      climax: slot(storyEnds, 'climax'),
       resolution: readText(storyEnds, 'resolution'),
       cost: slot(storyEnds, 'cost'),
       promise: slot(storyEnds, 'promise'),
@@ -834,6 +847,7 @@ function readTimestamp(record: Record<string, unknown>, field: string): number {
 
 function parseStoryPredicament(value: unknown): StoryPredicament {
   const record = expectRecord(value)
+  const slot = record.designProtocol === 'prepared-action' ? readDesignSlot : readText
 
   return {
     id: readText(record, 'id'),
@@ -841,11 +855,12 @@ function parseStoryPredicament(value: unknown): StoryPredicament {
     variationAxis: readStoryVariationAxis(record.variationAxis),
     preservedGoal: readText(record, 'preservedGoal'),
     immediateSituation: readText(record, 'immediateSituation'),
-    obstacle: readText(record, 'obstacle'),
-    tradeoff: readText(record, 'tradeoff'),
-    urgency: readText(record, 'urgency'),
-    choice: readText(record, 'choice'),
-    plausibleCost: readText(record, 'plausibleCost'),
+    ...(record.designProtocol === 'prepared-action' ? { designProtocol: 'prepared-action' as const } : {}),
+    obstacle: slot(record, 'obstacle'),
+    tradeoff: slot(record, 'tradeoff'),
+    urgency: slot(record, 'urgency'),
+    choice: slot(record, 'choice'),
+    plausibleCost: slot(record, 'plausibleCost'),
     approaches: parsePredicamentApproaches(record.approaches),
     facts: parseStoryFacts(record.facts),
     actions: parseStoryActions(record.actions),
@@ -882,14 +897,16 @@ function parsePredicamentApproach(value: unknown): StoryPredicament['approaches'
 
 function parseHeadTailOption(value: unknown): StoryHeadTailOption {
   const record = expectRecord(value)
+  const slot = record.designProtocol === 'prepared-action' ? readDesignSlot : readText
   return {
     id: readText(record, 'id'),
     opening: readText(record, 'opening'),
     openingClue: readText(record, 'openingClue'),
-    climax: readText(record, 'climax'),
+    ...(record.designProtocol === 'prepared-action' ? { designProtocol: 'prepared-action' as const } : {}),
+    climax: slot(record, 'climax'),
     resolution: readText(record, 'resolution'),
-    cost: readText(record, 'cost'),
-    promise: readText(record, 'promise'),
+    cost: slot(record, 'cost'),
+    promise: slot(record, 'promise'),
     climaxActionId: readIdentifier(record, 'climaxActionId'),
     transition: parseStoryTransition(record.transition),
   }
@@ -919,6 +936,7 @@ function parseStoryTurn(value: unknown): StoryTurn {
     ...parseStoryTurnConclusionPayload(record, isConclusion),
     canConclude,
     isConclusion,
+    ...(record.presentation === undefined ? {} : { presentation: parseTurnPresentation(record.presentation) }),
   }
 
   validateStoryTurnShape(turn)
@@ -968,7 +986,7 @@ function validateOngoingTurnShape(turn: StoryTurn) {
   const hasInvalidShape = turn.phase === 'resolution'
     || turn.node.goalState === 'resolved'
     || !turn.question
-    || turn.options.length !== GENERATED_OPTION_COUNT
+    || (turn.presentation === 'candidate-actions' ? turn.options.length < 1 || turn.options.length > GENERATED_OPTION_COUNT : turn.options.length !== GENERATED_OPTION_COUNT)
     || turn.narrativeAction !== null
     || turn.transition !== null
 
@@ -1008,7 +1026,29 @@ function parseStoryTurnOption(value: unknown): StoryTurnOption {
     laterEffect: readText(record, 'laterEffect'),
     narrativeAction: parseStoryAction(record.narrativeAction),
     transition: parseStoryTransition(record.transition),
+    ...(record.proposal === undefined ? {} : { proposal: parseCandidateActionReview(record.proposal) }),
   }
+}
+
+function readRequiredBoolean(value: unknown): boolean {
+  if (typeof value !== 'boolean') throwInvalidResponse()
+  return value
+}
+
+function parseTurnPresentation(value: unknown): NonNullable<StoryTurn['presentation']> {
+  if (value !== 'focus-selection' && value !== 'candidate-actions') throwInvalidResponse()
+  return value
+}
+
+function parseCandidateActionReview(value: unknown): NonNullable<StoryTurnOption['proposal']> {
+  const record = expectRecord(value)
+  if (record.status !== 'needs-review' || !Array.isArray(record.causalClaims) || record.causalClaims.length > 8) throwInvalidResponse()
+  return { status: 'needs-review', sourceFactIds: readIdentifierList(record, 'sourceFactIds'),
+    questions: readTextList(record, 'questions', 0, 4),
+    causalClaims: record.causalClaims.map((value) => {
+      const claim = expectRecord(value)
+      return { statement: readText(claim, 'statement'), sourceFactIds: readIdentifierList(claim, 'sourceFactIds') }
+    }) }
 }
 
 function parseStoryAction(value: unknown): StoryAction {
@@ -1038,12 +1078,15 @@ function parseActionFields(
   record: Record<string, unknown>,
   source: StoryAction['source'],
 ): StoryAction {
+  if (record.mode !== undefined && !['focus', 'candidate', 'executed'].includes(String(record.mode))) throwInvalidResponse()
   return {
     id: readIdentifier(record, 'id'),
     intent: readText(record, 'intent'),
     preconditions: readIdentifierList(record, 'preconditions'),
     effects: readIdentifierList(record, 'effects'),
     source,
+    ...(record.mode === undefined ? {} : { mode: record.mode as StoryAction['mode'] }),
+    ...(record.focusSourceTexts === undefined ? {} : { focusSourceTexts: readTextList(record, 'focusSourceTexts', 0, 3) }),
     ...(record.originCurveBeatIds === undefined ? {} : { originCurveBeatIds: readIdentifierList(record, 'originCurveBeatIds') }),
   }
 }
@@ -1055,7 +1098,14 @@ function parseStoryTransition(value: unknown): StoryTransition {
     consumedFacts: readIdentifierList(record, 'consumedFacts'),
     changedFacts: parseFactChanges(record.changedFacts),
     introducedFacts: parseIntroducedFacts(record.introducedFacts),
+    ...(record.authorConfirmation === undefined ? {} : { authorConfirmation: parseExecutedResultReceipt(record.authorConfirmation) }),
   }
+}
+
+function parseExecutedResultReceipt(value: unknown): NonNullable<StoryTransition['authorConfirmation']> {
+  const record = expectRecord(value)
+  return { proposalId: readIdentifier(record, 'proposalId'), turnId: readIdentifier(record, 'turnId'),
+    actionText: readText(record, 'actionText'), resultText: readText(record, 'resultText'), confirmedAt: readTimestamp(record, 'confirmedAt') }
 }
 
 function requireNull(value: unknown): null {
@@ -1266,6 +1316,50 @@ function readDesignSlot(record: Record<string, unknown>, field: string): string 
 }
 
 /** Response shape checking only. Authority and acceptance are server validated. */
+function parsePreparation(value: unknown): import('../../../shared/story-preparation.js').StoryPreparation {
+  const p = expectRecord(value)
+  if (p.protocol !== 1 || !['needs-review', 'accepted-design'].includes(String(p.status)) || p.executed !== false) throwInvalidResponse()
+  for (const key of ['sources', 'material', 'candidates', 'questions', 'acceptedCandidateIds']) if (!Array.isArray(p[key])) throwInvalidResponse()
+  const sources = (p.sources as unknown[]).map(v => {
+    const s = expectRecord(v)
+    return { id: readIdentifier(s, 'id'), text: readText(s, 'text') }
+  })
+  const material = (p.material as unknown[]).map(v => {
+    const m = expectRecord(v)
+    if (!['fact', 'condition', 'goal', 'unknown'].includes(String(m.role))) throwInvalidResponse()
+    return { id: readIdentifier(m, 'id'), role: m.role as 'fact' | 'condition' | 'goal' | 'unknown', sourceId: readIdentifier(m, 'sourceId'), quote: readText(m, 'quote') }
+  })
+  const questions = (p.questions as unknown[]).map(v => {
+    const q = expectRecord(v)
+    return { id: readIdentifier(q, 'id'), question: readText(q, 'question'), materialIds: readIdentifierList(q, 'materialIds') }
+  })
+  const parseCandidates = (items: unknown[]) => items.map(v => {
+    const c = expectRecord(v)
+    return { id: readIdentifier(c, 'id'), action: readText(c, 'action'), possibleResult: readText(c, 'possibleResult'),
+      materialIds: readIdentifierList(c, 'materialIds'), preconditionIds: readIdentifierList(c, 'preconditionIds'),
+      resultBasisIds: readIdentifierList(c, 'resultBasisIds'), unknownIds: readIdentifierList(c, 'unknownIds') }
+  })
+  const candidates = parseCandidates(p.candidates as unknown[])
+  let authorReview: import('../../../shared/story-preparation.js').StoryPreparationReview | undefined
+  if (p.authorReview !== undefined) {
+    const review = expectRecord(p.authorReview)
+    if (!Array.isArray(review.candidates)) throwInvalidResponse()
+    authorReview = { originalText: readText(review, 'originalText'), candidates: review.candidates.map(v => {
+      const c = expectRecord(v)
+      return { id: readIdentifier(c, 'id'), action: readText(c, 'action'), possibleResult: readText(c, 'possibleResult'), ...(c.resultBasisIds === undefined ? {} : { resultBasisIds: readIdentifierList(c, 'resultBasisIds') }) }
+    }), ...(review.supersededMaterialIds === undefined ? {} : { supersededMaterialIds: readIdentifierList(review, 'supersededMaterialIds') }),
+      ...(review.confirmedQuotes === undefined ? {} : { confirmedQuotes: readIdentifierList(review, 'confirmedQuotes') }) }
+  }
+  const supplements = p.supplements === undefined ? undefined : (Array.isArray(p.supplements) ? p.supplements : throwInvalidResponse()).map(v => {
+    const s = expectRecord(v)
+    if (!['hypothesis','observation','criterion','condition'].includes(String(s.kind)) || !['needs-review','accepted-design','rejected','keep-unknown'].includes(String(s.status))) throwInvalidResponse()
+    return { id: readIdentifier(s, 'id'), kind: s.kind as 'hypothesis'|'observation'|'criterion'|'condition', text: readText(s, 'text'), question: readText(s, 'question'), materialIds: readIdentifierList(s, 'materialIds'), status: s.status as import('../../../shared/story-preparation.js').StoryPreparationSupplement['status'], ...(s.authorText === undefined ? {} : { authorText: readVerbatimAnswer(s.authorText) }) }
+  })
+  const originalCandidates = p.originalCandidates === undefined ? undefined : parseCandidates(Array.isArray(p.originalCandidates) ? p.originalCandidates : throwInvalidResponse())
+  return { protocol: 1, status: p.status as 'needs-review' | 'accepted-design', executed: false,
+    sources, material, questions, candidates, acceptedCandidateIds: readIdentifierList(p, 'acceptedCandidateIds'), ...(authorReview ? { authorReview } : {}), ...(supplements ? { supplements } : {}), ...(originalCandidates ? { originalCandidates } : {}) }
+}
+
 function parseReasoning(value: unknown): StoryReasoningProposal {
   const r = expectRecord(value)
   if (r.protocol !== 1 || !['initial-design','edit-preview','action-candidates'].includes(String(r.stage))

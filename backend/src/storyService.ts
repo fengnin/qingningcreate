@@ -1,6 +1,8 @@
 import { AppError, requestQwenJson, summarizeModelResponse, withModelDiagnostic } from './qwen.js'
 import { createNarrativeStateMachine, type StoryValidationContext } from './storyState.js'
 import { formatStoryRealityContractContext, storyRealityContractInstruction } from './storyRealityContract.js'
+import { getAuthorDecisionMaterial } from './storyDecision.js'
+import { createStoryProposalContext, storyProposalGenerationInstruction } from './storyProposalContext.js'
 import {
   confirmProvisionalCurve,
   generateProvisionalCurve,
@@ -9,8 +11,8 @@ import {
   regenerateAffectedCurveBeats,
   previewAffectedCurveBeats,
   resolveAffectedCurveBeats,
-  getDependentBeatIds,
   regenerateCurveBeat,
+  getDependentBeatIds,
   previewClarificationCurveBeat,
   rejectCurveBeat,
   updateCurveSourceFactDisposition,
@@ -26,6 +28,8 @@ import {
   reviewClarificationReplacement,
 } from './storyClarification.js'
 import { randomUUID } from 'node:crypto'
+import { generateStoryPreparation, generateCurveFromPreparation, parsePreparationReview } from './storyPreparation.js'
+import type { StoryPreparationAcceptanceRequest, StoryPreparationSupplementRequest } from '../../shared/story-preparation-request.js'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -802,7 +806,8 @@ export function parseDirectionRequest(body: unknown): StoryDirectionsRequest {
 }
 
 export function parseStoryCoCreationStartRequest(body: unknown): StoryCoCreationStartRequest {
-  const record = parseRequestRecord(body, ['idea', 'brief', 'operationId', 'storyId', 'revision', 'versionMode'])
+  const record = parseRequestRecord(body, ['idea', 'brief', 'operationId', 'storyId', 'revision', 'versionMode', 'generationMode'])
+  if (record.generationMode !== undefined && record.generationMode !== 'review-actions') throw new AppError('生成阶段不正确。', 400, 'INVALID_REQUEST')
   const operationId = readOptionalIdentifier(record, 'operationId')
   const storyId = readOptionalIdentifier(record, 'storyId')
   const revision = readOptionalNonNegativeInteger(record, 'revision')
@@ -818,6 +823,7 @@ export function parseStoryCoCreationStartRequest(body: unknown): StoryCoCreation
   return {
     idea: readText(record, 'idea', '请先写下一个故事想法。', maximumStoryIdeaLength, invalidRequestContext),
     brief: parseCreativeBrief(record.brief),
+    ...(record.generationMode === 'review-actions' ? { generationMode: 'review-actions' as const } : {}),
     ...(operationId ? { operationId } : {}),
     ...(storyId ? { storyId, revision, ...(versionMode ? { versionMode } : {}) } : {}),
   }
@@ -982,7 +988,7 @@ export function parseStoryActionProposalRequest(body: unknown): StoryActionPropo
 }
 
 export function parseStoryActionProposalConfirmRequest(body: unknown): StoryActionProposalConfirmRequest {
-  const record = parseRequestRecord(body, ['storyId', 'revision', 'proposalId', 'mode'])
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'proposalId', 'mode', 'authorConfirmation'])
   if (record.mode !== 'continue' && record.mode !== 'conclude') {
     throw new AppError('请确认这次角色行动后是继续发展还是开始收束。', 400, 'INVALID_REQUEST')
   }
@@ -990,7 +996,17 @@ export function parseStoryActionProposalConfirmRequest(body: unknown): StoryActi
     ...parseStorySessionReference(record),
     proposalId: readIdentifier(record, 'proposalId', '当前角色行动提案不存在，请刷新后重试。', invalidRequestContext),
     mode: record.mode,
+    ...(record.authorConfirmation === undefined ? {} : { authorConfirmation: parseExecutedResultInput(record.authorConfirmation) }),
   }
+}
+
+function parseExecutedResultInput(value: unknown) {
+  const record = expectRecord(value, '请明确确认实际行动与实际结果。', invalidRequestContext)
+  if (Object.keys(record).some((key) => !['actionText', 'resultText'].includes(key))) {
+    throw new AppError('执行确认只接受作者的行动与结果原文，不接受模型凭证。', 400, 'INVALID_REQUEST')
+  }
+  return { actionText: readText(record, 'actionText', '请确认实际行动原文。', 180, invalidRequestContext),
+    resultText: readText(record, 'resultText', '请写下实际结果；不要把预测当成已经发生。', 180, invalidRequestContext) }
 }
 
 function parseConflictCoreContext(value: unknown): StoryConflictCoreContext | undefined {
@@ -2555,7 +2571,10 @@ async function startStoryCoCreationInternal(
     }
   }
 
-  const directSeed = createDirectCoCreationSeed(request.idea)
+  const directSeed = request.generationMode === 'review-actions'
+    // Compatibility display placeholder, not an extracted person or ledger fact.
+    ? { subject: '主角', activeSituation: request.idea, lockedGoal: null, lockedFacts: [], worldMode: 'realistic-default' as const, expansionScope: 'keep-scale' as const, unknowns: [] }
+    : createDirectCoCreationSeed(request.idea)
   const resolved = directSeed
     ? { seed: directSeed }
     : await resolveStorySeed({
@@ -2570,15 +2589,18 @@ async function startStoryCoCreationInternal(
   // Initial protocol 1 can express compatible conditions or review questions.
   // The legacy keyword conflict gate must not reject before that generation.
   // Keep the existing bare-premise recovery boundary until question UI migration.
-  if (!isExplicitLocalModelMode() && (!seed.lockedGoal?.trim() || request.idea.trim().length < 12)) {
+  if (request.generationMode !== 'review-actions' && !isExplicitLocalModelMode() && (!seed.lockedGoal?.trim() || request.idea.trim().length < 12)) {
     throw createAuthorDetailRequiredError()
   }
   const excludedProposalDetails = existingSession
     ? getRejectedCurveProposalDetails(existingSession)
     : []
-  const curve = await generateProvisionalCurve(request.idea, seed, request.brief, excludedProposalDetails)
+  const curve = request.generationMode === 'review-actions'
+    ? await generateStoryPreparation(request.idea, request.brief)
+    : await generateProvisionalCurve(request.idea, seed, request.brief, excludedProposalDetails)
   if (existingSession) {
-    const session = getStorySession(request.storyId!, request.revision)
+    const current = getStorySession(request.storyId!, request.revision)
+    const session = request.generationMode === 'review-actions' ? structuredClone(current) : current
 
     syncActiveCurveVersion(session)
     const activeVersion = session.curveVersions?.find((version) => version.id === session.activeCurveVersionId)
@@ -2600,15 +2622,20 @@ async function startStoryCoCreationInternal(
       session.activeCurveVersionId = version.id
     }
     clearCoCreationStoryPath(session)
-    commitStorySessionChanges(session)
-    const response = createCoCreationResponse(session, curve)
+    const saved = request.generationMode === 'review-actions' ? commitClarificationSessionChanges(current, session) : (commitStorySessionChanges(session), session)
+    const response = createCoCreationResponse(saved, curve)
     if (request.operationId) writeCachedStoryOperation(completedCoCreationStarts, getCoCreationStartOperationKey(request), response)
     return response
   }
 
   const session = createCoCreationSession(request.idea, seed, curve)
-  storySessions.set(session.id, session)
-  persistStorySessions()
+  if (request.generationMode === 'review-actions') {
+    persistStorySessions(session)
+    storySessions.set(session.id, session)
+  } else {
+    storySessions.set(session.id, session)
+    persistStorySessions()
+  }
 
   const response = createCoCreationResponse(session, curve)
   if (request.operationId) writeCachedStoryOperation(completedCoCreationStarts, getCoCreationStartOperationKey(request), response)
@@ -2617,6 +2644,7 @@ async function startStoryCoCreationInternal(
 
 function getCoCreationStartOperationKey(request: StoryCoCreationStartRequest): string {
   return JSON.stringify({
+    generationMode: request.generationMode ?? null,
     operationId: request.operationId ?? null,
     storyId: request.storyId ?? null,
     revision: request.revision ?? null,
@@ -2628,6 +2656,7 @@ function getCoCreationStartOperationKey(request: StoryCoCreationStartRequest): s
 
 function getCoCreationSemanticOperationKey(request: StoryCoCreationStartRequest): string {
   return JSON.stringify({
+    generationMode: request.generationMode ?? null,
     storyId: request.storyId ?? null,
     revision: request.revision ?? null,
     versionMode: request.versionMode ?? null,
@@ -2638,6 +2667,7 @@ function getCoCreationSemanticOperationKey(request: StoryCoCreationStartRequest)
 
 function getCoCreationRequestFingerprint(request: StoryCoCreationStartRequest): string {
   return JSON.stringify({
+    generationMode: request.generationMode ?? null,
     idea: request.idea,
     brief: request.brief,
     storyId: request.storyId ?? null,
@@ -3009,6 +3039,47 @@ export async function updateSessionCurveClarification(
 }
 
 /** Publish the detached draft only after its whole session has been saved. */
+export function parseStoryPreparationAcceptanceRequest(body: unknown): StoryPreparationAcceptanceRequest {
+  const r = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'acceptedCandidateIds', 'authorReview'])
+  const acceptedCandidateIds = readDesignReviewIds(r.acceptedCandidateIds)
+  return { ...parseStorySessionReference(r), curveId: readIdentifier(r, 'curveId', '请选择当前结构。', invalidRequestContext), acceptedCandidateIds,
+    ...(r.authorReview === undefined ? {} : { authorReview: parsePreparationReview(r.authorReview, acceptedCandidateIds) }) }
+}
+
+export async function acceptSessionPreparation(request: StoryPreparationAcceptanceRequest): Promise<StoryCurveMutationResponse> {
+  const current = getStorySession(request.storyId, request.revision)
+  const curve = requireDraftCurve(current, request.curveId)
+  const mapped = await generateCurveFromPreparation(curve, request.acceptedCandidateIds, request.authorReview)
+  assertStorySessionRevision(current, request.revision)
+  const next = structuredClone(current)
+  next.provisionalCurve = mapped
+  next.seed = { ...next.seed, lockedGoal: mapped.reasoning?.goal?.text ?? null }
+  const saved = commitClarificationSessionChanges(current, next)
+  return createCurveMutationResponse(saved, { curve: mapped, affectedBeatIds: mapped.beats.map(b => b.id) })
+}
+
+export function parseStoryPreparationSupplementRequest(body: unknown): StoryPreparationSupplementRequest {
+  const r = parseRequestRecord(body, ['storyId','revision','curveId','supplementId','decision','authorText'])
+  if (!['accepted-design','rejected','keep-unknown'].includes(String(r.decision)) || typeof r.authorText !== 'string' || !r.authorText.trim() || r.authorText.length > 4000) throw new AppError('请独立审阅设计并保留作者原文。', 400, 'INVALID_REQUEST')
+  return { ...parseStorySessionReference(r), curveId: readIdentifier(r, 'curveId', '请选择当前草案。', invalidRequestContext), supplementId: readIdentifier(r, 'supplementId', '请选择待审新增设计。', invalidRequestContext), decision: r.decision as StoryPreparationSupplementRequest['decision'], authorText: r.authorText }
+}
+
+export async function reviewSessionPreparationSupplement(request: StoryPreparationSupplementRequest): Promise<StoryCurveMutationResponse> {
+  const current = getStorySession(request.storyId, request.revision)
+  const curve = requireDraftCurve(current, request.curveId)
+  if (current.confirmedCurve || current.currentTurn || current.history.length) throw new AppError('已确认路径不能原地改写，请显式建立新版本。', 409, 'STORY_CURVE_NOT_DRAFT')
+  const next = structuredClone(current), draft = next.provisionalCurve!
+  const supplement = draft.preparation?.supplements?.find(s => s.id === request.supplementId)
+  if (!supplement) throw new AppError('新增设计不存在。', 400, 'INVALID_REQUEST')
+  if (supplement.status !== 'needs-review') throw new AppError('该设计已有审阅决定，请建立新版本修订。', 409, 'STORY_PREPARATION_ALREADY_ACCEPTED')
+  supplement.status = request.decision
+  supplement.authorText = request.authorText
+  // Acceptance is a future design receipt only. No remapping or facts change.
+  draft.updatedAt = Date.now()
+  const saved = commitClarificationSessionChanges(current, next)
+  return createCurveMutationResponse(saved, { curve: saved.provisionalCurve!, affectedBeatIds: [] })
+}
+
 function commitClarificationSessionChanges(current: StorySessionRecord, next: StorySessionRecord): StorySessionRecord {
   assertStorySessionRevision(current, next.revision)
   syncActiveCurveVersion(next)
@@ -3088,21 +3159,13 @@ export async function startSessionStorySpineFromCurve(
     history: [],
   })
   assertStorySessionRevision(session, request.revision)
-  session.seed = foundation.seed
-  session.selectedPredicament = foundation.predicament
-  session.selectedApproach = foundation.approach
-  session.selectedHeadTail = foundation.headTail
-  session.state = narrativeState.createInitialState(foundation.seed, foundation.predicament)
-  session.history = []
-  session.currentTurn = turn
-  commitStorySessionChanges(session)
-  return {
-    ...createStoryTurnResponse(session, turn),
-    seed: foundation.seed,
-    predicament: foundation.predicament,
-    approach: foundation.approach,
-    headTail: foundation.headTail,
-  }
+  const saved = commitClarificationSessionChanges(session, {
+    ...structuredClone(session), seed: foundation.seed, selectedPredicament: foundation.predicament,
+    selectedApproach: foundation.approach, selectedHeadTail: foundation.headTail,
+    state: narrativeState.createInitialState(foundation.seed, foundation.predicament), history: [], currentTurn: turn,
+  })
+  return { ...createStoryTurnResponse(saved, turn), seed: foundation.seed,
+    predicament: foundation.predicament, approach: foundation.approach, headTail: foundation.headTail }
 }
 
 export async function applySessionAuthorInstruction(
@@ -3171,6 +3234,14 @@ export async function createSessionStoryActionProposal(
   }
 
   const proposal = createGroundedActionProposal(session, currentTurn, state, request.action, predicament, approach)
+  if (session.workflow === 'co-creation') {
+    const candidate = makeReviewOnlyOption(proposal.option)
+    const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), pendingActionProposal: {
+      ...proposal, option: candidate, immediateConsequence: candidate.immediateConsequence,
+      requiresExecutedResultConfirmation: true,
+    } })
+    return { storyId: saved.id, revision: saved.revision, proposal: saved.pendingActionProposal! }
+  }
   session.pendingActionProposal = proposal
   commitStorySessionChanges(session)
   return { storyId: session.id, revision: session.revision, proposal }
@@ -3196,6 +3267,23 @@ export async function confirmSessionStoryActionProposal(
     turnId: currentTurn.id,
     optionId: proposal.option.id,
   }, currentTurn)
+  if (session.workflow === 'co-creation') {
+    if (request.mode === 'conclude') throw new AppError('收束结果尚未单独审阅，不能自动写入结局。', 409, 'STORY_RESULT_REVIEW_REQUIRED')
+    if (!request.authorConfirmation) throw new AppError('提案尚未执行。请由作者明确确认实际行动和结果；选择关注点或接受候选不等于执行。',
+      409, 'STORY_EXECUTED_RESULT_CONFIRMATION_REQUIRED')
+    const answer = parseExecutedResultInput(request.authorConfirmation)
+    if (answer.actionText !== proposal.action) throw new AppError('执行行动与当前提案不一致，请先重新提出行动供审阅。', 409, 'STORY_ACTION_CONFIRMATION_CONFLICT')
+    const candidate = makeReviewOnlyOption(proposal.option)
+    const actionId = `${candidate.id}-executed-${randomUUID()}`
+    const executed: StoryTurnOption = { ...candidate, action: answer.actionText, immediateConsequence: answer.resultText,
+      narrativeAction: { id: actionId, intent: answer.actionText, mode: 'executed', source: 'user-choice', preconditions: [], effects: [] },
+      transition: { actionId, consumedFacts: [], changedFacts: [], introducedFacts: [{ id: `fact-author-result-${randomUUID()}`,
+        statement: answer.resultText, source: 'confirmed-action', mutability: 'changeable' }],
+        authorConfirmation: { proposalId: proposal.id, turnId: currentTurn.id, ...answer, confirmedAt: Date.now() } },
+    }
+    delete executed.proposal
+    return advanceSessionStoryTurn(session, request.revision, request.mode, currentTurn, executed, predicament, approach)
+  }
   return advanceSessionStoryTurn(
     session,
     request.revision,
@@ -3205,6 +3293,18 @@ export async function confirmSessionStoryActionProposal(
     predicament,
     approach,
   )
+}
+
+function makeReviewOnlyOption(option: StoryTurnOption): StoryTurnOption {
+  return { ...structuredClone(option),
+    immediateConsequence: '尚未执行；这是一项待审阅行动，选择它不确认任何结果。',
+    narrativeAction: { ...option.narrativeAction, mode: 'candidate', preconditions: [], effects: [] },
+    transition: { actionId: option.narrativeAction.id, consumedFacts: [], changedFacts: [], introducedFacts: [] },
+    proposal: option.proposal ?? { status: 'needs-review', sourceFactIds: [], questions: [],
+      causalClaims: [{ statement: option.immediateConsequence, sourceFactIds: [] },
+        ...option.transition.changedFacts.map((fact) => ({ statement: fact.statement, sourceFactIds: [fact.factId] })),
+        ...option.transition.introducedFacts.map((fact) => ({ statement: fact.statement, sourceFactIds: [] }))] },
+  }
 }
 
 function createGroundedActionProposal(
@@ -5340,6 +5440,10 @@ export async function generateStoryTurn(request: StoryTurnRequest): Promise<Stor
   let repairMessage: string | undefined
   let lastFailure: AppError | undefined
   const state = createNarrativeStateForRequest(request)
+  if (request.confirmedCurve?.preparation && request.mode === 'start') return createPreparedActionTurn(request)
+  if (request.confirmedCurve && request.mode === 'continue') {
+    return generateCoCreationCandidateTurn(request, state)
+  }
   const maximumAttempts = usesSelectedSystemDraftDirection(request.seed)
     ? 1
     : maxStoryTurnGenerationAttempts
@@ -5362,6 +5466,14 @@ export async function generateStoryTurn(request: StoryTurnRequest): Promise<Stor
         maxTokens: getStoryTurnMaxTokens(request, outputFormat),
         diagnosticStage: 'story-turn',
       }, '模型没有返回下一段可继续发展的故事情境，请重试。')
+      if (isConfirmedOpeningContinuation(request) && modelRecord.needsAuthorDetail !== undefined) {
+        if (Object.keys(modelRecord).length !== 1) {
+          throw new AppError('补充事实请求不能同时返回候选回合。', 502, 'INVALID_MODEL_OUTPUT')
+        }
+        const questions = readRequiredTextList(modelRecord, 'needsAuthorDetail', 1, 3, 140,
+          '补充作者事实的问题格式不正确。', invalidModelOutputContext)
+        throw new AppError(`继续前需要作者补充事实：${questions.join('；')}。当前选择和 revision 未提交。`, 422, 'STORY_TURN_NEEDS_AUTHOR_DETAIL')
+      }
       const turn = parseModelStoryTurn(modelRecord, request, state, outputFormat)
       parsedTurn = turn
       validateSystemDraftStoryTurnContinuation(request, turn)
@@ -5438,6 +5550,104 @@ export async function generateStoryTurn(request: StoryTurnRequest): Promise<Stor
   )
 }
 
+// This contract validates the shape of a proposal, not its causal truth. Model
+// text never supplies narrative transitions or author confirmation receipts.
+function createPreparedActionTurn(request: StoryTurnRequest): StoryTurn {
+  const p = request.confirmedCurve!.preparation!
+  const options: StoryTurnOption[] = p.candidates.filter(c => p.acceptedCandidateIds.includes(c.id)).map((c, index) => {
+    const id = `turn-1-option-${index + 1}`, actionId = `${id}-action`
+    return { id, label: `审阅行动 ${index + 1}`, action: c.action, immediateConsequence: '尚未执行；点击仅打开行动审阅。', laterEffect: c.possibleResult,
+      narrativeAction: { id: actionId, intent: c.action, source: 'generated', mode: 'candidate', preconditions: [], effects: [] },
+      transition: { actionId, consumedFacts: [], changedFacts: [], introducedFacts: [] },
+      proposal: { status: 'needs-review', sourceFactIds: [...c.materialIds], causalClaims: [], questions: [] } }
+  })
+  return { id: 'turn-1', phase: 'opening', presentation: 'candidate-actions', node: { id: 'node-1', title: '已接受的未来行动', event: request.predicament.immediateSituation,
+    purpose: '展示作者接受的行动，尚未确认执行或结果。', goalState: 'trying' }, conflict: { nodeId: 'node-1', conflict: '未声明冲突。', action: '只审阅未来行动。', consequence: '未确认实际结果。', intensity: 1, anchor: '行动审阅' },
+    question: '审阅行动；实际执行后另行确认结果。', options, narrativeAction: null, transition: null, canConclude: false, isConclusion: false }
+}
+
+async function generateCoCreationCandidateTurn(request: StoryTurnRequest, state: StoryNarrativeState): Promise<StoryTurn> {
+  const authorTexts = getConfirmedCurveOpeningAuthorSourceTexts(request)
+  const selected = request.history.at(-1)?.selectedOption
+  const focus = state.focus?.sourceTexts ?? selected?.narrativeAction.focusSourceTexts ?? []
+  const context = createStoryProposalContext(request.seed, request.confirmedCurve!, request.history, focus)
+  const { sourceFacts } = context
+  const sourceIds = new Set(sourceFacts.map((fact) => fact.id))
+  let repair: string | undefined
+  for (let attempt = 0; attempt < maxStoryTurnGenerationAttempts; attempt++) {
+    try {
+      const record = await requestModelRecord({
+        systemPrompt: storyProposalGenerationInstruction,
+        userPrompt: JSON.stringify({ ...context,
+          ...(repair ? { repair } : {}),
+          schema: { candidatePlan: { options: [1, 2, 3].map(() => ({
+            label: '行动短名称', action: '待作者审阅的具体行动', proposedConsequence: '待审阅的可能承接',
+            sourceFactIds: ['引用sourceFacts中的ID，不等于因果证据'],
+            causalClaims: [{ statement: '需要作者核对的前提或因果', sourceFactIds: ['材料引用ID'] }],
+            questions: ['尚未确定时如实询问作者，不补答案'],
+          })) } },
+        }), temperature: attempt === 0 ? 0.45 : 0.3, maxTokens: 2_400, diagnosticStage: 'candidate-action-preview',
+      }, '模型没有返回待审阅行动提案。')
+      assertProposalKeys(record, ['candidatePlan'])
+      const plan = expectRecord(record.candidatePlan, '候选行动缺少 candidatePlan。', invalidModelOutputContext)
+      assertProposalKeys(plan, ['options'])
+      if (!Array.isArray(plan.options) || plan.options.length !== 3) throw new AppError('候选行动必须有三项待审提案。', 502, 'INVALID_MODEL_OUTPUT')
+      const turnId = `turn-${request.history.length + 1}`, nodeId = `node-${request.history.length + 1}`
+      const refs = (value: unknown) => {
+        if (!Array.isArray(value) || value.length > sourceFacts.length
+          || value.some((id) => typeof id !== 'string' || !sourceIds.has(id)) || new Set(value).size !== value.length) {
+          throw new AppError('待审提案引用了不存在或重复的作者材料 ID。', 502, 'INVALID_MODEL_OUTPUT')
+        }
+        return value as string[]
+      }
+      const options: StoryTurnOption[] = plan.options.map((value, index) => {
+        const raw = expectRecord(value, '候选行动结构不完整。', invalidModelOutputContext)
+        assertProposalKeys(raw, ['label', 'action', 'proposedConsequence', 'sourceFactIds', 'causalClaims', 'questions'])
+        const sourceFactIds = refs(raw.sourceFactIds)
+        if (!Array.isArray(raw.causalClaims) || raw.causalClaims.length > 4) throw new AppError('待审因果声明结构不完整。', 502, 'INVALID_MODEL_OUTPUT')
+        const causalClaims = raw.causalClaims.map((value) => {
+          const claim = expectRecord(value, '待审因果声明结构不完整。', invalidModelOutputContext)
+          assertProposalKeys(claim, ['statement', 'sourceFactIds'])
+          return { statement: readText(claim, 'statement', '待审因果声明缺少内容。', 180, invalidModelOutputContext), sourceFactIds: refs(claim.sourceFactIds) }
+        })
+        const id = `${turnId}-option-${index + 1}`, actionId = `${id}-action`
+        const action = readText(raw, 'action', '候选行动缺少内容。', 180, invalidModelOutputContext)
+        return { id, label: readText(raw, 'label', '候选行动缺少名称。', 32, invalidModelOutputContext), action,
+          immediateConsequence: '尚未执行；选择后只打开提案审阅，不写入故事事实。',
+          laterEffect: readText(raw, 'proposedConsequence', '候选行动缺少待审承接。', 180, invalidModelOutputContext),
+          narrativeAction: { id: actionId, intent: action, source: 'generated', mode: 'candidate', preconditions: [], effects: [] },
+          transition: { actionId, consumedFacts: [], changedFacts: [], introducedFacts: [] },
+          proposal: { status: 'needs-review', sourceFactIds, causalClaims,
+            questions: readRequiredTextList(raw, 'questions', 0, 4, 140, '待审问题结构不完整。', invalidModelOutputContext) },
+        }
+      })
+      ensureUniqueValues(options.map((option) => option.action), '候选行动不能逐字重复。', invalidModelOutputContext)
+      const event = focus.length ? focus.map((text) => `「${text}」`).join('；') : sourceFacts.slice(0, 3).map((fact) => `「${fact.text}」`).join('；')
+      return { id: turnId, phase: 'development', presentation: 'candidate-actions',
+        node: { id: nodeId, title: '审阅下一步行动', event, purpose: '当前只展示作者材料和候选行动，新增因果仍待作者审阅。', goalState: 'trying' },
+        conflict: { nodeId, conflict: '下列行动的条件、约束与代价分别待审，不把并列事实当作必然冲突。',
+          action: '选择一项提案进行审阅；只有另行确认实际行动和结果才能进入事实状态。',
+          consequence: '当前没有新增已执行结果。', intensity: 1, anchor: '提案审阅' },
+        question: '你想先审阅哪项候选行动？', options, narrativeAction: null, transition: null, canConclude: false, isConclusion: false }
+    } catch (error) {
+      if (!isRetryableStoryTurnError(error)) throw error
+      repair = describeStoryTurnValidationFailure(error)
+      // Proposal shape errors are not evidence about missing author facts.
+      repair = error instanceof AppError ? error.message : '待审提案结构不完整，请按 candidatePlan JSON 合同重试。'
+      console.warn(`Candidate preview rejected (attempt=${attempt + 1}): ${repair}`)
+    }
+  }
+  if (isExplicitLocalModelMode()) {
+    const texts = authorTexts.slice(0, 3)
+    return createConfirmedCurveOpeningPlanTurn(request, `turn-${request.history.length + 1}`, texts)
+  }
+  throw new AppError(`模型没有返回可审阅的行动提案（${repair ?? '提案结构不完整'}）；不是作者资料不足的判定。`, 502, 'STORY_TURN_RETRY_EXHAUSTED')
+}
+
+function assertProposalKeys(record: Record<string, unknown>, keys: string[]) {
+  if (Object.keys(record).some((key) => !keys.includes(key))) throw new AppError('待审提案不能携带事实变更、执行结果或模型确认凭证。', 502, 'INVALID_MODEL_OUTPUT')
+}
+
 async function generateStoryTurnOptionRefinement(
   request: StoryTurnOptionRefinementGenerationRequest,
 ): Promise<StoryTurnOption> {
@@ -5478,7 +5688,124 @@ function getStoryTurnOutputFormat(request: Pick<StoryTurnRequest, 'confirmedCurv
   // the implicit, no-new-fact action records. Legacy turns still get the
   // detailed contract on their first attempt.
   if (request.confirmedCurve && request.mode === 'start' && request.history.length === 0) return 'compact'
+  // The opening records a focus, not an executed action. Keep the next turn's
+  // declared transitions visible on every attempt instead of dropping them.
+  if (isConfirmedOpeningContinuation(request)) return 'detailed'
   return attempt === 0 ? 'detailed' : 'compact'
+}
+
+function isConfirmedOpeningContinuation(
+  request: Pick<StoryTurnRequest, 'confirmedCurve' | 'mode' | 'history'>,
+): boolean {
+  if (!request.confirmedCurve || request.mode !== 'continue' || request.history.length !== 1) return false
+  const first = request.history[0]!
+  const { narrativeAction: action, transition } = first.selectedOption
+  return first.phase === 'opening' && action.source === 'generated'
+    && action.preconditions.length === 0 && action.effects.length === 0
+    && transition.consumedFacts.length === 0 && transition.changedFacts.length === 0 && transition.introducedFacts.length === 0
+}
+
+function getOpeningContinuationDecisions(request: StoryTurnRequest) {
+  const decision = getOpeningContinuationDecision(request)
+  if (!decision) return undefined
+  const subject = request.seed.subject || '主角'
+  return [
+    { kind: 'act', statement: `${subject}决定${decision.action}。` },
+    { kind: 'keep', statement: `${subject}决定${decision.alternative}。` },
+    { kind: 'defer', statement: `${subject}暂缓决定是否${decision.action}。` },
+  ]
+}
+
+function getOpeningContinuationFacts(request: StoryTurnRequest, state: StoryNarrativeState) {
+  const authorFacts = getConfirmedCurveOpeningAuthorSourceTexts(request)
+  return state.facts.filter((fact) => authorFacts.includes(fact.statement))
+}
+
+function validateOpeningContinuationDecisions(
+  request: StoryTurnRequest, state: StoryNarrativeState, record: Record<string, unknown>, turn: StoryTurn,
+) {
+  const allowedFactIds = new Set(getOpeningContinuationFacts(request, state).map((fact) => fact.id))
+  const decisions = getOpeningContinuationDecisions(request)
+  const rawTurn = expectRecord(record.turn ?? record, '第二回合结构不正确。', invalidModelOutputContext)
+  const rawOptions = rawTurn.options as unknown[]
+  const seen = new Set<string>()
+  turn.options.forEach((option, index) => {
+    const action = option.narrativeAction, transition = option.transition
+    if ([...action.preconditions, ...transition.consumedFacts].some((id) => !allowedFactIds.has(id))) {
+      throw new AppError('第二回合引用了作者原文以外的事实，旧模板不能作为行动前提。', 502, 'INVALID_MODEL_OUTPUT')
+    }
+    if (!decisions) return
+    const raw = expectRecord(rawOptions[index], '第二回合选项结构不正确。', invalidModelOutputContext)
+    const decision = decisions.find((candidate) => candidate.kind === raw.decisionKind)
+    if (!decision || seen.has(decision.kind) || option.action !== decision.statement
+      || action.intent !== decision.statement || option.immediateConsequence !== decision.statement
+      || action.effects.length || transition.changedFacts.length || transition.introducedFacts.length !== 1
+      || transition.introducedFacts[0]!.statement !== decision.statement) {
+      throw new AppError('第二回合只能提出作者已写明行动的决定、保留或暂缓；不得补解法或把决定写成已经执行的结果。',
+        502, 'INVALID_MODEL_OUTPUT')
+    }
+    seen.add(decision.kind)
+  })
+}
+
+async function reviewConfirmedOpeningContinuation(request: StoryTurnRequest, turn: StoryTurn) {
+  const authorFacts = getConfirmedCurveOpeningAuthorSourceTexts(request).map((text, index) => ({ id: `author-${index + 1}`, text }))
+  const claims = [
+    { id: 'scene', role: 'current-scene', content: { event: turn.node.event, purpose: turn.node.purpose } },
+    { id: 'conflict', role: 'pending-conflict', content: turn.conflict },
+    { id: 'question', role: 'question', content: turn.question },
+    ...turn.options.map((option, index) => ({ id: `choice-${index + 1}`, role: 'unselected-option',
+      content: { label: option.label, action: option.action, immediateConsequence: option.immediateConsequence,
+        laterEffect: option.laterEffect, proposedDecision: option.narrativeAction.intent,
+        conditionalNewFacts: option.transition.introducedFacts.map((fact) => fact.statement) } })),
+  ]
+  const review = await requestModelRecord({
+    systemPrompt: confirmedOpeningContinuationReviewPrompt,
+    userPrompt: JSON.stringify({ authorFacts,
+      authorDecision: getOpeningContinuationDecision(request),
+      allowedDecisions: getOpeningContinuationDecisions(request),
+      selectedFocus: request.history[0]!.selectedOption, claims }),
+    temperature: 0, maxTokens: 1_600, diagnosticStage: 'opening-continuation-review',
+  }, '第二回合的事实核对没有返回有效结果。')
+  if (typeof review.continuesSelectedFocus !== 'boolean'
+    || typeof review.distinctChoices !== 'boolean' || !Array.isArray(review.checks) || review.checks.length !== claims.length
+    || !Array.isArray(review.missingAuthorDetails)) {
+    throw new AppError('第二回合的事实核对格式不正确。', 502, 'INVALID_MODEL_OUTPUT')
+  }
+  const checks = review.checks.map((value) => {
+    const check = expectRecord(value, '第二回合的事实核对格式不正确。', invalidModelOutputContext)
+    const id = readIdentifier(check, 'id', '事实核对缺少字段 ID。', invalidModelOutputContext)
+    const sourceIds = readIdentifierList(check, 'sourceIds', 0, authorFacts.length,
+      '事实核对缺少作者来源。', invalidModelOutputContext)
+    if (!claims.some((claim) => claim.id === id) || !['supported', 'unsupported'].includes(String(check.verdict))
+      || sourceIds.some((sourceId) => !authorFacts.some((fact) => fact.id === sourceId))
+      || (check.verdict === 'supported' && !sourceIds.length)) {
+      throw new AppError('事实核对必须逐项说明作者来源，不能默认判为通过。', 502, 'INVALID_MODEL_OUTPUT')
+    }
+    return { id, verdict: check.verdict, reason: readText(check, 'reason', '事实核对缺少理由。', 240, invalidModelOutputContext) }
+  })
+  ensureUniqueValues(checks.map((check) => check.id), '事实核对遗漏或重复了字段。', invalidModelOutputContext)
+  const missing = readRequiredTextList(review, 'missingAuthorDetails', 0, 3, 140,
+    '第二回合的事实核对格式不正确。', invalidModelOutputContext)
+  if (missing.length) throw new AppError(`继续前需要作者补充事实：${missing.join('；')}。当前选择和 revision 未提交。`,
+    422, 'STORY_TURN_NEEDS_AUTHOR_DETAIL')
+  const unsupported = checks.filter((check) => check.verdict === 'unsupported')
+  if (!review.continuesSelectedFocus || !review.distinctChoices || unsupported.length) {
+    throw new AppError(`第二回合未通过作者事实、选项承接或选择差异核对${unsupported.length ? `：${unsupported.map((check) => `${check.id}：${check.reason}`).join('；')}` : ''}，不能写入当前路径。`, 502, 'INVALID_MODEL_OUTPUT',
+      undefined, undefined, undefined, { stage: 'opening-continuation-review',
+        reason: unsupported.length ? '候选回合依赖未确认事实' : !review.continuesSelectedFocus ? '没有承接所选首回合判断'
+          : !review.distinctChoices ? '选项没有实质差异或把约束当成另一个行动' : '内容未由作者事实支持',
+        response: summarizeModelResponse(review) })
+  }
+}
+
+function getOpeningContinuationDecision(request: StoryTurnRequest) {
+  const facts = request.confirmedCurve?.design?.sourceFacts ?? []
+  const choiceFact = facts.find((fact) => fact.disposition !== 'parked' && /(?:决定|选择|判断)\s*(?:是否|要不要)/u.test(fact.text))
+  if (!choiceFact) return undefined
+  const material = getAuthorDecisionMaterial(facts, choiceFact, choiceFact.text)
+  return { action: material.action, alternative: material.alternative,
+    source: choiceFact.text, risks: material.riskFacts.map((fact) => fact.text), costStatus: 'unconfirmed' }
 }
 
 function isConfirmedCurveFirstTurnRequest(
@@ -5807,6 +6134,25 @@ function createConfirmedCurveStoryTurnFallback(
 ): StoryTurn {
   if (request.mode === 'conclude') {
     return createSystemDraftStoryTurnFallback(request, state)
+  }
+
+  // The opening is a closed author-anchor selection in real-model mode. Keep
+  // the explicit local acceptance path on that same renderer instead of
+  // recreating a prose fallback that can leak generic claims such as
+  // “原来的安排” into the closed-vocabulary validator.
+  if (isConfirmedCurveFirstTurnRequest(request)) {
+    const authorDetailMessage = getConfirmedCurveFirstTurnAuthorDetailMessage(request)
+    if (authorDetailMessage) {
+      throw new AppError(authorDetailMessage, 422, 'STORY_TURN_NEEDS_AUTHOR_DETAIL')
+    }
+    const anchors = getConfirmedCurveOpeningAnchorPlan(request)
+    if (anchors.length !== generatedOptionCount) {
+      throw new AppError('已确认主线缺少足够的作者事实锚点，无法生成首回合。', 422, 'STORY_TURN_NEEDS_AUTHOR_DETAIL')
+    }
+    const opening = createConfirmedCurveOpeningPlanTurn(request, 'turn-1', anchors)
+    validateStoryTurnShape(opening, invalidModelOutputContext, getStoryTurnValidationMessage(false))
+    validateStoryTurnStateTransition(opening, state, getStoryTurnValidationMessage(false))
+    return opening
   }
 
   const confirmedCurve = request.confirmedCurve
@@ -6281,6 +6627,18 @@ function validateConfirmedCurveContinuationFields(
   turn?: StoryTurn,
 ) {
   if (!request.confirmedCurve) return
+
+  if (turn?.presentation === 'focus-selection') {
+    const anchors = turn.options.map((option) => option.narrativeAction.focusSourceTexts?.[0])
+    const allowed = getConfirmedCurveOpeningAnchorPlan(request)
+    if (anchors.length !== 3 || anchors.some((text) => !text || !allowed.includes(text))
+      || new Set(anchors).size !== 3
+      || JSON.stringify(turn) !== JSON.stringify(createConfirmedCurveOpeningPlanTurn(
+        request as StoryTurnRequest, turn.id, anchors as string[]))) {
+      throw new AppError('关注点首回合必须完整对应服务器选择的作者事实锚点，不接受自由文本或变更。', 502, 'INVALID_MODEL_OUTPUT')
+    }
+    return
+  }
 
   const sourceTexts = getConfirmedCurveContinuationSourceTexts(request)
   const rules = isInitialConfirmedCurveTurn(request, turn)
@@ -6941,6 +7299,9 @@ export async function generateSessionStoryTurnOptionRefinement(
   if (session.workflow === 'co-creation' && !session.confirmedCurve) {
     throw new AppError('请先确认暂定故事曲线，再调整剧情选项。', 409, 'STORY_CURVE_NOT_CONFIRMED')
   }
+  if (session.workflow === 'co-creation') {
+    throw new AppError('关注点和待审行动不能通过旧选项润色协议变成执行结果；请提出新的行动提案。', 409, 'STORY_ACTION_REVIEW_REQUIRED')
+  }
   const { predicament, approach } = requireStoryTurnContext(session)
   const currentTurn = session.currentTurn
   const headTail = session.selectedHeadTail
@@ -6958,7 +7319,7 @@ export async function generateSessionStoryTurnOptionRefinement(
     seed: session.seed,
     predicament,
     approach,
-    confirmedCurve: session.workflow === 'co-creation' ? session.confirmedCurve : undefined,
+    confirmedCurve: undefined,
     headTail,
     history: session.history,
     currentTurn,
@@ -7038,8 +7399,34 @@ async function continueSessionStoryTurn(
   }
 
   validateSessionTurnRequest(session, request, currentTurn)
-  const selectedOption = findSelectedTurnOption(currentTurn, request.optionId)
+  let selectedOption = findSelectedTurnOption(currentTurn, request.optionId)
   const mode: Extract<StoryTurnMode, 'continue' | 'conclude'> = request.mode === 'conclude' ? 'conclude' : 'continue'
+  if (session.workflow === 'co-creation') {
+    if (mode === 'conclude') throw new AppError('收束结果尚未单独审阅，不能自动写入结局。', 409, 'STORY_RESULT_REVIEW_REQUIRED')
+    // Only the historical all-empty *opening* is a focus adapter. Do not infer
+    // permission from words such as “面对”, fact citations, or later turns.
+    const a = selectedOption.narrativeAction, t = selectedOption.transition
+    const oldOpeningFocus = !a.mode && session.history.length === 0 && currentTurn.phase === 'opening'
+      && a.source === 'generated' && !a.preconditions.length && !a.effects.length
+      && !t.consumedFacts.length && !t.changedFacts.length && !t.introducedFacts.length && !t.authorConfirmation
+    if (oldOpeningFocus) {
+      const index = currentTurn.options.findIndex((option) => option.id === selectedOption.id)
+      const text = getConfirmedCurveOpeningAnchorPlan({ seed: session.seed, confirmedCurve: session.confirmedCurve })[index]
+      selectedOption = { ...structuredClone(selectedOption), narrativeAction: {
+        ...a, mode: 'focus', focusSourceTexts: text ? [text] : [],
+      } }
+    }
+    if (selectedOption.narrativeAction.mode !== 'focus') {
+      const candidate = makeReviewOnlyOption(selectedOption)
+      const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), pendingActionProposal: {
+        id: `action-proposal-${randomUUID()}`, turnId: currentTurn.id, action: candidate.action,
+        grounding: '材料引用仅用于审阅，不能证明候选因果；作者尚未确认执行结果。',
+        preconditions: candidate.proposal!.questions, immediateConsequence: candidate.immediateConsequence,
+        laterEffect: candidate.laterEffect, option: candidate, createdAt: Date.now(), requiresExecutedResultConfirmation: true,
+      } })
+      return createStoryTurnResponse(saved, currentTurn)
+    }
+  }
   return advanceSessionStoryTurn(
     session,
     request.revision,
@@ -7065,6 +7452,9 @@ async function advanceSessionStoryTurn(
   if (!headTail || !state) {
     throw new AppError('当前故事路径无法继续，请返回上一步重新生成。', 409, 'STORY_SESSION_CONFLICT')
   }
+  if (session.workflow === 'co-creation' && !['focus', 'executed'].includes(selectedOption.narrativeAction.mode ?? '')) {
+    throw new AppError('候选行动需要审阅及明确执行结果确认，不能直接写入事实状态。', 409, 'STORY_ACTION_REVIEW_REQUIRED')
+  }
   narrativeState.validateTurnOption(state, selectedOption, invalidRequestContext, '所选行动不满足当前故事状态。')
 
   const nextHistory = appendStoryTurnHistory(session.history, currentTurn, selectedOption)
@@ -7081,6 +7471,12 @@ async function advanceSessionStoryTurn(
   })
 
   assertStorySessionRevision(session, expectedRevision)
+  if (session.workflow === 'co-creation') {
+    if (turn.isConclusion) throw new AppError('未经单独确认的收束结果不能写入事实状态。', 409, 'STORY_RESULT_REVIEW_REQUIRED')
+    const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), history: nextHistory,
+      currentTurn: turn, state: advancedState, pendingActionProposal: undefined })
+    return createStoryTurnResponse(saved, turn)
+  }
   session.history = nextHistory
   session.currentTurn = turn
   session.state = turn.isConclusion
@@ -7152,7 +7548,8 @@ function appendStoryTurnHistory(
 }
 
 function createStoryTurnResponse(session: StorySessionRecord, turn: StoryTurn): StoryTurnResponse {
-  return { storyId: session.id, revision: session.revision, history: session.history, turn }
+  return { storyId: session.id, revision: session.revision, history: session.history, turn,
+    ...(session.pendingActionProposal ? { pendingActionProposal: structuredClone(session.pendingActionProposal) } : {}) }
 }
 
 export async function generateSessionStory(
@@ -7497,6 +7894,7 @@ function persistStorySessions(candidate?: StorySessionRecord) {
     version: 1,
     sessions: [...storySessions.values()].map((session) => session.id === candidate?.id ? candidate : session),
   }
+  if (candidate && !storySessions.has(candidate.id)) store.sessions.push(candidate)
   const temporaryPath = `${storySessionStorePath}.tmp`
 
   try {
@@ -7505,7 +7903,7 @@ function persistStorySessions(candidate?: StorySessionRecord) {
     renameSync(temporaryPath, storySessionStorePath)
   } catch (error) {
     console.error(`Story session store could not be saved: ${getErrorIdentifier(error)}`)
-    if (candidate) throw new AppError('作者补充未保存，请重试；主线和 revision 均未改变。', 503, 'STORY_SESSION_PERSIST_FAILED')
+    if (candidate) throw new AppError('本次审阅或确认未保存，请重试；事实和 revision 均未改变。', 503, 'STORY_SESSION_PERSIST_FAILED')
   }
 }
 
@@ -7960,6 +8358,21 @@ const storyTurnSystemPrompt = `你是一位擅长互动短篇故事的中文编�
 当任务是 conclude 时，用户刚确认的选择只表示“从这条已发生的路径开始收束”，它不必等于预定高潮行动。你要生成一个不再需要用户选择的收束情境，并在其中写出主角实际完成的结尾行动，使其自然兑现预定高潮的语义、预定结尾结果与开场线索。结尾可以补足不承担关键因果的自然过渡，例如饭已端上桌时写主角坐下、拿起筷子再吃饭；这种桥接不是新的分支、资源、许可或重大事件。不得用桥接动作凭空消除既有限制，或补写新的关键关系、能力、权限、信息、资源、外部决定。收束情境不应再提供选项；详细状态结构才需要返回实际结尾行动的 narrativeAction 和 transition。phase、isConclusion、canConclude 和 node.goalState 均由服务端计算，不要在输出中添加这些字段。
 
 生成顺序提示：先写 node 和 conflict，再写 question；非收束时逐个完成每个 option。若本次要求详细状态结构，再补齐每个 option 中的 narrativeAction 和 transition，收束时补齐顶层 narrativeAction 和 transition；若本次要求紧凑叙事结构，则绝不输出这些内部字段。详细状态结构中 transition.introducedFacts 即使为空也必须保留为空数组 []。`
+
+const confirmedOpeningContinuationSystemPrompt = `你是故事共创的中文编辑。作者刚从首回合选择了一个判断焦点，尚未执行动作、归还物品、联系他人或改变事实。只生成紧接这个判断的第二回合，严格返回详细 turn JSON；不要生成大纲或结局。
+authorFacts 是唯一故事事实。selectedFocus 是已选判断，不是已完成事件；首回合的旧描述只记录注意力，不能把“成为压力”扩写成时间变紧、资源失效、违反承诺等结果。期限、承诺、目标是不同事实，不能据此推断不可兼得。原文写出的“可能”必须仍是可能，不得擅自归因给某项行动。
+必须具体承接所选焦点，使用作者已有的行动或决定。三项选项必须在可观察行动或继续目标的方式上不同，不能只是换同义词；期限和承诺只能作为约束，不能与行动构成假二选一。只允许已知行动、保留或暂缓该行动，不补新解法、地点、普通物件、设备功能、兼容接口、操作步骤、通讯、借用/申请流程、他人回应、署名资格规则、不可逆结果。若不知道动作是否可行或具体代价，不得为了凑三个选项而补全；只返回 {"needsAuthorDetail":["向作者核对必要条件的问题"]}。
+若输入有 allowedDecisions，恰好选择其中 act、keep、defer 各一次，在每项选项的 decisionKind 填写对应 kind，并把该项 statement 原样复制到 action、immediateConsequence、narrativeAction.intent 和唯一 introducedFacts.statement。这三项只表示决定执行、决定保留、仍未决定，不表示已经拆除、删除或成功。不得添加别的动作或解法。其他文案由你生成，必须具体承接作者行动与所选焦点。两个期限并存不代表冲突，保留承诺与删名的关系未知也不代表能兼容；不得把未知关系写成事实。如果这些决定的成立依赖作者未回答的问题，请返回 needsAuthorDetail，不用其他解法绕过。
+必须保留每个选项的 narrativeAction 和 transition。每个选项是作者接下来可选择的决定或行动，尚未发生。preconditions 至少引用一个允许事实 ID，consumedFacts 覆盖它们；effects/changedFacts 只能修改 changeable 事实，原文事实都是 fixed，所以这两项都应为空数组。introducedFacts 必须有一条作者选中该选项后直接产生的行动或决定事实，mutability=changeable；不能只把已知事实换 ID 重写，不能包含设备已能运行、他人已回应、限制已消失等结果。立即后果也只能是这条行动或决定本身。所有具体文案由你生成，服务端只校验与分配 ID。`
+
+const confirmedOpeningContinuationReviewPrompt = `你是第二回合的严格事实核对员，不负责写故事。只返回 JSON，字段为 checks、continuesSelectedFocus、distinctChoices、missingAuthorDetails。不要默认通过。
+对输入 claims 中每个 id 恰好返回一项检查：{"id":"复制待核对ID","verdict":"supported或unsupported","sourceIds":["能支持本项全部内容的authorFacts ID"],"reason":"最多100字的依据或具体缺口"}。不得遗漏项目；只要一项含没有作者依据的前提或结果，该项 verdict=unsupported。unsupported 可以有空 sourceIds。supported 必须明确引用至少一项作者来源，不能仅因文案提到作者人物或物品就通过。
+只以 authorFacts 为故事事实依据。selectedFocus 只确认了判断焦点，没有执行动作或改变时间、物品、承诺与他人。旧模板的因果结论不能自动成为证据。
+逐项审查处境、冲突、问题、选项和选中后的行动事实。条件句与可能风险不能变成确定结果，风险不能被擅自归因给行动。已知有作品、展板或投影仪，不代表有工作室、接口匹配、导出流程、备用资源、联系渠道、署名资格规则或删名必须改作品。名字出现在纸质标签还是短片画面也未给出。任何这些假定都应判 unsupported。
+尚未选择的 options 可以提出作者已写出的行动、保留/暂缓该行动，并声明选中后直接发生的行动事实；不能预先写死成功、损失或他人回应。continuesSelectedFocus 要检查新情境是否由刚才的判断引出；distinctChoices 要检查三个选项是否为实质不同的行动，目标、期限、承诺不能互相冒充行动选项，也不能全部重复面对/判断。
+role=unselected-option 的所有字段，包括 immediateConsequence 和 conditionalNewFacts，是“如果作者选择这一项”的候选后果，不是在声称已经选中或已发生。allowedDecisions 由服务器从作者明确写出的“决定是否”提取，其中决定执行、决定保留、仍未决定是三个不同决定状态，都可由 authorDecision.source 支持；不要求原文已经作出决定，不要求作者额外授权暂缓，也不要求物理执行已经可行。它们只记录决定，不代表真正拆除、删除、通电或承诺已履行；但选项附带的具体成功或损失仍须逐项有原文依据。scene.purpose 与 conflict.action 表示待达成意图，不能当成已经完成的事件。只有在决定本身依赖未知事实时才要求作者补充。
+若有 authorDecision，必须在问题或选项中实质承接它；只把它留在“后续仍待处理”不算承接。“先周五送、周六还”与“同时守住周五送和周六还”是同一安排，distinctChoices=false；重新评估 fixed 期限是否可调整不是已有可行解法。三项都只重述期限的候选必须拒绝。
+两个日期存在先后不等于不可兼得。必须单独核对“冲突、失去机会、压力解除”的因果是否由作者给出；出现这些词而没有对应来源，必须判 unsupported。只有作者资料确实不足以提供成立的具体行动或其前提时，missingAuthorDetails 才填写最多三个明确向作者询问的问题；不能编答案，也不能因候选写坏了就要求作者补充本来已有的信息。缺少事实和不合格候选都不能判为通过。`
 
 function getConfirmedCurveFirstTurnSystemPrompt(): string {
   return `你是中文互动故事的开场事实选择器。现在只为作者确认主线后的第一个可选择情境选择事实锚点，不能写任何自由文本故事。必须严格返回 JSON，不要 Markdown、解释或额外字段。
@@ -9184,6 +9597,20 @@ function buildStoryTurnPrompt(
   outputFormat: StoryTurnOutputFormat = 'detailed',
 ): string {
   const { idea, seed, predicament, approach, headTail, history, mode, confirmedCurve } = request
+  if (isConfirmedOpeningContinuation(request)) {
+    const authorFacts = getConfirmedCurveOpeningAuthorSourceTexts(request)
+    return [
+      `authorFacts：${JSON.stringify(authorFacts)}`,
+      `authorDecision（作者写明的行动两端，风险的因果与具体代价未确认）：${JSON.stringify(getOpeningContinuationDecision(request) ?? null)}`,
+      `allowedDecisions（只许可作出决定，不许可执行未知动作或补全结果）：${JSON.stringify(getOpeningContinuationDecisions(request) ?? null)}`,
+      `主线目标（不是已完成事实）：${seed.lockedGoal ?? confirmedCurve!.foundation?.preservedGoal ?? '作者主线目标待确认'}`,
+      `selectedFocus（只记录作者选中的判断）：${JSON.stringify(history[0]!.selectedOption)}`,
+      `允许引用的事实：${JSON.stringify(getOpeningContinuationFacts(request, state))}`,
+      '本次只能承接这个判断，所有 fixed 作者事实保持成立。不要照抄旧模板的高潮和代价，不要把尚未执行的剧情写成成功。',
+      repairMessage ? `上一版不合格：${repairMessage}。重新核对作者事实，不要用同义改写绕过。` : '',
+      `严格输出详细状态 turn；若资料不足，只输出 needsAuthorDetail 问题数组：\n${getOpeningContinuationResponseSchema(request)}`,
+    ].filter(Boolean).join('\n')
+  }
   if (confirmedCurve && mode === 'start' && history.length === 0 && outputFormat === 'compact') {
     return buildConfirmedCurveFirstTurnPrompt(request, repairMessage)
   }
@@ -9216,6 +9643,33 @@ ${getStoryTurnStateProtocolInstruction(outputFormat)}
 
 严格使用以下 JSON 结构：
   ${responseSchema}`
+}
+
+const confirmedOpeningContinuationResponseSchema = JSON.stringify({ turn: {
+  node: { title: '节点短标题', event: '已有处境与所选焦点，不补场景或既成结果', purpose: '该判断怎样引出下一项具体决定' },
+  conflict: { conflict: '作者事实中的具体阻碍', action: '尚待作者选择的行动或决定', consequence: '仍待处理的已知问题，不推断具体损失' },
+  question: '具体行动问题，期限和承诺只是约束',
+  options: [1, 2, 3].map((index) => ({ decisionKind: '有allowedDecisions时从对应kind复制，否则省略',
+    label: `第${index}个不同选择的短名称`, action: '有allowedDecisions时原样复制statement，否则只写作者已有行动或决定',
+    immediateConsequence: '仅记录这项行动或决定，不假定成功、损失或他人回应', laterEffect: '已有问题怎样仍待处理',
+    narrativeAction: { intent: '与本选项行动一致', preconditions: ['从允许事实复制ID'], effects: [] },
+    transition: { consumedFacts: ['覆盖preconditions的ID'], changedFacts: [],
+      introducedFacts: [{ id: `next-choice-${index}`, statement: '仅此选项被选中后直接产生的行动或决定事实', mutability: 'changeable' }] },
+  })),
+} })
+
+function getOpeningContinuationResponseSchema(request: StoryTurnRequest): string {
+  const decisions = getOpeningContinuationDecisions(request)
+  if (!decisions) return confirmedOpeningContinuationResponseSchema
+  const schema = JSON.parse(confirmedOpeningContinuationResponseSchema)
+  schema.turn.options = decisions.map(({ kind, statement }, index) => ({ decisionKind: kind,
+    label: '只为这项候选决定写短名称，不冒充已经执行', action: statement, immediateConsequence: statement,
+    laterEffect: '只写原文里仍待处理的具体问题，风险的因果与具体代价未知就明确写未确认，不补关联',
+    narrativeAction: { intent: statement, preconditions: ['从允许作者事实复制ID'], effects: [] },
+    transition: { consumedFacts: ['覆盖preconditions的ID'], changedFacts: [],
+      introducedFacts: [{ id: `next-choice-${index + 1}`, statement, mutability: 'changeable' }] },
+  }))
+  return JSON.stringify(schema)
 }
 
 function buildConfirmedCurveFirstTurnPrompt(
@@ -9659,13 +10113,14 @@ function parseStoryAction(
   message: string,
   source: StoryAction['source'],
   generatedId?: string,
+  allowNoExistingEffect = false,
 ): StoryAction {
   const record = expectRecord(value, message, context)
   return {
     id: generatedId ?? readIdentifier(record, 'id', message, context),
     intent: readText(record, 'intent', message, 180, context),
     preconditions: readIdentifierList(record, 'preconditions', 1, maximumTransitionFactReferences, message, context),
-    effects: readIdentifierList(record, 'effects', 1, maximumTransitionFactReferences, message, context),
+    effects: readIdentifierList(record, 'effects', allowNoExistingEffect ? 0 : 1, maximumTransitionFactReferences, message, context),
     source,
   }
 }
@@ -10028,6 +10483,7 @@ function parseModelStoryTurn(
       (index) => `${turnId}-option-${index + 1}`,
       (index) => `${turnId}-option-${index + 1}-action`,
       outputFormat,
+      isConfirmedOpeningContinuation(request),
     ),
     ...conclusionPayload,
     canConclude: canConcludeAfterCurrentTurn(request),
@@ -10124,26 +10580,10 @@ function createConfirmedCurveOpeningPlanTurn(
     const actionId = `${id}-action`
     const primaryText = quote(primary)
     const secondaryText = quote(secondary)
-    const label = mode === 'face'
-      ? `面对${shortConfirmedOpeningAnchor(primary)}`
-      : mode === 'protect'
-        ? `守住${shortConfirmedOpeningAnchor(primary)}`
-        : `判断${shortConfirmedOpeningAnchor(primary)}`
-    const action = mode === 'face'
-      ? `先面对${primaryText}。`
-      : mode === 'protect'
-        ? `先守住${primaryText}。`
-        : `先判断${primaryText}。`
-    const immediateConsequence = mode === 'face'
-      ? `${primaryText}成为当前压力。`
-      : mode === 'protect'
-        ? `${primaryText}作为当前优先。`
-        : `${primaryText}成为当前取舍。`
-    const laterEffect = mode === 'face'
-      ? `${secondaryText}仍待判断。`
-      : mode === 'protect'
-        ? `${secondaryText}暂缓判断。`
-        : `${secondaryText}继续判断。`
+    const label = `关注${shortConfirmedOpeningAnchor(primary)}`
+    const action = `先审阅${primaryText}相关的行动提案。`
+    const immediateConsequence = '仅选择审阅焦点；尚未执行行动，也没有新增事实。'
+    const laterEffect = `${secondaryText}仍保留，不因关注点选择而发生变化。`
     return {
       id,
       label,
@@ -10156,6 +10596,8 @@ function createConfirmedCurveOpeningPlanTurn(
         preconditions: [],
         effects: [],
         source: 'generated',
+        mode: 'focus',
+        focusSourceTexts: [primary],
       },
       transition: {
         actionId,
@@ -10175,22 +10617,23 @@ function createConfirmedCurveOpeningPlanTurn(
   return {
     id: turnId,
     phase: 'opening',
+    presentation: 'focus-selection',
     node: {
       id: nodeId,
-      title: `${shortConfirmedOpeningAnchor(pressure)}的取舍`,
-      event: `${subject}面对${quote(pressure)}，并围绕${quote(boundary)}、${quote(goal)}形成当前取舍。`,
-      purpose: `围绕${quote(goal)}判断${quote(pressure)}与${quote(boundary)}。`,
+      title: '选择下一步审阅的关注点',
+      event: [pressure, boundary, goal].map(quote).join('；'),
+      purpose: `围绕${quote(goal)}，先判断${quote(pressure)}。`,
       goalState: 'trying',
     },
     conflict: {
       nodeId,
-      conflict: `${quote(pressure)}与${quote(boundary)}形成取舍，${quote(goal)}仍待判断。`,
-      action: `先判断${quote(pressure)}还是${quote(boundary)}。`,
-      consequence: `${quote(pressure)}、${quote(boundary)}与${quote(goal)}仍待判断。`,
+      conflict: '这些材料分别作为目标、约束或待决定事项保留，尚未建立新的因果。',
+      action: `先判断${quote(pressure)}。`,
+      consequence: '关注点选择只改变审阅范围，不推进故事时间或执行动作。',
       intensity: 2,
       anchor: '起点',
     },
-    question: `当前先判断${quote(pressure)}还是${quote(boundary)}？`,
+    question: '先审阅哪项材料相关的行动？',
     options,
     narrativeAction: null,
     transition: null,
@@ -10407,6 +10850,7 @@ function parseStoryTurnOptions(
   getGeneratedId?: (index: number) => string,
   getGeneratedActionId?: (index: number) => string,
   outputFormat: StoryTurnOutputFormat = 'detailed',
+  allowNoExistingEffect = false,
 ): StoryTurnOption[] {
   const message = isConclusion
     ? '收束回合的 options 必须为空数组。'
@@ -10432,6 +10876,7 @@ function parseStoryTurnOptions(
     getGeneratedId?.(index),
     getGeneratedActionId?.(index),
     outputFormat,
+    allowNoExistingEffect,
   ))
 }
 
@@ -10442,6 +10887,7 @@ function parseStoryTurnOption(
   generatedId?: string,
   generatedActionId?: string,
   outputFormat: StoryTurnOutputFormat = 'detailed',
+  allowNoExistingEffect = false,
 ): StoryTurnOption {
   const record = expectRecord(value, message, context)
   const id = generatedId ?? readText(record, 'id', message, 56, context)
@@ -10455,6 +10901,7 @@ function parseStoryTurnOption(
     message,
     'generated',
     generatedActionId ?? `${id}-action`,
+    allowNoExistingEffect,
   )
   return {
     id,

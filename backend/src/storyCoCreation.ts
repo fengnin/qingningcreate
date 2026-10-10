@@ -1453,6 +1453,7 @@ export function confirmProvisionalCurve(curve: ProvisionalCurve, acceptedDesignP
   curve: ProvisionalCurve
   confirmedCurve: ConfirmedCurve
 } {
+  if (curve.preparation?.status === 'needs-review') throw new AppError('请先审阅行动及其条件，再生成曲线。', 409, 'STORY_PREPARATION_NOT_ACCEPTED')
   if (curve.reasoning?.designReview) {
     const priorFoundation = curve.foundation ?? curve.design?.foundation
     if (!priorFoundation?.reasoning || JSON.stringify(priorFoundation.reasoning) !== JSON.stringify(curve.reasoning)
@@ -1461,7 +1462,7 @@ export function confirmProvisionalCurve(curve: ProvisionalCurve, acceptedDesignP
     }
     const reasoning = reviewSelectedReasoningDesign(curve.reasoning, curve.beats.filter(b => b.status !== 'rejected').map(b => b.id), acceptedDesignProposalIds)
     if (!curve.design) throw new AppError('设计材料不存在。', 409, 'STORY_DESIGN_REVIEW_REQUIRED')
-    const mapped = mapInitialReasoningProposal(reasoning, curve.design, curve.brief)
+    const mapped = mapInitialReasoningProposal(reasoning, curve.design, curve.brief, { allowSimplePlan: !!curve.preparation })
     if (mapped.foundation) mapped.foundation.beatSignatures = { ...priorFoundation.beatSignatures }
     curve = { ...curve, reasoning,
       foundation: mapped.foundation, design: mapped.design }
@@ -1490,6 +1491,7 @@ export function confirmProvisionalCurve(curve: ProvisionalCurve, acceptedDesignP
       id: `confirmed-curve-${randomUUID()}`,
       provisionalCurveId: confirmed.id,
       title: confirmed.title,
+      ...(confirmed.preparation ? { preparation: structuredClone(confirmed.preparation) } : {}),
       ...(confirmed.reasoning ? { reasoning: structuredClone(confirmed.reasoning) } : {}),
       brief: confirmed.brief,
       beats: confirmed.beats,
@@ -1516,14 +1518,15 @@ function validateCurveForConfirmation(curve: ProvisionalCurve): StoryDesignRecor
   if (curve.status !== 'draft') {
     throw new AppError('这条主线已经不是可确认的草案，请刷新后重试。', 409, 'STORY_CURVE_NOT_DRAFT')
   }
-  if (curve.beats.length < 5 || curve.beats.length > 7) {
+  if (curve.beats.length < (curve.preparation ? 3 : 5) || curve.beats.length > 7) {
     throw new AppError('暂定故事曲线需要包含 5 至 7 个节点。', 400, 'STORY_CURVE_INCOMPLETE')
   }
   if (curve.beats.some((beat) => beat.status === 'stale' || beat.source === 'undecided')) {
     throw new AppError('请先处理被修改影响的曲线节点，再确认主线。', 400, 'STORY_CURVE_HAS_STALE_BEATS')
   }
 
-  const hasAllRequiredKinds = requiredConfirmationBeatKinds.every((kind) => (
+  const requiredKinds: readonly CurveBeatKind[] = curve.preparation ? ['current-state','trigger','resolution'] : requiredConfirmationBeatKinds
+  const hasAllRequiredKinds = requiredKinds.every((kind) => (
     curve.beats.some((beat) => beat.kind === kind && beat.status !== 'rejected')
   ))
   if (!hasAllRequiredKinds) {
@@ -1543,7 +1546,7 @@ function validateCurveForConfirmation(curve: ProvisionalCurve): StoryDesignRecor
     )
   }
   const missingDesignSections = getMissingStoryDesignSections(design, curve.beats)
-  if (missingDesignSections.length) {
+  if (missingDesignSections.length && !curve.preparation) {
     throw new AppError(
       `故事设计记录还缺少有效的${missingDesignSections.join('、')}节点，请补回或编辑后再确认。`,
       400,
@@ -1581,6 +1584,7 @@ export function materializeConfirmedCurve(
   seed: StorySeed,
   confirmedCurve: ConfirmedCurve,
 ): MaterializedCurveFoundation {
+  if (confirmedCurve.preparation) return materializePreparationCurve(seed, confirmedCurve)
   const beats = getConfirmedCurveBeats(confirmedCurve)
   const foundation = confirmedCurve.foundation
     ?? confirmedCurve.design?.foundation
@@ -1616,6 +1620,25 @@ export function materializeConfirmedCurve(
     approach,
     headTail,
   }
+}
+
+/** Explicit preparation adapter. No missing climax, conflict, cost or causal
+ * promise is manufactured to fit the legacy five-stage design. */
+function materializePreparationCurve(seed: StorySeed, curve: ConfirmedCurve): MaterializedCurveFoundation {
+  const p = curve.preparation!
+  const foundation = curve.foundation ?? curve.design?.foundation
+  if (p.status !== 'accepted-design' || !foundation || !isStoryCurveFoundationCurrent(foundation, curve.beats)) throw new AppError('行动设计与冻结曲线不一致。', 409, 'STORY_CURVE_FOUNDATION_OUT_OF_DATE')
+  const known = (curve.design?.sourceFacts ?? []).filter(f => f.disposition === 'integrated')
+  const facts: StoryFact[] = known.map(f => ({ id: `fact-source-${f.id}`, statement: f.text, source: 'confirmed-curve', mutability: 'fixed' }))
+  const actions: StoryAction[] = p.candidates.filter(c => p.acceptedCandidateIds.includes(c.id)).map(c => ({ id: `prepared-${c.id}`, intent: c.action,
+    preconditions: [], effects: [], source: 'generated', originCurveBeatIds: ['beat-trigger'] }))
+  const approach = { id: 'prepared-approach', intent: actions.map(a => a.intent).join('\n'), cost: '未声明代价。' }
+  const predicament: StoryPredicament = { id: 'prepared-predicament', designProtocol: 'prepared-action', title: foundation.predicament.title, variationAxis: 'commitment',
+    preservedGoal: foundation.preservedGoal, immediateSituation: foundation.predicament.immediateSituation, obstacle: '', tradeoff: '', urgency: '', choice: '', plausibleCost: '', approaches: [approach], facts, actions }
+  return { seed: { ...seed, activeSituation: foundation.predicament.immediateSituation, lockedGoal: foundation.preservedGoal, lockedFacts: known.map(f => f.text), creativeBrief: curve.brief },
+    predicament, approach, headTail: { id: 'prepared-head-tail', designProtocol: 'prepared-action', opening: foundation.storyEnds.opening, openingClue: foundation.storyEnds.openingClue, climax: '',
+      resolution: foundation.storyEnds.resolution, cost: '', promise: '', climaxActionId: actions[0]!.id,
+      transition: { actionId: actions[0]!.id, consumedFacts: [], changedFacts: [], introducedFacts: [] } } }
 }
 
 interface ConfirmedCurveBeats {
