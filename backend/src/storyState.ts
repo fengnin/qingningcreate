@@ -108,16 +108,24 @@ function createInitialNarrativeState(
   predicament: StoryPredicament,
   { maximumFacts }: NarrativeStateLimits,
 ): StoryNarrativeState {
-  const userFacts: StoryFact[] = seed.lockedFacts.map((statement, index) => ({
+  // The preparation adapter retains original text in the seed for display,
+  // and materializes the same author evidence with stable source IDs. Count
+  // that evidence once; legacy predicaments keep their existing assembly.
+  const represented = predicament.designProtocol === 'prepared-action'
+    ? new Set(predicament.facts.filter(f => f.source === 'confirmed-curve').map(f => f.statement)) : new Set<string>()
+  const userFacts: StoryFact[] = seed.lockedFacts.flatMap((statement, index) => represented.has(statement) ? [] : [{
     id: `fact-user-${index + 1}`,
     statement,
     source: 'user',
     mutability: 'fixed',
-  }))
+  }])
   const systemDraftFacts = createSystemDraftFacts(seed)
   const facts = [...userFacts, ...systemDraftFacts, ...predicament.facts]
 
-  if (facts.length > maximumFacts || hasDuplicateIds(facts)) {
+  if (facts.length > maximumFacts) {
+    throw new AppError('故事困境中的事实数量超过合同上限，请审阅材料范围。', 502, 'INVALID_MODEL_OUTPUT')
+  }
+  if (hasDuplicateIds(facts)) {
     throw new AppError('故事困境中的事实标识重复，请重新生成。', 502, 'INVALID_MODEL_OUTPUT')
   }
 
