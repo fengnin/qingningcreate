@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { AppError, requestQwenJson, withModelDiagnostic } from './qwen.js'
-import { initialReasoningSystemPrompt, mapInitialReasoningProposal } from './storyInitialReasoning.js'
+import { mapInitialReasoningProposal } from './storyInitialReasoning.js'
+import { storyReasoningSystemPrompt } from './storyReasoningPrompt.js'
 import { validateStoryReasoningProposal } from './storyReasoningContract.js'
 import type { StoryReasoningProposal, StoryReasoningDesignStep, StoryReasoningStatement, StoryReasoningValidationContext } from '../../shared/story-reasoning-contract.js'
 import type { ProvisionalCurve, StorySeed, StoryCurveRegenerationPreview, StoryCurveRegenerationDecision } from '../../shared/story-contract.js'
@@ -70,7 +71,7 @@ export async function previewReasoningRecovery(idea:string,seed:StorySeed,curve:
   let failure:AppError|undefined
   for(let attempt=0;attempt<3;attempt++){
     try{
-      const output=await requestQwenJson({systemPrompt:initialReasoningSystemPrompt+`\n本次 stage=edit-preview。只输出指定 target 的节点；不要求5个。保留 protectedSteps，不输出它们。承接 requiredEditIds，通过 respondsToEditIds 与 author-design 引文逐字体现编辑。所有非节点 ID 使用提供的 prefix；目标文字保持锁定。未知问题不能被改名后暗中复用，不依赖它的新设计仍须作者审阅。`,
+      const output=await requestQwenJson({systemPrompt:storyReasoningSystemPrompt('edit-preview'),
         userPrompt:JSON.stringify({idea,brief:curve.brief,context,prefix,targets,authorEdits:context.protectedSteps,
           currentSteps:curve.beats.filter(b=>!targets.includes(b.id)&&b.status!=='rejected'),questions:curve.clarifications,feedback,validationFailure:failure?.message}),
         temperature:attempt?0.1:0.35,maxTokens:6500,diagnosticStage:'reasoning-edit-preview'})

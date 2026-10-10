@@ -25,7 +25,8 @@ function ids(value: unknown): string[] {
   return list
 }
 function references(values: string[], allowed: Set<string>, label: string) {
-  if (values.some(id => !allowed.has(id))) invalid(`${label}引用了不存在的 ID。`)
+  const missing = values.filter(id => !allowed.has(id))
+  if (missing.length) invalid(`${label}引用了不存在的 ID：${missing.join(', ')}。`)
 }
 
 /** Validates identity, source authority, dependency and edit ownership. It
@@ -42,71 +43,77 @@ export function validateStoryReasoningProposal(value: unknown, context: StoryRea
   const sourceIds = new Set(sources.keys())
   const excluded = context.excludedUnknowns ?? []
   const excludedSourceIds = new Set(excluded.flatMap(q => q.sourceIds))
-  const unknowns = array(r.unknowns).map(value => {
+  const unknowns = array(r.unknowns).map((value, index) => {
     const q = record(value, ['id', 'question', 'sourceIds', 'dependentIds'])
     const item = { id: text(q.id, 80), question: text(q.question), sourceIds: ids(q.sourceIds), dependentIds: ids(q.dependentIds) }
-    references(item.sourceIds, sourceIds, '问题来源')
+    references(item.sourceIds, sourceIds, `unknowns[${index}].sourceIds（只能引用 context.sources）`)
     return item
   })
   const unknownIds = new Set([...unknowns.map(q => q.id), ...excluded.map(q => q.id)])
-  const basis = (value: unknown): StoryReasoningBasis => {
+  const basis = (value: unknown, path: string): StoryReasoningBasis => {
     const raw = value as Record<string, unknown> | null
     const kind = raw?.kind
     const b = record(value, kind === 'author-text' ? ['kind', 'evidence'] : kind === 'design-proposal' ? ['kind', 'evidence', 'unknownIds'] : ['kind', 'unknownIds'])
     if (!['author-text', 'design-proposal', 'unknown'].includes(String(kind))) invalid('依据类型不正确。')
     if (kind === 'unknown') {
-      const refs = ids(b.unknownIds); references(refs, unknownIds, '未知依据')
+      const refs = ids(b.unknownIds); references(refs, unknownIds, `${path}.unknownIds`)
       if (!refs.length) invalid('未知依据必须指出具体问题。')
       return { kind: 'unknown', unknownIds: refs }
     }
-    const evidence = array(b.evidence).map(value => {
+    const evidence = array(b.evidence).map((value, index) => {
       const e = record(value, ['sourceId', 'quote'])
       const sourceId = text(e.sourceId, 80), quote = text(e.quote)
       const source = sources.get(sourceId)
-      if (!source || !source.text.includes(quote)) invalid('依据引用不存在或引文不在来源原文中。')
-      if (source!.authority === 'unknown' || excludedSourceIds.has(sourceId)) invalid('未确定内容不能充当成立的依据。')
-      if (kind === 'author-text' && source!.authority === 'author-design') invalid('作者设计不是已发生事实，不能提升为事实依据。')
+      if (!source || !source.text.includes(quote)) invalid(`${path}.evidence[${index}]：来源 ${sourceId} 不存在或 quote 不在来源原文中。`)
+      if (source!.authority === 'unknown' || excludedSourceIds.has(sourceId)) invalid(`${path}.evidence[${index}]：未确定内容不能充当成立的依据。`)
+      if (kind === 'author-text' && source!.authority === 'author-design') invalid(`${path}.evidence[${index}]：作者设计不是已发生事实，不能提升为事实依据。`)
       return { sourceId, quote }
     })
     if (kind === 'author-text') {
       if (!evidence.length) invalid('作者原文依据必须提供可核对引文。')
       return { kind: 'author-text', evidence }
     }
-    const refs = ids(b.unknownIds); references(refs, unknownIds, '提案依赖')
+    const refs = ids(b.unknownIds); references(refs, unknownIds, `${path}.unknownIds`)
     return { kind: 'design-proposal', evidence, unknownIds: refs }
   }
-  const statement = (value: unknown, extra: string[] = []): StoryReasoningStatement & Record<string, unknown> => {
+  const statement = (value: unknown, path: string, extra: string[] = []): StoryReasoningStatement & Record<string, unknown> => {
     const s = record(value, ['id', 'text', 'basis', ...extra])
-    const result = { ...s, id: text(s.id, 80), text: text(s.text), basis: basis(s.basis) }
+    const result = { ...s, id: text(s.id, 80), text: text(s.text), basis: basis(s.basis, `${path}.basis`) }
     // "author-text" is a quotation, not a license to append a new outcome.
-    if (result.basis.kind === 'author-text' && !result.basis.evidence.some(e => e.quote === result.text)) invalid('原文依据不能夹带原文没有的解释或结果；请作为设计提案审阅。')
+    if (result.basis.kind === 'author-text' && !result.basis.evidence.some(e => e.quote === result.text)) {
+      // A retry hint may point to text already present in validated evidence.
+      // It never changes the output, chooses another source or certifies meaning.
+      const containing = result.basis.evidence.find(e => e.quote.includes(result.text))
+      invalid(`${path}.text：author-text 必须逐字等于一项 evidence.quote；短摘录需同一短引文。不得改写、拼接或夹带解释及结果；服务端不会补依据。`
+        + (containing ? `${path}.basis.evidence 中来源 ${containing.sourceId} 已包含当前 text；若该摘录保持原文条件，请由模型将对应 quote 写为 ${JSON.stringify(result.text)}。` : '当前 text 不在已提供引文中，禁止补造依据。'))
+    }
     return result
   }
-  const goal = r.goal === null ? null : statement(r.goal)
+  const goal = r.goal === null ? null : statement(r.goal, 'goal')
   if (goal && context.lockedGoal !== undefined && goal.text !== context.lockedGoal) invalid('模型不能更改锁定目标。')
-  const constraints = array(r.constraints).map(v => statement(v))
+  const constraints = array(r.constraints).map((v, i) => statement(v, `constraints[${i}]`))
   const edits = new Set(context.requiredEditIds)
   const editRefs = (value: unknown) => {
     const refs = ids(value); references(refs, new Set(context.protectedSteps.map(s => s.id)), '作者编辑')
     return refs
   }
-  const actions = array(r.actions, 12).map(value => {
-    const a = statement(value, ['constraintIds', 'relationIds', 'unknownIds', 'respondsToEditIds'])
+  const actions = array(r.actions, 12).map((value, i) => {
+    const a = statement(value, `actions[${i}]`, ['constraintIds', 'relationIds', 'unknownIds', 'respondsToEditIds'])
     const item = { id: a.id, text: a.text, basis: a.basis, constraintIds: ids(a.constraintIds), relationIds: ids(a.relationIds),
       unknownIds: ids(a.unknownIds), respondsToEditIds: editRefs(a.respondsToEditIds) }
     references(item.unknownIds, unknownIds, '行动未知前提')
     if (item.basis.kind !== 'author-text' && item.basis.unknownIds.some(id => !item.unknownIds.includes(id))) invalid('行动遗漏了依据中的未知依赖。')
     return item
   })
-  const relations = array(r.relations).map(value => {
-    const a = statement(value, ['relation', 'fromIds', 'toIds'])
+  const relations = array(r.relations).map((value, i) => {
+    const a = statement(value, `relations[${i}]`, ['relation', 'fromIds', 'toIds'])
     if (!['cause', 'conflict', 'compatible', 'sequence'].includes(String(a.relation))) invalid('关系类型不正确。')
     const fromIds = ids(a.fromIds), toIds = ids(a.toIds)
     if (!fromIds.length || !toIds.length) invalid('关系必须标明两端。')
     return { id: a.id, text: a.text, basis: a.basis, relation: a.relation as 'cause' | 'conflict' | 'compatible' | 'sequence', fromIds, toIds }
   })
-  const steps = tail === 'steps' ? array(r.steps, 7).map(value => {
-    const s = statement(value, ['kind', 'title', 'actionIds', 'relationIds', 'dependsOn', 'respondsToEditIds'])
+  const steps = tail === 'steps' ? array(r.steps, 7).map((value, i) => {
+    const s = statement(value, `steps[${i}]`, ['kind', 'title', 'actionIds', 'relationIds', 'dependsOn', 'respondsToEditIds'])
     if (!['current-state', 'character-tension', 'trigger', 'escalation', 'midpoint-turn', 'climax-choice', 'resolution'].includes(String(s.kind))) invalid('设计节点类型不正确。')
     const protectedStep = context.protectedSteps.find(p => p.id === s.id)
     if (protectedStep) invalid('模型输出不能替换作者编辑节点；只能提出下游预览。')

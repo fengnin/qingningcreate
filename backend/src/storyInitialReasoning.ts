@@ -1,23 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { AppError, requestQwenJson, summarizeModelResponse, withModelDiagnostic } from './qwen.js'
 import { validateStoryReasoningProposal } from './storyReasoningContract.js'
+import { storyReasoningSystemPrompt } from './storyReasoningPrompt.js'
 import type { StoryReasoningProposal, StoryReasoningStatement, StoryReasoningValidationContext } from '../../shared/story-reasoning-contract.js'
 import type { CreativeBrief, CurveBeat, ProvisionalCurve, StoryCurveFoundation, StoryDesignRecord, StorySeed } from '../../shared/story-contract.js'
 
-export const initialReasoningSystemPrompt = `你是故事设计提案生成器，输出 protocol=1 的 initial-design JSON，不输出执行结果或事实更新。
-直接生成目标、行动、约束、关系、未知项和节点文案；服务端不会补写因果。事实不自动是冲突：没有期限不是阻碍，可兼容条件不能编成无法兼得。
-author-text 的 text 必须等于 evidence 中的原文 quote；推断、未来行动及冲突/代价设计使用 design-proposal，保留 unknownIds。引用 ID 不证明因果成立。
-不得把设计接受写成事件发生，不得替作者回答未知项。信息不足可返回 questions，不能用空泛二选一凑完整方案。
-共同字段必须齐全且只能包含 protocol,stage,status,outcome,goal,constraints,actions,relations,unknowns 以及 steps 或 questions。
-protocol:1, stage:initial-design, status:needs-review, outcome:proposal|questions。
-statement={id,text,basis}；basis={kind:author-text,evidence:[{sourceId,quote}]} 或 {kind:design-proposal,evidence:[],unknownIds:[]} 或 {kind:unknown,unknownIds:[id]}。
-constraint 是 statement。action 是 statement 加 constraintIds,relationIds,unknownIds,respondsToEditIds（初次为空）。
-relation 是 statement 加 relation:cause|conflict|compatible|sequence,fromIds,toIds（两端引用来源或结构 ID）。
-unknown={id,question,sourceIds,dependentIds}。
-proposal 的 steps 为5至7个节点，包含 current-state,trigger,escalation,climax-choice,resolution，可加 character-tension,midpoint-turn；kind 不代表必须存在阻碍或损失，可以设计兼容的推进。
-step 是 statement 加 kind,title,actionIds,relationIds,dependsOn（只引用节点且不循环）,respondsToEditIds:[]。每种 kind 只出现一次，id 为 beat-加kind。不要把目标与期限列为两个行动。
-questions 输出 questions:[{unknownId,dependentIds}]，actions,relations 为空，goal 可为 null。
-所有文本最多240字，title最多40字；输出完整 JSON，不含解释。`
+export const initialReasoningSystemPrompt = storyReasoningSystemPrompt('initial-design')
 
 export function createInitialReasoningContext(design: StoryDesignRecord, seed: StorySeed): StoryReasoningValidationContext {
   return { stage: 'initial-design', sources: design.sourceFacts.map(f => ({ id: f.id, text: f.text, authority: 'author-material' })),
