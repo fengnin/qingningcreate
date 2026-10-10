@@ -5128,6 +5128,16 @@ textarea:focus-visible {
   }
 }
 
+.story-review-details { margin: 20px 0; border-top: 1px solid #36483e; color: #c3d0c5; line-height: 1.75; overflow-wrap: anywhere; }
+.story-review-details > summary { padding: 16px 0; cursor: pointer; }
+.story-review-details > summary span { margin-left: 12px; color: #d9ae7d; font-size: 13px; }
+.story-review-help { color: #acbcae; font-size: 14px; }
+.story-review-choice { padding: 16px 0; border-bottom: 1px solid #36483e; }
+.story-review-choice > label { display: flex; align-items: flex-start; gap: 12px; cursor: pointer; color: #edf3ec; }
+.story-review-choice input { flex: 0 0 auto; width: 18px; height: 18px; margin-top: 6px; accent-color: #cf6245; }
+.story-review-source { margin: 10px 0 0; font-size: 13px; color: #acbcae; }
+.story-review-source > summary { padding: 8px 0; cursor: pointer; }
+.story-review-source blockquote { margin: 10px 0; padding-left: 14px; border-left: 2px solid #6b8069; }
 .preparation-workspace { max-width: none; width: 100%; }
 .preparation-workspace > * { max-width: 984px; }
 .preparation-workspace h1 { margin: 36px 0 12px; font-size: clamp(28px, 4vw, 44px); }

@@ -324,11 +324,10 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
           {session.stageError && <p className="cocreation-error" role="alert"><CircleAlert size={16} /> {session.stageError}</p>}
           {curve.generation && <div className={`curve-generation-notice ${curve.generation.origin === 'fact-preserving-fallback' ? 'is-fallback' : ''}`}><Sparkles size={15} /><span><strong>{curve.generation.origin === 'fact-preserving-fallback' ? '已使用保留原始材料的结构草案' : '已完成一版结构提案'}</strong>{curve.generation.notice ?? '新增内容仍是提案，尚未成为故事事实。'}</span></div>}
           <CurveDesignSummary curve={curve} />
-          {curve.preparation && <section><h3>已接受的行动结构与保留未知</h3><p>结构接受不是执行确认。未选择的候选没有进入曲线。</p>{curve.preparation.material.filter(m => m.role === 'unknown').map(m => <p key={m.id}>仍未知：{m.quote}</p>)}
+          {curve.preparation && (curve.preparation.material.some(m => m.role === 'unknown') || !!curve.preparation.authorReview?.supersededMaterialIds?.length || !!curve.preparation.supplements?.length) && <details className="story-review-details"><summary>待定内容与设定调整</summary>{curve.preparation.material.filter(m => m.role === 'unknown').map(m => <p key={m.id}>待定：{m.quote}</p>)}
             {curve.preparation.authorReview?.supersededMaterialIds?.map(id => <p key={id}>被作者明确取代（保留原文，不再作为依据）：{curve.preparation!.material.find(m => m.id === id)?.quote}</p>)}
             {!!curve.preparation.supplements?.length && <aside aria-label="独立待审新增设计"><h4>独立待审新增设计</h4><p>这些内容不属于行动必需条件。接受只保存未来设计；若要纳入行动，仍需显式修订并再次审阅。</p>{curve.preparation.supplements.map(s => <PreparationSupplementReview key={s.id} item={s} disabled={isLoading || curve.status !== 'draft'} onReview={session.reviewPreparationSupplement} />)}</aside>}
-          </section>}
-          {curve.reasoning && <ReasoningDesignReview reasoning={curve.reasoning} acceptedIds={acceptedDesignIds} onChange={setAcceptedDesignIds} disabled={isLoading || Boolean(session.confirmedCurve)} />}
+          </details>}
           {curve.reasoning?.outcome === 'questions' && <p>这版尚未形成可接受的设计。以下问题等待作者决定；生成失败不等于作者资料不足。</p>}
           {(curve.clarifications ?? []).filter(c => c.dependency.beatIds.length === 0).map(c => <CurveClarificationReview
             key={c.id} beat={{ id: '', kind: 'trigger', title: '待审问题', detail: c.prompt, source: 'system-proposal', status: 'proposed', dependsOn: [] }}
@@ -367,6 +366,7 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
               onApplyAuthorRevision={() => void applyAuthorRevision()}
             />)}
           </div>
+          {curve.reasoning && <ReasoningDesignReview reasoning={curve.reasoning} acceptedIds={acceptedDesignIds} onChange={setAcceptedDesignIds} disabled={isLoading || Boolean(session.confirmedCurve)} />}
           {!session.confirmedCurve && <RejectedProposalHistory proposals={curve.rejectedProposals ?? []} />}
           {!session.confirmedCurve && <label className="curve-feedback-field"><span>给系统一句修改方向 <small>可选，作用于下一次重推</small></span><input value={regenerationFeedback} onChange={(event) => setRegenerationFeedback(event.target.value)} placeholder="例如：让阻碍来自关系承诺，而不是新增一个外部人物" maxLength={180} disabled={isLoading} /></label>}
            {staleBeats.length > 0 && !session.confirmedCurve && !session.pendingCurveRegeneration && <div className="curve-stale-panel"><p className="curve-stale-notice"><CircleAlert size={15} /> 你修改了上游节点，下面的节点需要重新看一遍。作者编辑不会被系统批量覆盖。</p><div className="curve-stale-actions">{staleProposalBeats.length > 0 && <button className="text-action" type="button" onClick={() => void regenerateAffected()} disabled={isLoading || isRegeneratingAffected}>{isRegeneratingAffected ? '正在生成重推预览…' : <><RefreshCcw size={14} /> 生成重推差异预览</>}</button>}{staleAuthorBeats.length > 0 && <div className="curve-stale-author-actions"><span>你的版本需要单独决定：</span>{staleAuthorBeats.map((beat) => <button className="text-action" type="button" key={beat.id} onClick={() => beginEdit(beat)} disabled={isLoading}><PencilLine size={14} /> 编辑我的版本</button>)}</div>}{staleBeats.length - staleProposalBeats.length > 0 && <span>原始材料可在下方账本中选择“暂不纳入本版本”；处理完所有 stale 节点后才能确认。</span>}</div></div>}
@@ -378,10 +378,10 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
              onResolve={(ids, designIds) => void resolveRegeneration(ids, designIds)}
            />}
           {missingDesignSections.length > 0 && !session.confirmedCurve && <p className="curve-stale-notice curve-design-warning"><CircleAlert size={15} /> 故事设计记录还缺少：{missingDesignSections.join('、')}。请恢复或编辑相关节点后再确认。</p>}
-          {!session.confirmedCurve && <SourceFactLedger facts={sourceFacts} beats={curve.beats} busyFactId={busyFactId} disabled={isLoading} onSetDisposition={updateFactDisposition} />}
+          {!session.confirmedCurve && sourceFacts.length > 0 && <details className="story-review-details" open={unresolvedFacts.length > 0}><summary>查看原文保留情况{unresolvedFacts.length > 0 && <span>{unresolvedFacts.length} 项待决定</span>}</summary><SourceFactLedger facts={sourceFacts} beats={curve.beats} busyFactId={busyFactId} disabled={isLoading} onSetDisposition={updateFactDisposition} /></details>}
           <div className="curve-version-bar"><button className="text-action" type="button" onClick={() => setShowVersions((visible) => !visible)} disabled={isLoading}><History size={15} /> {showVersions ? '收起版本记录' : `查看已保存版本（${session.curveVersions.length}）`}</button>{showVersions && <CurveVersionList versions={session.curveVersions} activeVersionId={session.activeCurveVersionId} disabled={isLoading} onSelect={(versionId) => void session.selectCurveVersion(versionId)} />}</div>
           <div className="curve-footer-actions">
-            {session.confirmedCurve ? <button className="primary-action" type="button" onClick={() => hasStartedStoryPath ? void session.continueToStorySpine() : void session.startStorySpineFromCurve()} disabled={isLoading}>{isLoading ? '正在准备第一回合…' : hasStartedStoryPath ? '返回当前推演' : '确认主线后，开始第一回合'} <ArrowRight size={18} /></button> : <button className="primary-action" type="button" onClick={() => void session.confirmProvisionalCurve(acceptedDesignIds)} disabled={!canConfirm}>{isLoading ? '正在确认主线…' : '接受未来设计（不确认任何动作或结果）'} <Check size={18} /></button>}
+            {session.confirmedCurve ? <button className="primary-action" type="button" onClick={() => hasStartedStoryPath ? void session.continueToStorySpine() : void session.startStorySpineFromCurve()} disabled={isLoading}>{isLoading ? '正在准备第一回合…' : hasStartedStoryPath ? '返回当前推演' : '确认主线后，开始第一回合'} <ArrowRight size={18} /></button> : <button className="primary-action" type="button" onClick={() => void session.confirmProvisionalCurve(acceptedDesignIds)} disabled={!canConfirm}>{isLoading ? '正在确认主线…' : '确定这版故事方向'} <Check size={18} /></button>}
           </div>
         </section>
         <aside className="curve-aside"><div className="curve-aside-title"><Sparkles size={15} /> 共创边界</div><p>你在这里决定故事怎么发展。系统补出的名字、秘密和意外都只是可编辑提案；确认整条主线以前，不会创建连续剧情。</p><div className="curve-aside-divider" /><span>当前状态</span><strong>{session.confirmedCurve ? hasStartedStoryPath ? '主线已确认，正在推演当前情境' : '主线已确认，等待你开始第一回合' : '仍在设计主线，尚未创建剧情回合'}</strong>{!session.confirmedCurve && <small>拒绝的提案不会重新变成故事事实。原始材料必须被纳入，或由你明确暂不纳入。</small>}</aside>
@@ -534,7 +534,7 @@ function CurveBeatCard({
             </div>
           </div>
         ) : <p>{beat.detail}</p>}
-        {sourceFactText && <p className="curve-beat-facts"><Archive size={13} /> 原始材料：{sourceFactText}</p>}
+        {sourceFactText && <details className="story-review-source"><summary>查看原文</summary><blockquote>{sourceFactText}</blockquote></details>}
         {(beat.status !== 'rejected' || clarifications.length > 0) && <CurveClarificationReview
           beat={beat}
           clarifications={clarifications}
@@ -644,8 +644,8 @@ function CurveDesignSummary({ curve }: { curve: NonNullable<StorySession['provis
   const sections = STORY_DESIGN_SECTION_RULES.map(({ key, label }) => [label, design[key]] as const)
   const beatLabel = (id: string) => curve.beats.find((beat) => beat.id === id)?.title ?? id
   const foundation = curve.foundation ?? design.foundation
-  return <section className="curve-design-summary" aria-label="故事设计记录覆盖情况">
-    <header><strong>故事设计记录</strong><small>曲线与冲突、困境、中段和两端共用下面这份冻结基础</small></header>
+  return <details className="story-review-details" aria-label="故事设定"><summary>查看故事设定</summary><section className="curve-design-summary">
+    <header><strong>故事设定</strong><small>人物目标、阻碍与可能发展</small></header>
     <div className="curve-design-coverage">{sections.map(([label, ids]) => <span key={label}><b>{label}</b>{ids.map(beatLabel).join('、') || '待补充'}</span>)}</div>
     {foundation && <div className="curve-foundation" aria-label="统一故事设计基础">
       <section><b>冲突核心</b><dl><dt>目标</dt><dd>{foundation.conflictCore.goal}</dd><dt>阻碍</dt><dd>{foundation.conflictCore.obstacle}</dd><dt>取舍</dt><dd>{foundation.conflictCore.tradeoff}</dd></dl></section>
@@ -653,7 +653,7 @@ function CurveDesignSummary({ curve }: { curve: NonNullable<StorySession['provis
       <section><b>中间发展</b><dl><dt>升级</dt><dd>{foundation.middleDevelopment.escalation}</dd><dt>转折</dt><dd>{foundation.middleDevelopment.midpoint}</dd><dt>高潮压力</dt><dd>{foundation.middleDevelopment.climaxPressure}</dd></dl></section>
       <section><b>故事两端</b><dl><dt>开端</dt><dd>{foundation.storyEnds.openingClue}</dd><dt>高潮</dt><dd>{foundation.storyEnds.climax}</dd><dt>变化</dt><dd>{foundation.storyEnds.resolution}</dd></dl></section>
     </div>}
-  </section>
+  </section></details>
 }
 
 function CurveRegenerationReview({
@@ -761,17 +761,36 @@ function PreparationSupplementReview({ item, disabled, onReview }: { item: impor
 }
 
 function ReasoningDesignReview({ reasoning, acceptedIds, onChange, disabled }: { reasoning: StoryReasoningProposal; acceptedIds: string[]; onChange: (ids: string[]) => void; disabled: boolean }) {
-  return <section aria-label="事实、创意与未知审阅">
-    <h3>事实、创意与未知</h3><p>引用只证明来源，不证明因果。新增规则或代价是可拒绝的创意；接受它只记录未来设计，不代表规则已生效、人物已执行或后果已发生。</p>
-    {designReviewItems(reasoning).map(s => <div key={s.id}>
-      <p><strong>{s.basis.kind === 'author-text' ? '作者原文' : s.basis.kind === 'unknown' ? '未知 · 不能假定' : '设计提案 · 可不采用'}</strong> · {s.id}：{s.text}</p>
-      {s.basis.kind !== 'unknown' && s.basis.evidence.map(e => <blockquote key={e.sourceId + e.quote}>{e.sourceId}：{e.quote}</blockquote>)}
-      {s.basis.kind !== 'author-text' && s.basis.unknownIds.length > 0 && <small>依赖未确定问题：{s.basis.unknownIds.join('、')}，不能确认。</small>}
-      <small>设计依赖：{[...((s as { constraintIds?: string[] }).constraintIds ?? []), ...((s as { relationIds?: string[] }).relationIds ?? []), ...((s as { actionIds?: string[] }).actionIds ?? []), ...((s as { fromIds?: string[] }).fromIds ?? []), ...((s as { toIds?: string[] }).toIds ?? [])].join('、') || '未声明结构依赖（不代表因果已成立）'}</small>
-      {reasoning.designReview && s.basis.kind === 'design-proposal' && <label><input type="checkbox" disabled={disabled || reasoning.designReview.acceptedProposalIds.includes(s.id)} checked={acceptedIds.includes(s.id) || reasoning.designReview.acceptedProposalIds.includes(s.id)} onChange={e => onChange(e.target.checked ? [...acceptedIds, s.id] : acceptedIds.filter(id => id !== s.id))} />仅接受这项未来设计；不是事实或执行确认</label>}
-    </div>)}
-    {reasoning.unknowns.map(q => <p key={q.id}>未知：{q.question}</p>)}
-    <p>不采用某项创意：不要勾选接受，编辑或拒绝依赖它的节点，再生成替代预览。未审阅创意不能静默进入确认后的设计。</p>
+  const items = designReviewItems(reasoning)
+  const groups = new Map<string, typeof items>()
+  for (const item of items) {
+    const key = JSON.stringify([item.basis.kind, item.text, item.basis.kind === 'author-text' ? [] : [...item.basis.unknownIds].sort()])
+    groups.set(key, [...(groups.get(key) ?? []), item])
+  }
+  const proposals = [...groups.values()].filter(group => group[0].basis.kind === 'design-proposal')
+  const accepted = (id: string) => acceptedIds.includes(id) || Boolean(reasoning.designReview?.acceptedProposalIds.includes(id))
+  const pending = proposals.filter(group => !group.every(s => accepted(s.id))).length
+  const sources = [...new Set(items.filter(s => s.basis.kind === 'author-text').map(s => s.text))]
+  return <section className="story-direction-review" aria-label="故事方向确认">
+    <details className="story-review-details">
+      <summary>确认这版故事中的创意 <span>{pending ? `${pending} 项待决定` : proposals.length ? '已选择' : '暂无新增创意'}</span></summary>
+      <p className="story-review-help">选择你愿意保留的内容。这里决定下一步怎么写，人物还没有行动。</p>
+      {proposals.map(group => {
+        const s = group[0], checked = group.every(item => accepted(item.id))
+        const unknownIds = s.basis.kind === 'author-text' ? [] : s.basis.unknownIds
+        const unresolved = unknownIds.length > 0
+        const editableIds = group.filter(item => !reasoning.designReview?.acceptedProposalIds.includes(item.id)).map(item => item.id)
+        const quotes = [...new Set(group.flatMap(item => item.basis.kind === 'unknown' ? [] : item.basis.evidence.map(e => e.quote)))]
+        return <article className="story-review-choice" key={s.id}>
+          {reasoning.designReview ? <label><input type="checkbox" disabled={disabled || unresolved || !editableIds.length} checked={checked} onChange={e => onChange(e.target.checked ? [...new Set([...acceptedIds, ...editableIds])] : acceptedIds.filter(id => !editableIds.includes(id)))} /><span>{s.text}</span></label> : <p>{s.text}</p>}
+          {unresolved && <p className="story-review-help">先决定：{unknownIds.map(id => reasoning.unknowns.find(q => q.id === id)?.question ?? '尚待补充的故事条件').join('；')}</p>}
+          {!!quotes.length && <details className="story-review-source"><summary>从哪句话出发</summary>{quotes.map(quote => <blockquote key={quote}>{quote}</blockquote>)}<small>原文提供灵感，后续发展仍由你决定。</small></details>}
+        </article>
+      })}
+      {!!sources.length && <details className="story-review-source"><summary>你的原文</summary>{sources.map(text => <blockquote key={text}>{text}</blockquote>)}</details>}
+      {!!reasoning.unknowns.length && <details className="story-review-source"><summary>还没决定的内容</summary>{reasoning.unknowns.map(q => <p key={q.id}>{q.question}</p>)}</details>}
+      <p className="story-review-help">不想保留的内容，可以回到对应故事节点编辑或换一个提案。</p>
+    </details>
   </section>
 }
 
