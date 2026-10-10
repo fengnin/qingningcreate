@@ -21,9 +21,11 @@ function text(value: unknown, max = 240): string {
   if (typeof value !== 'string' || !value.trim() || value.length > max) invalid('文本缺失或过长。')
   return value as string
 }
-function ids(value: unknown, allowed: Set<string>): string[] {
+function ids(value: unknown, allowed: Set<string>, path = '引用'): string[] {
   const result = list(value).map(v => text(v, 80))
-  if (new Set(result).size !== result.length || result.some(id => !allowed.has(id))) invalid('引用不存在或重复。')
+  if (new Set(result).size !== result.length) invalid(`${path}：引用重复。`)
+  const missing = result.filter(id => !allowed.has(id))
+  if (missing.length) invalid(`${path}：引用不在合法集合中：${missing.join(', ')}。合法 ID：${[...allowed].join(', ') || '无'}。不得将未知或设计引用转换为已知依据。`)
   return result
 }
 function unique(items: { id: string }[]) {
@@ -35,6 +37,8 @@ export const preparationExtractionPrompt = `先整理作者材料，不设计曲
 
 export const preparationCandidatesPrompt = `你只设计曲线之前的最小行动候选，不输出曲线，不预测既成事件。
 输出精确 JSON {candidates:[{id,action,materialIds,preconditionIds,possibleResult,resultBasisIds,unknownIds}],questions:[{id,question,materialIds}]}。
+引用合同：materialIds、preconditionIds、resultBasisIds 只能取 referenceContract.knownMaterialIds；即使描述行动对象，也不能引用 role=unknown 的材料。questions[].materialIds 可取 referenceContract.questionMaterialIds（含未知材料）。unknownIds 只取本次 questions[].id，不能填材料 ID。缺少已知对象时允许 candidates=[]，用具体问题恢复，不必凑行动。
+合法编码示例（仅示意引用，不是故事设定）：若已知材料 k1、未知材料 u1，问题 {id:"q1",question:"请明确尚未确定的对象。",materialIds:["u1"]}；依赖该问题的候选使用 materialIds:["k1"],preconditionIds:[],resultBasisIds:[],unknownIds:["q1"]；没有独立行动就仅返回 questions。不能把 u1 放入候选的三个依据数组，也不能为了通过校验补造 k1 或结果依据。
 最多3个具体候选，不要求凑满。action 说明谁对已有对象做什么；materialIds 指向支持行动对象及目标的已知原文。preconditionIds 逐项列出行动成立所需、作者已明确的条件。possibleResult 是行动的条件性可能结果，resultBasisIds 引用支持该结果的明确作者条件或目标；引用本身不能证明因果。不要保证态度变化、取得许可或关系改善。没有结果依据时，保留结果未知并提出具体问题，unknownIds 引用 questions 的 ID；这类候选不可接受为成立结构。
 条件不存在时不发明条件：机构规则、物件能力、许可范围和人物反应没有原文依据就提问。未知材料不能当已知证据。可以设计使用已有材料的新做法，但新增规则或新因果必须先向作者询问，不能包装成已有依据。已有明确拒绝不改写成可能同意。条件可兼容时设计兼容行动，不硬写无法兼得；没有期限不制造倒计时。
 若关键条件不足，给能具体回答的问题，或不依赖该条件的独立候选。questions 不能把生成失误归咎于作者，不能要求作者重复已有明确答案。候选和可能结果都是未来待审设计，接受不意味着执行。`
@@ -68,18 +72,23 @@ export function parsePreparationMaterial(value: unknown, sources: StoryPreparati
   return material
 }
 
+export function preparationReferenceContract(material: StoryPreparationItem[]) {
+  return { knownMaterialIds: material.filter(m => m.role !== 'unknown').map(m => m.id),
+    questionMaterialIds: material.map(m => m.id), unknownDependencyIds: 'questions[].id' }
+}
+
 export function parsePreparationCandidates(value: unknown, material: StoryPreparationItem[]): Pick<StoryPreparation, 'candidates' | 'questions'> {
   const r = object(value, ['candidates', 'questions'])
   const materialIds = new Set(material.map(m => m.id)), known = new Set(material.filter(m => m.role !== 'unknown').map(m => m.id))
-  const questions = list(r.questions, 8).map(v => {
+  const questions = list(r.questions, 8).map((v, i) => {
     const q = object(v, ['id', 'question', 'materialIds'])
-    return { id: text(q.id, 80), question: text(q.question), materialIds: ids(q.materialIds, materialIds) }
+    return { id: text(q.id, 80), question: text(q.question), materialIds: ids(q.materialIds, materialIds, `questions[${i}].materialIds`) }
   })
   const questionIds = new Set(questions.map(q => q.id))
-  const candidates = list(r.candidates, 3).map(v => {
+  const candidates = list(r.candidates, 3).map((v, i) => {
     const c = object(v, ['id', 'action', 'materialIds', 'preconditionIds', 'possibleResult', 'resultBasisIds', 'unknownIds'])
-    const item: StoryPreparationCandidate = { id: text(c.id, 80), action: text(c.action), materialIds: ids(c.materialIds, known),
-      preconditionIds: ids(c.preconditionIds, known), possibleResult: text(c.possibleResult), resultBasisIds: ids(c.resultBasisIds, known), unknownIds: ids(c.unknownIds, questionIds) }
+    const item: StoryPreparationCandidate = { id: text(c.id, 80), action: text(c.action), materialIds: ids(c.materialIds, known, `candidates[${i}].materialIds`),
+      preconditionIds: ids(c.preconditionIds, known, `candidates[${i}].preconditionIds`), possibleResult: text(c.possibleResult), resultBasisIds: ids(c.resultBasisIds, known, `candidates[${i}].resultBasisIds`), unknownIds: ids(c.unknownIds, questionIds, `candidates[${i}].unknownIds`) }
     if (!item.materialIds.length || (!item.resultBasisIds.length && !item.unknownIds.length)) invalid('行动或可能结果缺少作者依据，应提出具体问题。')
     return item
   })
@@ -92,7 +101,7 @@ export async function generateStoryPreparation(idea: string, brief: CreativeBrie
   const sources = [{ id: 'author-input', text: idea }]
   const extracted = await requestQwenJson({ systemPrompt: preparationExtractionPrompt, userPrompt: JSON.stringify({ sources }), temperature: 0.1, maxTokens: 2400, diagnosticStage: 'preparation-extraction' })
   const material = parsePreparationMaterial(extracted, sources)
-  const output = await requestQwenJson({ systemPrompt: preparationCandidatesPrompt, userPrompt: JSON.stringify({ sources, material, brief }), temperature: 0.25, maxTokens: 3000, diagnosticStage: 'preparation-candidates' })
+  const output = await requestQwenJson({ systemPrompt: preparationCandidatesPrompt, userPrompt: JSON.stringify({ sources, material, brief, referenceContract: preparationReferenceContract(material) }), temperature: 0.25, maxTokens: 3000, diagnosticStage: 'preparation-candidates' })
   const candidates = parsePreparationCandidates(output, material)
   const now = Date.now()
   return { id: `curve-${randomUUID()}`, title: '先审阅行动与条件', status: 'draft', brief, beats: [], instructions: [],

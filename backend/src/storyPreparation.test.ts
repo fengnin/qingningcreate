@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { AppError } from './qwen.js'
-import { acceptPreparation, activePreparationMaterial, generateStoryPreparation, generateCurveFromPreparation, parsePreparationMaterial, parsePreparationCandidates, parsePreparationReview } from './storyPreparation.js'
+import { acceptPreparation, activePreparationMaterial, generateStoryPreparation, generateCurveFromPreparation, parsePreparationMaterial, parsePreparationCandidates, parsePreparationReview, preparationReferenceContract } from './storyPreparation.js'
 import { confirmProvisionalCurve, materializeConfirmedCurve } from './storyCoCreation.js'
 import { requiredDesignProposalIds } from './storyDesignReview.js'
 import { validateStoryReasoningProposal } from './storyReasoningContract.js'
@@ -28,6 +28,23 @@ test('candidates cannot cite unknown material as result evidence; question-only 
   assert.throws(() => acceptPreparation(p, ['count']), code('STORY_PREPARATION_UNKNOWN_DEPENDENCY'))
   assert.deepEqual(p.acceptedCandidateIds, [])
 })
+
+test('candidate reference contract separates unknown material from question dependencies without repairing evidence', () => {
+  const before = structuredClone(material)
+  assert.deepEqual(preparationReferenceContract(material).knownMaterialIds, ['m0','m1','m2','m3'])
+  assert.deepEqual(preparationReferenceContract(material).questionMaterialIds, material.map(m => m.id))
+  const questions = [{ id: 'q', question: '差异原因是什么？', materialIds: ['m4'] }]
+  for (const field of ['materialIds','preconditionIds','resultBasisIds'] as const) {
+    assert.throws(() => parsePreparationCandidates({ candidates: [{ ...candidate, [field]: ['m4'] }], questions }, material),
+      (e: unknown) => e instanceof AppError && e.code === 'STORY_PREPARATION_INVALID_OUTPUT'
+        && e.message.includes(`candidates[0].${field}`) && e.message.includes('m4'))
+  }
+  assert.throws(() => parsePreparationCandidates({ candidates: [{ ...candidate, unknownIds: ['m4'] }], questions }, material),
+    (e: unknown) => e instanceof AppError && e.message.includes('candidates[0].unknownIds'))
+  const pending = { ...candidate, resultBasisIds: [], unknownIds: ['q'] }
+  assert.deepEqual(parsePreparationCandidates({ candidates: [pending], questions }, material), { candidates: [pending], questions })
+  assert.deepEqual(material, before)
+})
 test('two model calls stop before curve; only explicit acceptance permits arrangement, no unknown enters fact ledger', async () => {
   const originalFetch = globalThis.fetch
   const env = { key: process.env.DASHSCOPE_API_KEY, disable: process.env.STORY_DISABLE_MODEL }
@@ -37,6 +54,9 @@ test('two model calls stop before curve; only explicit acceptance permits arrang
   globalThis.fetch = async (_url, init) => {
     const input = JSON.parse(String(init?.body))
     const prompt = input.messages[0].content as string
+    if (prompt.includes('最小行动候选')) {
+      assert.deepEqual(JSON.parse(input.messages[1].content).referenceContract, preparationReferenceContract(material))
+    }
     if (simple) {
       const user = JSON.parse(input.messages[1].content)
       assert.deepEqual(user.authorReview, review)
