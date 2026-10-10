@@ -16,7 +16,7 @@ await build({entryPoints:[resolve(backend,'../frontend/src/story/storyApi.ts')],
 const idea='齐朔想整理底片；按编号分类不会改动底片；没有期限；拍摄日期尚未确定。'
 const material=idea.split('；').map((quote,i)=>({id:'m'+i,sourceId:'author-input',quote,role:i===0?'goal':i===3?'unknown':'condition'}))
 const candidate={id:'sort',action:'齐朔按编号分类底片。',materialIds:['m0','m1'],preconditionIds:['m1'],possibleResult:'按编号分类后，底片可能按编号归组而不被改动；日期仍未知。',resultBasisIds:['m1'],unknownIds:[]}
-let child,base,calls=0,bad=false,hold,release,expectedReview,missingGoal=false,invalidGoal=false
+let child,base,calls=0,bad=false,omitCondition=false,hold,release,expectedReview,missingGoal=false,invalidGoal=false
 const stub=createServer(async(req,res)=>{
  const chunks=[];for await(const c of req)chunks.push(c)
  const request=JSON.parse(Buffer.concat(chunks));calls++;assert.equal(request.model,'qwen-plus')
@@ -34,6 +34,7 @@ const stub=createServer(async(req,res)=>{
    {id:'observe',kind:'observation',text:'建议观察底片编号。',question:'作者是否增加观察步骤？',materialIds:['m1']},
    {id:'hypothesis',kind:'hypothesis',text:'建议审阅编号可能难以辨认的假设。',question:'作者是否确认这个设计？',materialIds:['m1']},
  ]}
+ if(omitCondition && out.steps) for(const step of out.steps) step.materialIds=step.materialIds.filter(id=>id!=='m2')
  res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({choices:[{message:{content:JSON.stringify(out)}}]}))
 })
 await new Promise(r=>stub.listen(0,'127.0.0.1',r))
@@ -61,6 +62,16 @@ try{
  assert.equal(calls,2);assert.deepEqual(await snapshot(s.storyId),before)
  bad=true;await api('/api/story/preparation/accept',{...ref(s),acceptedCandidateIds:['sort']},502,'STORY_PREPARATION_INVALID_OUTPUT');bad=false
  assert.deepEqual(await snapshot(s.storyId),before);assert.equal(readFileSync(store,'utf8'),stored)
+ omitCondition=true
+ const partialStart=await api('/api/story/co-create/start',startBody)
+ const omitted=await api('/api/story/preparation/accept',{...ref(partialStart),acceptedCandidateIds:['sort']})
+ const {requiredDesignProposalIds:partialReviewIds}=await import('../dist/storyDesignReview.js')
+ assert.equal(omitted.curve.design.sourceFacts.find(f=>f.id==='m2').disposition,'needs-author-decision')
+ const partialBefore=await snapshot(partialStart.storyId),partialDisk=readFileSync(store,'utf8')
+ await api('/api/story/curve/confirm',{...ref(omitted),acceptedDesignProposalIds:partialReviewIds(omitted.curve.reasoning)},400,'STORY_SOURCE_FACTS_UNRESOLVED')
+ assert.deepEqual(await snapshot(partialStart.storyId),partialBefore);assert.equal(readFileSync(store,'utf8'),partialDisk)
+ omitCondition=false
+ assert.deepEqual(await snapshot(s.storyId),before)
  const entered=new Promise(r=>hold=r)
  const pending=api('/api/story/preparation/accept',{...ref(s),acceptedCandidateIds:['sort']},409,'STORY_SESSION_CONFLICT')
  await entered;hold=undefined

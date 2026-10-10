@@ -182,10 +182,17 @@ test('new fault, observation and criterion remain independent; no title or prose
   process.env.DASHSCOPE_API_KEY = 'stub'; process.env.STORY_DISABLE_MODEL = 'false'
   const curve = { id: 'curve-test', title: '待审', status: 'draft' as const, brief, beats: [], instructions: [], createdAt: 1, updatedAt: 1,
     preparation: { protocol: 1 as const, status: 'needs-review' as const, sources: [source], material, candidates: [candidate], questions: [], acceptedCandidateIds: [], executed: false as const } }
-  let smuggle: 'none' | 'text' | 'title' = 'none'
-  globalThis.fetch = async () => {
+  let smuggle: 'none' | 'text' | 'title' | 'omit-condition' | 'recover-condition' = 'none'
+  let recoveryCalls = 0
+  globalThis.fetch = async (_url, init) => {
+    const user = JSON.parse(JSON.parse(String(init?.body)).messages[1].content)
+    if (smuggle === 'recover-condition' && user.coverageReview) {
+      recoveryCalls++
+      assert.deepEqual(user.coverageReview.omittedMaterialIds, ['m3'])
+    }
     const steps = ['current-state','trigger','resolution'].map((kind, i) => { const content = i === 0 ? material[0]!.quote : i === 1 ? candidate.action : candidate.possibleResult; return { kind, title: content, text: content, candidateIds: i ? ['count'] : [], materialIds: ['m0','m1','m2','m3'] } })
-    if (smuggle !== 'none') steps[1]![smuggle] += '必须先检查纸张有无破损。'
+    if (smuggle === 'omit-condition' || (smuggle === 'recover-condition' && !user.coverageReview)) for (const step of steps) step.materialIds = step.materialIds.filter(id => id !== 'm3')
+    else if (smuggle === 'text' || smuggle === 'title') steps[1]![smuggle] += '必须先检查纸张有无破损。'
     const supplements = [{ id: 'inspection', kind: 'observation', text: '建议检查纸张有无破损。', question: '作者是否希望增加这个检查步骤？', materialIds: ['m0'] }]
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ steps, supplements }) } }] }), { status: 200 })
   }
@@ -196,6 +203,18 @@ test('new fault, observation and criterion remain independent; no title or prose
     assert.equal(JSON.stringify(mapped.reasoning).includes('破损'), false)
     assert.equal(JSON.stringify(mapped.foundation).includes('破损'), false)
     assert.equal(mapped.preparation!.executed, false)
+    assert.ok(mapped.design!.sourceFacts.find(f => f.id === 'm3')!.coveredByBeatIds.length)
+    assert.deepEqual(mapped.preparation!.candidates[0]!.preconditionIds, candidate.preconditionIds)
+    assert.deepEqual(mapped.preparation!.candidates[0]!.resultBasisIds, candidate.resultBasisIds)
+    smuggle = 'omit-condition'
+    const partial = await generateCurveFromPreparation(curve, ['count'])
+    assert.equal(partial.design!.sourceFacts.find(f => f.id === 'm3')!.disposition, 'needs-author-decision')
+    assert.throws(() => confirmProvisionalCurve(partial, requiredDesignProposalIds(partial.reasoning!)), code('STORY_SOURCE_FACTS_UNRESOLVED'))
+    smuggle = 'recover-condition'
+    const recovered = await generateCurveFromPreparation(curve, ['count'])
+    assert.equal(recoveryCalls, 1)
+    assert.equal(recovered.design!.sourceFacts.find(f => f.id === 'm3')!.disposition, 'integrated')
+    assert.deepEqual(recovered.preparation!.candidates[0]!.preconditionIds, candidate.preconditionIds)
     for (const mode of ['text','title'] as const) { smuggle = mode; await assert.rejects(() => generateCurveFromPreparation(curve, ['count']), code('STORY_PREPARATION_INVALID_OUTPUT')) }
     assert.equal(curve.beats.length, 0)
   } finally {
