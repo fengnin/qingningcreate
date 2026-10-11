@@ -34,7 +34,14 @@ import {
   startSessionStorySpineFromCurve,
   updateSessionCurveBeat,
 } from './storyService.js'
-import { AppError } from './qwen.js'
+import {
+  AppError,
+  getConfiguredModelOutputAttemptLimit,
+  requestQwenJson,
+  withModelDiagnostic,
+  withConfiguredQwenRequestBudget,
+  withQwenRequestBudget,
+} from './qwen.js'
 import {
   confirmProvisionalCurve,
   createProvisionalCurveFallback,
@@ -174,6 +181,135 @@ test.before(() => {
 test.after(() => {
   if (initialStoryDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
   else process.env.STORY_DISABLE_MODEL = initialStoryDisableModel
+})
+
+test('isolated model diagnostics cap response-format fallback at one upstream request', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  const previousApiKey = process.env.DASHSCOPE_API_KEY
+  const previousRequestAttempts = process.env.STORY_QWEN_REQUEST_ATTEMPTS
+  const previousOutputAttempts = process.env.STORY_MODEL_OUTPUT_ATTEMPTS
+  const previousResponseFormatFallback = process.env.STORY_QWEN_DISABLE_RESPONSE_FORMAT_FALLBACK
+  const previousFetch = globalThis.fetch
+  let calls = 0
+
+  process.env.STORY_DISABLE_MODEL = 'false'
+  process.env.DASHSCOPE_API_KEY = 'test-only-key'
+  process.env.STORY_QWEN_REQUEST_ATTEMPTS = '1'
+  process.env.STORY_MODEL_OUTPUT_ATTEMPTS = '1'
+  process.env.STORY_QWEN_DISABLE_RESPONSE_FORMAT_FALLBACK = 'false'
+  try {
+    globalThis.fetch = async () => {
+      calls += 1
+      return new Response(JSON.stringify({ error: { message: 'response_format is not supported' } }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+
+    assert.equal(getConfiguredModelOutputAttemptLimit(3), 1)
+    await assert.rejects(
+      () => withConfiguredQwenRequestBudget(() => requestQwenJson({
+        systemPrompt: 'test system prompt',
+        userPrompt: 'test user prompt',
+        diagnosticStage: 'isolated-model-cap-test',
+      })),
+      (error: unknown) => error instanceof AppError
+        && error.code === 'QWEN_REQUEST_BUDGET_EXHAUSTED'
+        && error.modelDiagnostic?.stage === 'isolated-model-cap-test:without-response-format:request-budget',
+    )
+    assert.equal(calls, 1, 'response-format fallback must not issue a second upstream request after the budget is exhausted')
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+    if (previousApiKey === undefined) delete process.env.DASHSCOPE_API_KEY
+    else process.env.DASHSCOPE_API_KEY = previousApiKey
+    if (previousRequestAttempts === undefined) delete process.env.STORY_QWEN_REQUEST_ATTEMPTS
+    else process.env.STORY_QWEN_REQUEST_ATTEMPTS = previousRequestAttempts
+    if (previousOutputAttempts === undefined) delete process.env.STORY_MODEL_OUTPUT_ATTEMPTS
+    else process.env.STORY_MODEL_OUTPUT_ATTEMPTS = previousOutputAttempts
+    if (previousResponseFormatFallback === undefined) delete process.env.STORY_QWEN_DISABLE_RESPONSE_FORMAT_FALLBACK
+    else process.env.STORY_QWEN_DISABLE_RESPONSE_FORMAT_FALLBACK = previousResponseFormatFallback
+  }
+})
+
+test('request budget covers later model calls in the same workflow', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  const previousApiKey = process.env.DASHSCOPE_API_KEY
+  const previousBaseUrl = process.env.DASHSCOPE_BASE_URL
+  const previousFetch = globalThis.fetch
+  let calls = 0
+
+  process.env.STORY_DISABLE_MODEL = 'false'
+  process.env.DASHSCOPE_API_KEY = 'test-only-key'
+  process.env.DASHSCOPE_BASE_URL = 'https://model.test.invalid'
+  try {
+    globalThis.fetch = async () => {
+      calls += 1
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: '{"ok":true}' } }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+
+    await assert.rejects(
+      () => withQwenRequestBudget(1, async () => {
+        await requestQwenJson({
+          systemPrompt: 'first system prompt',
+          userPrompt: 'first user prompt',
+          diagnosticStage: 'workflow-first',
+        })
+        await requestQwenJson({
+          systemPrompt: 'second system prompt',
+          userPrompt: 'second user prompt',
+          diagnosticStage: 'workflow-second',
+        })
+      }),
+      (error: unknown) => error instanceof AppError
+        && error.code === 'QWEN_REQUEST_BUDGET_EXHAUSTED'
+        && error.modelDiagnostic?.stage === 'workflow-second:request-budget',
+    )
+    assert.equal(calls, 1, 'a later recovery/model call must be blocked before fetch')
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+    if (previousApiKey === undefined) delete process.env.DASHSCOPE_API_KEY
+    else process.env.DASHSCOPE_API_KEY = previousApiKey
+    if (previousBaseUrl === undefined) delete process.env.DASHSCOPE_BASE_URL
+    else process.env.DASHSCOPE_BASE_URL = previousBaseUrl
+  }
+})
+
+test('request-budget diagnostics keep their blocked stage through model error enrichment', () => {
+  const budgetError = new AppError(
+    'budget exhausted',
+    429,
+    'QWEN_REQUEST_BUDGET_EXHAUSTED',
+    undefined,
+    undefined,
+    undefined,
+    {
+      stage: 'workflow-second:request-budget',
+      attempt: 1,
+      maxAttempts: 1,
+      reason: 'budget exhausted',
+    },
+  )
+
+  const enriched = withModelDiagnostic(budgetError, {
+    stage: 'story-stage:response-schema',
+    attempt: 1,
+    maxAttempts: 1,
+    response: { kind: 'object' },
+  })
+
+  assert.equal(enriched.code, 'QWEN_REQUEST_BUDGET_EXHAUSTED')
+  assert.equal(enriched.statusCode, 429)
+  assert.equal(enriched.modelDiagnostic?.stage, 'workflow-second:request-budget')
+  assert.equal(enriched.modelDiagnostic?.reason, 'budget exhausted')
 })
 
 function createCompactOpeningModelResponse(

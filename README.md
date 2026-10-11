@@ -155,6 +155,10 @@ npm.cmd run start
 | `QWEN_MODEL` | 否 | `qwen-plus` | 使用的通义千问模型。 |
 | `PORT` | 否 | `8787` | 后端监听端口。修改后需同步调整 `frontend/vite.config.ts` 的代理目标。 |
 | `STORY_DISABLE_MODEL` | 否 | `false` | 仅用于本地合同验收；设为 `true` 时跳过模型网络调用，使用带事实追踪的结构草案。 |
+| `STORY_QWEN_REQUEST_ATTEMPTS` | 否 | 未设置时不启用 | 诊断时为单个 API 请求设置 Qwen 上游 HTTP 调用总上限，覆盖传输重试、`response_format` 降级和后续恢复调用；隔离诊断可设为 `1`。未设置时保持默认重试策略。 |
+| `STORY_MODEL_OUTPUT_ATTEMPTS` | 否 | 各流程默认 2 或 3 | 模型启用时单次业务生成的结构重试上限；只能降低默认值。隔离诊断可设为 `1`，不影响 `STORY_DISABLE_MODEL=true` 的离线合同路径。 |
+| `STORY_QWEN_DISABLE_RESPONSE_FORMAT_FALLBACK` | 否 | `false` | 设为 `true` 时，不会因 `response_format` 错误再发起一次去掉格式参数的请求。 |
+| `STORY_QWEN_REQUEST_TIMEOUT_MS` | 否 | `90000` | 单次上游请求超时毫秒数；只能降低默认值。 |
 | `DASHSCOPE_BASE_URL` | 否 | DashScope 兼容接口地址 | 用于切换兼容 API 地址。 |
 | `STORY_TURN_GROUNDING_REVIEW` | 否 | `false` | 是否启用剧情回合的额外事实校验。 |
 | `STORY_BODY_CONSISTENCY_REVIEW` | 否 | `true` | 是否在生成完整故事后执行一致性检查。 |

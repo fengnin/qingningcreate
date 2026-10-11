@@ -5,7 +5,13 @@ import { acceptStoryReasoningDesign } from './storyReasoningContract.js'
 import { reviewSelectedReasoningDesign } from './storyDesignReview.js'
 import { getAuthorDecisionMaterial, renderAuthorDecisionChoice } from './storyDecision.js'
 import { getClarificationGroundingFacts, getClarificationsForBeat, getUnresolvedClarifications, markClarificationsResolved, reviewClarificationReplacement } from './storyClarification.js'
-import { AppError, requestQwenJson, summarizeModelResponse, withModelDiagnostic } from './qwen.js'
+import {
+  AppError,
+  getConfiguredModelOutputAttemptLimit,
+  requestQwenJson,
+  summarizeModelResponse,
+  withModelDiagnostic,
+} from './qwen.js'
 import {
   createStoryDesignRecord,
   buildStoryCurveFoundation,
@@ -48,7 +54,7 @@ import type {
 const maximumCurveBeatLength = 220
 const maximumModelCurveBeatLength = 120
 const maximumCurveInstructionLength = 180
-const maxCurveGenerationAttempts = 3
+const maxCurveGenerationAttempts = getConfiguredModelOutputAttemptLimit(3)
 const curveBeatKinds: readonly CurveBeatKind[] = [
   'current-state',
   'character-tension',

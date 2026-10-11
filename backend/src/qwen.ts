@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import type {
   StoryConflictCoreContextPrefill,
   StoryConflictCoreSystemDraft,
@@ -57,6 +58,17 @@ export function withModelDiagnostic(
   diagnostic: ModelFailureDiagnostic,
 ): AppError {
   if (error instanceof AppError) {
+    const modelDiagnostic = error.code === 'QWEN_REQUEST_BUDGET_EXHAUSTED'
+      ? {
+          ...diagnostic,
+          ...error.modelDiagnostic,
+          response: error.modelDiagnostic?.response ?? diagnostic.response,
+        }
+      : {
+          ...error.modelDiagnostic,
+          ...diagnostic,
+          response: error.modelDiagnostic?.response ?? diagnostic.response,
+        }
     return new AppError(
       error.message,
       error.statusCode,
@@ -64,7 +76,7 @@ export function withModelDiagnostic(
       error.conflictCoreContextPrefill,
       error.systemDraftPrefill,
       error.retryAfterMs,
-      { ...error.modelDiagnostic, ...diagnostic, response: error.modelDiagnostic?.response ?? diagnostic.response },
+      modelDiagnostic,
     )
   }
 
@@ -80,10 +92,20 @@ export function withModelDiagnostic(
 }
 
 const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions'
-const REQUEST_TIMEOUT_MS = 90_000
-const MAX_QWEN_REQUEST_ATTEMPTS = 2
+const defaultRequestTimeoutMs = 90_000
+const defaultQwenRequestAttempts = 2
 const QWEN_RETRY_BASE_DELAY_MS = 700
 const QWEN_RETRY_MAX_DELAY_MS = 5_000
+
+interface QwenRequestBudget {
+  remaining: number
+  maximum: number
+}
+
+// A model workflow can issue more than one request through retries, format
+// fallback, or a later recovery step. Keep an optional budget in async-local
+// state so an HTTP request can cap all of those paths together.
+const qwenRequestBudgetStorage = new AsyncLocalStorage<QwenRequestBudget>()
 
 const retryableQwenRequestErrorCodes = new Set([
   'QWEN_EMPTY_RESPONSE',
@@ -145,39 +167,111 @@ export async function requestQwenJson({
     max_tokens: maxTokens,
     response_format: { type: 'json_object' },
   }
+  const requestAttempts = defaultQwenRequestAttempts
 
   try {
-    return await sendRequestWithRetry(request, apiKey, diagnosticStage)
+    return await sendRequestWithRetry(request, apiKey, diagnosticStage, requestAttempts)
   } catch (error) {
     if (
+      !isQwenResponseFormatFallbackDisabled()
+      &&
       error instanceof AppError
       && error.code === 'QWEN_REQUEST_ERROR'
       && /response[_\s-]?format/i.test(error.message)
     ) {
       const { response_format: _responseFormat, ...fallbackRequest } = request
-      return sendRequestWithRetry(fallbackRequest, apiKey, `${diagnosticStage}:without-response-format`)
+      return sendRequestWithRetry(fallbackRequest, apiKey, `${diagnosticStage}:without-response-format`, requestAttempts)
     }
 
     throw error
   }
 }
 
-async function sendRequestWithRetry(request: QwenRequest, apiKey: string, diagnosticStage: string): Promise<unknown> {
+/**
+ * Apply the optional diagnostic request budget to one API operation. The
+ * budget is intentionally inactive unless the environment variable is set,
+ * so normal production retries retain their existing behavior.
+ */
+export async function withConfiguredQwenRequestBudget<T>(operation: () => Promise<T>): Promise<T> {
+  const maximumRequests = getConfiguredQwenRequestBudget()
+  if (maximumRequests === undefined) return operation()
+  return withQwenRequestBudget(maximumRequests, operation)
+}
+
+/** Exposed for service-level tests that need to verify a full workflow cap. */
+export async function withQwenRequestBudget<T>(
+  maximumRequests: number,
+  operation: () => Promise<T>,
+): Promise<T> {
+  if (!Number.isSafeInteger(maximumRequests) || maximumRequests < 1) return operation()
+  return qwenRequestBudgetStorage.run({ remaining: maximumRequests, maximum: maximumRequests }, operation)
+}
+
+/**
+ * Local real-model diagnostics can deliberately lower this cap without
+ * changing production retry behavior. The value is capped at the source
+ * default so an environment variable can never make a request retry more.
+ */
+export function getConfiguredModelOutputAttemptLimit(defaultAttempts: number): number {
+  // The explicit local-model mode has no upstream output to retry. Preserve
+  // its deterministic repair path so contract E2E remains a test of the
+  // offline fallback contract, not of real-model diagnostic limits.
+  if (/^(?:1|true|yes)$/iu.test(process.env.STORY_DISABLE_MODEL?.trim() ?? '')) return defaultAttempts
+  return getPositiveIntegerEnvironmentValue('STORY_MODEL_OUTPUT_ATTEMPTS', defaultAttempts, defaultAttempts)
+}
+
+function getConfiguredQwenRequestBudget(): number | undefined {
+  return getOptionalPositiveIntegerEnvironmentValue('STORY_QWEN_REQUEST_ATTEMPTS')
+}
+
+function getRequestTimeoutMs(): number {
+  return getPositiveIntegerEnvironmentValue('STORY_QWEN_REQUEST_TIMEOUT_MS', defaultRequestTimeoutMs, defaultRequestTimeoutMs)
+}
+
+function isQwenResponseFormatFallbackDisabled(): boolean {
+  return /^(?:1|true|yes)$/iu.test(process.env.STORY_QWEN_DISABLE_RESPONSE_FORMAT_FALLBACK?.trim() ?? '')
+}
+
+function getPositiveIntegerEnvironmentValue(name: string, fallback: number, maximum: number): number {
+  const parsed = getOptionalPositiveIntegerEnvironmentValue(name)
+  return parsed === undefined ? fallback : Math.min(parsed, maximum)
+}
+
+function getOptionalPositiveIntegerEnvironmentValue(name: string): number | undefined {
+  const value = process.env[name]?.trim()
+  if (!value || !/^[1-9]\d*$/u.test(value)) return undefined
+
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) ? parsed : undefined
+}
+
+async function sendRequestWithRetry(
+  request: QwenRequest,
+  apiKey: string,
+  diagnosticStage: string,
+  maximumAttempts: number,
+): Promise<unknown> {
   let lastError: unknown
 
-  for (let attempt = 0; attempt < MAX_QWEN_REQUEST_ATTEMPTS; attempt += 1) {
+  for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
     try {
+      consumeQwenRequestBudget(diagnosticStage)
       return await sendRequest(request, apiKey)
     } catch (error) {
-      const enrichedError = attachModelDiagnostic(error, {
-        stage: diagnosticStage,
-        attempt: attempt + 1,
-        maxAttempts: MAX_QWEN_REQUEST_ATTEMPTS,
-        responseFormat: Boolean(request.response_format),
-      })
+      // The budget error already identifies the precise blocked call (for
+      // example, the response_format fallback). Do not overwrite that stage
+      // with the enclosing transport attempt diagnostic.
+      const enrichedError = error instanceof AppError && error.code === 'QWEN_REQUEST_BUDGET_EXHAUSTED'
+        ? error
+        : attachModelDiagnostic(error, {
+          stage: diagnosticStage,
+          attempt: attempt + 1,
+          maxAttempts: maximumAttempts,
+          responseFormat: Boolean(request.response_format),
+        })
       lastError = enrichedError
       logModelFailure(enrichedError)
-      if (!isRetryableQwenRequestError(enrichedError) || attempt === MAX_QWEN_REQUEST_ATTEMPTS - 1) {
+      if (!isRetryableQwenRequestError(enrichedError) || attempt === maximumAttempts - 1) {
         throw enrichedError
       }
 
@@ -191,9 +285,33 @@ async function sendRequestWithRetry(request: QwenRequest, apiKey: string, diagno
   throw lastError ?? new AppError('Qwen 请求没有完成，请稍后重试。', 502, 'QWEN_UPSTREAM_ERROR')
 }
 
+function consumeQwenRequestBudget(diagnosticStage: string): void {
+  const budget = qwenRequestBudgetStorage.getStore()
+  if (!budget) return
+
+  if (budget.remaining <= 0) {
+    throw new AppError(
+      '本次 API 请求已达到模型上游调用上限，请稍后重试。',
+      429,
+      'QWEN_REQUEST_BUDGET_EXHAUSTED',
+      undefined,
+      undefined,
+      undefined,
+      {
+        stage: `${diagnosticStage}:request-budget`,
+        attempt: budget.maximum,
+        maxAttempts: budget.maximum,
+        reason: '已在同一 API 请求中用尽模型上游调用预算。',
+      },
+    )
+  }
+
+  budget.remaining -= 1
+}
+
 async function sendRequest(request: QwenRequest, apiKey: string): Promise<unknown> {
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  const timeout = setTimeout(() => controller.abort(), getRequestTimeoutMs())
 
   try {
     const response = await fetch(process.env.DASHSCOPE_BASE_URL?.trim() || DEFAULT_BASE_URL, {

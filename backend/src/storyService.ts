@@ -1,4 +1,10 @@
-import { AppError, requestQwenJson, summarizeModelResponse, withModelDiagnostic } from './qwen.js'
+import {
+  AppError,
+  getConfiguredModelOutputAttemptLimit,
+  requestQwenJson,
+  summarizeModelResponse,
+  withModelDiagnostic,
+} from './qwen.js'
 import { createNarrativeStateMachine, type StoryValidationContext } from './storyState.js'
 import { formatStoryRealityContractContext, storyRealityContractInstruction } from './storyRealityContract.js'
 import { getAuthorDecisionMaterial } from './storyDecision.js'
@@ -121,15 +127,15 @@ const invalidModelOutputContext: ValidationErrorContext = {
   code: 'INVALID_MODEL_OUTPUT',
 }
 
-const maxConflictCoreGenerationAttempts = 3
-const maxConflictCoreReplacementAttempts = 2
-const maxConflictCoreContractReviewAttempts = 2
-const maxConflictCoreGroundingReviewAttempts = 2
+const maxConflictCoreGenerationAttempts = getConfiguredModelOutputAttemptLimit(3)
+const maxConflictCoreReplacementAttempts = getConfiguredModelOutputAttemptLimit(2)
+const maxConflictCoreContractReviewAttempts = getConfiguredModelOutputAttemptLimit(2)
+const maxConflictCoreGroundingReviewAttempts = getConfiguredModelOutputAttemptLimit(2)
 const conflictCoreContractReviewMaxTokens = 2_000
 const conflictCoreGroundingReviewMaxTokens = 1_500
 const maximumStoryIdeaLength = 120
-const maxStorySeedExtractionAttempts = 3
-const maxSystemDraftGenerationAttempts = 3
+const maxStorySeedExtractionAttempts = getConfiguredModelOutputAttemptLimit(3)
+const maxSystemDraftGenerationAttempts = getConfiguredModelOutputAttemptLimit(3)
 const systemConflictCoreDraftMaxTokens = 1_200
 const systemConflictCoreDirectionRecoveryMaxTokens = 700
 const maximumStorySeedLockedFacts = 5
@@ -137,11 +143,11 @@ const maximumStorySeedLockedFactLength = 120
 const maximumConflictCoreContextLength = 120
 const maximumSystemDraftFieldLength = 64
 const maximumSystemDraftDirectionLabelLength = 16
-const maxPredicamentGenerationAttempts = 3
-const maxHeadTailGenerationAttempts = 2
-const maxStoryTurnGenerationAttempts = 3
-const maxStoryTurnOptionRefinementAttempts = 2
-const maxStoryGenerationAttempts = 3
+const maxPredicamentGenerationAttempts = getConfiguredModelOutputAttemptLimit(3)
+const maxHeadTailGenerationAttempts = getConfiguredModelOutputAttemptLimit(2)
+const maxStoryTurnGenerationAttempts = getConfiguredModelOutputAttemptLimit(3)
+const maxStoryTurnOptionRefinementAttempts = getConfiguredModelOutputAttemptLimit(2)
+const maxStoryGenerationAttempts = getConfiguredModelOutputAttemptLimit(3)
 const storyTurnMaxTokens = 2_800
 const storyTurnOptionRefinementMaxTokens = 900
 const storyTurnOptionRefinementFocusLabels: Record<StoryTurnOptionRefinementFocus, string> = {

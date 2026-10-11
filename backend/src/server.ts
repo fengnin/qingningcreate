@@ -1,6 +1,6 @@
 import 'dotenv/config'
 import express, { type NextFunction, type Request, type Response } from 'express'
-import { AppError } from './qwen.js'
+import { AppError, withConfiguredQwenRequestBudget } from './qwen.js'
 import {
   generateDirections,
   parseDirectionRequest,
@@ -339,7 +339,8 @@ function registerStoryStage<RequestBody, Result, ResponseBody>(
 ) {
   app.post(path, async (request, response: Response<ResponseBody>, next) => {
     try {
-      const result = await generate(parseRequest(request.body))
+      const parsedRequest = parseRequest(request.body)
+      const result = await withConfiguredQwenRequestBudget(() => generate(parsedRequest))
       response.setHeader('Cache-Control', 'no-store')
       response.json(createResponse(result))
     } catch (error) {
