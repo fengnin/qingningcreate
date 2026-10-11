@@ -1,0 +1,149 @@
+{
+  "failure": "Recorded 500 empty text/plain response replayed by Playwright; no model stub",
+  "retry": {
+    "url": "http://localhost:5173/api/story/co-create/start",
+    "payload": "{\"generationMode\":\"review-actions\",\"idea\":\"青柠想去游乐园玩\",\"brief\":{\"tones\":[],\"dramaticForces\":[],\"allowSystemNamedCharacters\":false},\"operationId\":\"op-c14e9849-376c-4b1f-a61f-32c758704a10\"}",
+    "status": 200,
+    "type": "application/json; charset=utf-8",
+    "body": {
+      "storyId": "story-473298ae-e187-4264-9155-570fb577b28a",
+      "revision": 0,
+      "seed": {
+        "subject": "主角",
+        "activeSituation": "青柠想去游乐园玩",
+        "lockedGoal": null,
+        "lockedFacts": [],
+        "worldMode": "realistic-default",
+        "expansionScope": "keep-scale",
+        "unknowns": [],
+        "creativeBrief": {
+          "tones": [],
+          "dramaticForces": [],
+          "allowSystemNamedCharacters": false
+        }
+      },
+      "brief": {
+        "tones": [],
+        "dramaticForces": [],
+        "allowSystemNamedCharacters": false
+      },
+      "curve": {
+        "id": "curve-391b44bb-5e83-4584-ab62-4615a0c8b4ca",
+        "title": "一起构思故事方向",
+        "status": "draft",
+        "brief": {
+          "tones": [],
+          "dramaticForces": [],
+          "allowSystemNamedCharacters": false
+        },
+        "beats": [],
+        "instructions": [],
+        "preparation": {
+          "protocol": 1,
+          "status": "needs-review",
+          "sources": [
+            {
+              "id": "author-input",
+              "text": "青柠想去游乐园玩"
+            }
+          ],
+          "material": [
+            {
+              "id": "author-input-1",
+              "role": "goal",
+              "sourceId": "author-input",
+              "quote": "青柠想去游乐园玩"
+            }
+          ],
+          "candidates": [
+            {
+              "id": "c1",
+              "action": "青柠用纸笔画一张游乐园地图，标出她最想玩的三个项目",
+              "materialIds": [
+                "author-input-1"
+              ],
+              "preconditionIds": [],
+              "possibleResult": "如果青柠完成这张地图，她可能更清晰地表达自己的期待；如果有人看到这张地图，可能据此理解她的兴趣并协助安排。",
+              "resultBasisIds": [
+                "author-input-1"
+              ],
+              "unknownIds": []
+            }
+          ],
+          "questions": [],
+          "acceptedCandidateIds": [],
+          "executed": false
+        },
+        "createdAt": 1791688598404,
+        "updatedAt": 1791688598404,
+        "generation": {
+          "origin": "model",
+          "dramaticMechanism": "原文整理与行动候选分开生成；尚未生成曲线，也未确认事实"
+        }
+      },
+      "curveVersions": [
+        {
+          "id": "curve-version-7db51181-c0cd-4cdd-91e5-ca2fc74ad93b",
+          "label": "主线草案 1",
+          "curve": {
+            "id": "curve-391b44bb-5e83-4584-ab62-4615a0c8b4ca",
+            "title": "一起构思故事方向",
+            "status": "draft",
+            "brief": {
+              "tones": [],
+              "dramaticForces": [],
+              "allowSystemNamedCharacters": false
+            },
+            "beats": [],
+            "instructions": [],
+            "preparation": {
+              "protocol": 1,
+              "status": "needs-review",
+              "sources": [
+                {
+                  "id": "author-input",
+                  "text": "青柠想去游乐园玩"
+                }
+              ],
+              "material": [
+                {
+                  "id": "author-input-1",
+                  "role": "goal",
+                  "sourceId": "author-input",
+                  "quote": "青柠想去游乐园玩"
+                }
+              ],
+              "candidates": [
+                {
+                  "id": "c1",
+                  "action": "青柠用纸笔画一张游乐园地图，标出她最想玩的三个项目",
+                  "materialIds": [
+                    "author-input-1"
+                  ],
+                  "preconditionIds": [],
+                  "possibleResult": "如果青柠完成这张地图，她可能更清晰地表达自己的期待；如果有人看到这张地图，可能据此理解她的兴趣并协助安排。",
+                  "resultBasisIds": [
+                    "author-input-1"
+                  ],
+                  "unknownIds": []
+                }
+              ],
+              "questions": [],
+              "acceptedCandidateIds": [],
+              "executed": false
+            },
+            "createdAt": 1791688598404,
+            "updatedAt": 1791688598404,
+            "generation": {
+              "origin": "model",
+              "dramaticMechanism": "原文整理与行动候选分开生成；尚未生成曲线，也未确认事实"
+            }
+          },
+          "createdAt": 1791688598404,
+          "updatedAt": 1791688598404
+        }
+      ],
+      "activeCurveVersionId": "curve-version-7db51181-c0cd-4cdd-91e5-ca2fc74ad93b"
+    }
+  }
+}

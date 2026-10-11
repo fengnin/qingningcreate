@@ -265,6 +265,12 @@ async function readJson(response: Response): Promise<unknown> {
   try {
     return await response.json()
   } catch {
+    if (!response.ok) {
+      if ([500, 502, 503, 504].includes(response.status)) {
+        throw new StoryApiError('故事服务暂时不可用，请确认后端已启动后重试。', 'SERVICE_UNAVAILABLE')
+      }
+      throw new StoryApiError(`故事请求失败（HTTP ${response.status}），请稍后重试。`, 'HTTP_ERROR')
+    }
     throw new StoryApiError('故事服务返回了无法读取的内容，请重试。', 'INVALID_RESPONSE')
   }
 }
