@@ -1838,6 +1838,59 @@ test('uses the compact confirmed-curve opening contract without inventing state 
   }
 })
 
+test('local confirmed-curve opening renders only closed author anchors', async () => {
+  const previousDisableModel = process.env.STORY_DISABLE_MODEL
+  const previousFetch = globalThis.fetch
+  let calls = 0
+  process.env.STORY_DISABLE_MODEL = 'true'
+  try {
+    globalThis.fetch = async () => {
+      calls += 1
+      throw new Error('the local fallback must not reach fetch')
+    }
+    const draft = await startStoryCoCreation({
+      idea: richCurveIdea,
+      brief: { tones: ['growth'], dramaticForces: ['contrast'], allowSystemNamedCharacters: false },
+      operationId: `opening-local-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    })
+    const confirmed = await confirmSessionCurve({
+      storyId: draft.storyId,
+      revision: draft.revision,
+      curveId: draft.curve.id,
+    })
+    const spine = await startSessionStorySpineFromCurve({
+      storyId: confirmed.storyId,
+      revision: confirmed.revision,
+      curveId: confirmed.curve.id,
+    })
+
+    const visibleText = JSON.stringify({
+      node: spine.turn.node,
+      conflict: spine.turn.conflict,
+      question: spine.turn.question,
+      options: spine.turn.options,
+    })
+    const authorAnchors = [
+      '投影仪今晚要归还',
+      '和前队友剪的短片',
+      '在展出前决定要不要删掉自己的名字',
+    ]
+    const quotedAnchors = Array.from(visibleText.matchAll(/「([^」]+)」/gu), (match) => match[1]!)
+
+    assert.equal(calls, 0)
+    assert.equal(spine.history.length, 0)
+    assert.doesNotMatch(visibleText, /原来的安排|原计划|新的难题|需要回应/u)
+    assert.equal(quotedAnchors.every((anchor) => authorAnchors.includes(anchor)), true)
+    assert.deepEqual(new Set(quotedAnchors), new Set(authorAnchors))
+    assert.equal(spine.turn.options.every((option) => option.transition.introducedFacts.length === 0), true)
+    assert.equal(spine.turn.options.every((option) => option.narrativeAction.effects.length === 0), true)
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
+    else process.env.STORY_DISABLE_MODEL = previousDisableModel
+  }
+})
+
 test('repairs a relationship opening after rejecting an unconfirmed other-person response when the author gives a present boundary', async () => {
   const previousDisableModel = process.env.STORY_DISABLE_MODEL
   const previousApiKey = process.env.DASHSCOPE_API_KEY
