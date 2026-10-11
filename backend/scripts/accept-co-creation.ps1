@@ -18,7 +18,8 @@ function Invoke-StoryJson {
     return Invoke-RestMethod -Method $Method -Uri $uri
   }
   $json = $Body | ConvertTo-Json -Depth 20
-  return Invoke-RestMethod -Method $Method -Uri $uri -ContentType 'application/json' -Body $json
+  $jsonBytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+  return Invoke-RestMethod -Method $Method -Uri $uri -ContentType 'application/json; charset=utf-8' -Body $jsonBytes
 }
 
 function Assert-True {
