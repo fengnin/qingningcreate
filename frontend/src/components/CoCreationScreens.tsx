@@ -725,14 +725,20 @@ function PreparationReview({ session }: { session: StorySession }) {
     }) } finally { submitLock.current = false }
   }
   return <main className="app-shell setup-shell cocreation-shell preparation-workspace">
-    <header className="setup-header"><button className="opening-back" type="button" onClick={session.goBackToOpening} disabled={busy}><ArrowLeft size={18} /> 修改想法</button><span className="model-label">一起构思 · 尚未开始剧情</span></header>
-    <h1>让这个想法长成故事</h1><p className="setup-lead">先试一个方向。你可以改，也可以不采用。</p>
-    <section className="preparation-original" aria-label="作者原文"><small>你的原文</small>{p.sources.map(s => <blockquote key={s.id}>{s.text}</blockquote>)}</section>
+    <header className="setup-header"><button className="opening-back" type="button" onClick={session.goBackToOpening} disabled={busy}><ArrowLeft size={18} /> 修改想法</button><span className="preparation-brand">青柠创作<span> / </span>一起构思</span><span className="model-label">尚未开始剧情</span></header>
+    <div className="preparation-intro"><p className="eyebrow">故事方向</p><h1>让这个想法长成故事</h1><p className="setup-lead">先试一个方向。你可以改，也可以不采用。</p></div>
+    <div className="preparation-layout">
+    <aside className="preparation-source-column">
+      <section className="preparation-original" aria-label="作者原文"><small>从你的想法出发</small>{p.sources.map(s => <blockquote key={s.id}>{s.text}</blockquote>)}</section>
+      <details className="preparation-evidence"><summary>查看原文整理</summary>{p.material.map(m => <p key={m.id}><small>{({ fact: '你提供的内容', condition: '故事条件', goal: '人物目标', unknown: '待定内容' })[m.role]}</small> · {m.quote}</p>)}</details>
+    </aside>
+    <div className="preparation-direction-column" aria-busy={busy}>
     {session.stageError && <p className="curve-stale-notice" role="alert">{session.stageError}</p>}
     {active && <section className="preparation-proposal" aria-label="系统提案">
-      <p className="eyebrow"><Sparkles size={15} /> 系统提案 · 可以拒绝</p>
+      <header className="preparation-proposal-header"><p className="eyebrow"><Sparkles size={15} /> 一个故事提案</p><span>由你决定是否采用</span></header>
+      <p className="preparation-section-label">主角打算怎么做</p>
       <h2>{reviewed[active.id]?.action ?? active.action}</h2>
-      <p className="preparation-development">{reviewed[active.id]?.possibleResult ?? active.possibleResult}</p>
+      <div className="preparation-development-block"><p className="preparation-section-label">故事可能怎样发展</p><p className="preparation-development">{reviewed[active.id]?.possibleResult ?? active.possibleResult}</p></div>
       {editing === active.id && <div className="preparation-editor">
         <label>主角打算怎么做<textarea maxLength={240} disabled={busy} value={reviewed[active.id]?.action ?? active.action} onChange={e => setReviewed({ ...reviewed, [active.id]: { action: e.target.value, possibleResult: reviewed[active.id]?.possibleResult ?? active.possibleResult } })} /></label>
         <label>故事可能怎样发展<textarea maxLength={240} disabled={busy} value={reviewed[active.id]?.possibleResult ?? active.possibleResult} onChange={e => setReviewed({ ...reviewed, [active.id]: { action: reviewed[active.id]?.action ?? active.action, possibleResult: e.target.value } })} /></label>
@@ -746,11 +752,12 @@ function PreparationReview({ session }: { session: StorySession }) {
         <button className="text-action" type="button" disabled={busy} onClick={() => { if (candidates.length > 1) { setDismissed([...dismissed, active.id]); setEditing(undefined) } else void requestAlternative() }}><RefreshCcw size={16} /> 换个提案</button>
         <button className="text-action" type="button" disabled={busy} onClick={() => { setDismissed([...dismissed, active.id]); setEditing(undefined) }}>暂不采用</button>
       </div>
-      <p className="preparation-note">采用后会整理成可编辑的故事草稿。这里只决定未来方向，行动和结果都尚未发生。</p>
+      <p className="preparation-note">采用后生成可编辑的故事草稿；行动和结果都尚未发生。</p>
     </section>}
     {criticalQuestion && <section className="preparation-question"><h2>先决定这一点</h2><p>{criticalQuestion.question}</p><button className="text-action" type="button" disabled={busy} onClick={session.goBackToOpening}>补充到我的想法</button><button className="text-action" type="button" disabled={busy} onClick={() => void requestAlternative()}>换个不依赖它的提案</button>{p.questions.length > 1 && <details><summary>其他待定细节</summary>{p.questions.filter(q => q.id !== criticalQuestion.id).map(q => <p key={q.id}>{q.question}</p>)}</details>}</section>}
     {!active && !criticalQuestion && <section className="preparation-question"><p>这些方向都先放一放。可以换一版，或继续修改你的想法。</p><button className="primary-action" type="button" disabled={busy} onClick={() => void requestAlternative()}>再想一个提案</button></section>}
-    <details className="preparation-evidence"><summary>查看原文整理</summary>{p.material.map(m => <p key={m.id}><small>{({ fact: '你提供的内容', condition: '故事条件', goal: '人物目标', unknown: '待定内容' })[m.role]}</small> · {m.quote}</p>)}</details>
+    </div>
+    </div>
   </main>
 }
 function PreparationSupplementReview({ item, disabled, onReview }: { item: import('../../../shared/story-preparation.js').StoryPreparationSupplement; disabled: boolean; onReview: (id: string, decision: 'accepted-design'|'rejected'|'keep-unknown', text: string) => Promise<void> }) {

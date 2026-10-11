@@ -5138,29 +5138,93 @@ textarea:focus-visible {
 .story-review-source { margin: 10px 0 0; font-size: 13px; color: #acbcae; }
 .story-review-source > summary { padding: 8px 0; cursor: pointer; }
 .story-review-source blockquote { margin: 10px 0; padding-left: 14px; border-left: 2px solid #6b8069; }
-.preparation-workspace { max-width: none; width: 100%; }
-.preparation-workspace > * { max-width: 984px; }
-.preparation-workspace h1 { margin: 36px 0 12px; font-size: clamp(28px, 4vw, 44px); }
-.preparation-original { margin: 28px 0; padding-left: 18px; border-left: 2px solid #6b8069; }
-.preparation-original blockquote { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.preparation-proposal { padding: 30px 0; border-top: 1px solid #36483e; }
-.preparation-proposal h2 { max-width: 760px; font-size: clamp(22px, 3vw, 30px); line-height: 1.55; }
-.preparation-development { max-width: 760px; font-size: 17px; line-height: 1.85; white-space: pre-wrap; }
-.preparation-actions { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; margin-top: 26px; }
+/* A quiet manuscript surface for choosing a story direction. */
+.preparation-workspace {
+  width: 100%;
+  padding: 0 48px 64px;
+  background: #14231f;
+  color: #f4f5ef;
+}
+.preparation-workspace > * { max-width: 1160px; margin-inline: auto; }
+.preparation-workspace .setup-header {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  min-height: 86px;
+  border-bottom: 1px solid #36483e;
+}
+.preparation-workspace .opening-back { justify-self: start; color: #b7c2ba; font-weight: 500; }
+.preparation-workspace .opening-back:hover:not(:disabled) { color: #b6533d; }
+.preparation-workspace .opening-back:disabled { opacity: .5; }
+.preparation-brand { font-size: 14px; font-weight: 600; letter-spacing: .04em; }
+.preparation-brand > span { padding: 0 12px; color: #6d7d70; font-weight: 400; }
+.preparation-workspace .model-label { justify-self: end; color: #aab9ad; font-size: 12px; }
+.preparation-intro { padding: 48px 0 36px; animation: sceneEnter 420ms ease both; }
+.preparation-intro > .eyebrow { font-size: 12px; font-weight: 500; letter-spacing: .12em; }
+.preparation-workspace h1 {
+  margin: 12px 0 14px;
+  font-family: Georgia, "Songti SC", "SimSun", serif;
+  font-size: clamp(28px, 3.2vw, 40px);
+  font-weight: 500;
+  letter-spacing: -.025em;
+  line-height: 1.35;
+}
+.preparation-workspace .setup-lead { margin: 0; color: #b7c2b9; font-size: 14px; }
+.preparation-layout { display: grid; grid-template-columns: minmax(0, 280px) minmax(0, 1fr); gap: 56px; align-items: start; }
+.preparation-source-column { min-width: 0; padding-top: 26px; animation: sceneEnter 420ms 60ms ease both; }
+.preparation-original { padding-left: 18px; border-left: 2px solid #b6c0af; }
+.preparation-original > small { color: #aab9ad; font-size: 12px; }
+.preparation-original blockquote { margin: 14px 0 0; color: #e1e8df; font-size: 15px; line-height: 1.95; white-space: pre-wrap; overflow-wrap: anywhere; }
+.preparation-source-column > .preparation-evidence { margin-top: 24px; padding-left: 18px; font-size: 12px; }
+.preparation-direction-column { min-width: 0; animation: sceneEnter 460ms 100ms ease both; }
+.preparation-proposal { padding: 26px 32px 24px; background: #1b3028; border-top: 2px solid #6b8069; }
+.preparation-proposal-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-bottom: 28px; }
+.preparation-proposal-header .eyebrow { color: #ef8c70; font-size: 13px; font-weight: 600; }
+.preparation-proposal-header > span { color: #aab9ad; font-size: 11px; }
+.preparation-section-label { margin: 0 0 10px; color: #aab9ad; font-size: 12px; font-weight: 500; }
+.preparation-proposal h2 { margin: 0; font-family: Georgia, "Songti SC", "SimSun", serif; font-size: clamp(20px, 2vw, 25px); font-weight: 500; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.preparation-development-block { margin-top: 26px; padding-top: 22px; border-top: 1px solid #36483e; }
+.preparation-development { margin: 0; color: #d7e1d7; font-size: 15px; line-height: 1.95; white-space: pre-wrap; overflow-wrap: anywhere; }
+.preparation-actions { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; margin-top: 24px; padding-top: 24px; border-top: 1px solid #36483e; }
 .preparation-actions button, .preparation-question button { min-height: 44px; }
-.preparation-note, .preparation-editor > p { font-size: 13px; line-height: 1.7; color: #aab9ad; }
-.preparation-evidence { margin: 22px 0; color: #b7c6b9; font-size: 14px; overflow-wrap: anywhere; }
-.preparation-actions .text-action { color: #b7c6b9; }
-.preparation-evidence summary, .preparation-question summary { cursor: pointer; padding: 12px 0; }
-.preparation-evidence dl { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 12px; line-height: 1.7; }
+.preparation-actions .primary-action { padding-inline: 20px; border-radius: 6px; font-weight: 500; }
+.preparation-workspace .text-action { color: #b7c6b9; font-size: 13px; font-weight: 500; }
+.preparation-workspace .text-action:hover:not(:disabled) { color: #ef8c70; }
+.preparation-workspace .text-action:disabled { color: #969e94; }
+.preparation-note, .preparation-editor > p { margin: 16px 0 0; font-size: 12px; line-height: 1.8; color: #aab9ad; }
+.preparation-evidence { margin: 22px 0 0; color: #b7c6b9; font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
+.preparation-evidence summary, .preparation-question summary { cursor: pointer; padding: 8px 0; transition: color 160ms ease; }
+.preparation-evidence summary:hover { color: #ef8c70; }
+.preparation-evidence[open] > :not(summary) { animation: sceneEnter 200ms ease both; }
+.preparation-evidence dl { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 12px; padding: 16px 0; border-top: 1px solid #36483e; }
+.preparation-evidence dt { color: #aab9ad; }
 .preparation-evidence dd { margin: 0; }
-.preparation-editor { display: grid; gap: 16px; max-width: 760px; margin: 24px 0; }
-.preparation-editor label { display: grid; gap: 8px; }
-.preparation-editor textarea { box-sizing: border-box; width: 100%; min-height: 96px; padding: 12px; border: 1px solid #52665a; background: #1a3026; color: #edf3ec; border-radius: 8px; font: inherit; line-height: 1.7; resize: vertical; }
-.preparation-question { padding: 24px 0; border-top: 1px solid #36483e; }
+.preparation-editor { display: grid; gap: 16px; margin: 24px 0; padding-top: 24px; border-top: 1px solid #36483e; animation: sceneEnter 220ms ease both; }
+.preparation-editor label { display: grid; gap: 8px; color: #b7c6b9; font-size: 13px; }
+.preparation-editor textarea { width: 100%; min-height: 112px; padding: 14px; border: 1px solid #52665a; background: #14231f; color: #edf3ec; border-radius: 6px; font: inherit; font-size: 15px; line-height: 1.8; resize: vertical; }
+.preparation-editor .text-action { justify-self: start; }
+.preparation-question { padding: 24px 0; border-top: 1px solid #c6cec1; line-height: 1.8; }
+.preparation-question h2 { font-size: 20px; font-weight: 500; }
 .preparation-question .text-action { margin-right: 16px; }
+.preparation-workspace .curve-stale-notice { color: #a34431; background: #f6e9e1; }
+@media (max-width: 1000px) {
+  .preparation-workspace { padding-inline: 32px; }
+  .preparation-layout { grid-template-columns: minmax(0, 220px) minmax(0, 1fr); gap: 32px; }
+  .preparation-proposal { padding-inline: 24px; }
+}
 @media (max-width: 700px) {
-  .preparation-workspace .setup-header { flex-wrap: wrap; gap: 12px; }
+  .preparation-workspace { padding: 0 20px 32px; }
+  .preparation-workspace .setup-header { grid-template-columns: 1fr auto; min-height: 70px; gap: 8px; }
+  .preparation-brand { font-size: 13px; }
+  .preparation-brand > span { padding: 0 6px; }
+  .preparation-workspace .model-label { display: none; }
+  .preparation-intro { padding: 32px 0 24px; }
+  .preparation-layout { grid-template-columns: minmax(0, 1fr); gap: 26px; }
+  .preparation-source-column { padding-top: 0; }
+  .preparation-original blockquote { font-size: 14px; margin-top: 8px; }
+  .preparation-source-column > .preparation-evidence { margin-top: 12px; }
+  .preparation-proposal { padding: 22px 20px; }
+  .preparation-proposal-header { align-items: start; padding-bottom: 24px; }
+  .preparation-proposal-header > span { max-width: 80px; line-height: 1.7; text-align: right; }
   .preparation-actions { gap: 8px 16px; }
   .preparation-actions .primary-action { width: 100%; justify-content: center; }
   .preparation-evidence dl { grid-template-columns: 1fr; gap: 6px; }
