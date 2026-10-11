@@ -162,9 +162,13 @@ try {
 }
 
 # Use a clean session for the positive confirmation, version, author-control,
-# and (when requested) role-action checks.
+# and (when requested) role-action checks. The positive spine fixture is
+# decoded from ASCII so Windows PowerShell 5.1 can execute this UTF-8 script
+# without changing the author text.
+$positiveIdea = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('5p6X5r6I562U5bqU5Zyo5ZGo5LqU5YmN5oqK56WW5q+N55qE5omL56i/5Lqk57uZ5Ye654mI56S+77yM5L2G5LuW5Y+R546w5pyA5ZCO5LiA6aG157y65aSx77yM5LiN55+l6YGT5piv5ZCm6K+l5oyJ5om/6K+65o+Q5Lqk44CC'))
+$positiveIdeaForContract = if ($RequireSpine) { $positiveIdea } else { $idea }
 $clean = Invoke-StoryJson -Method 'POST' -Path '/api/story/co-create/start' -Body @{
-  idea = $idea
+  idea = $positiveIdeaForContract
   brief = $brief
 }
 $cleanId = $clean.storyId
@@ -178,11 +182,28 @@ $cleanConfirmed = Invoke-StoryJson -Method 'POST' -Path '/api/story/curve/confir
 $cleanRevision = $cleanConfirmed.revision
 Assert-True (-not [string]::IsNullOrWhiteSpace([string]$cleanConfirmed.confirmedCurve.id)) 'a clean draft must be confirmable'
 
+if ($RequireSpine) {
+  $sparseBoundary = Invoke-StoryJson -Method 'POST' -Path '/api/story/co-create/start' -Body @{
+    idea = $idea
+    brief = $brief
+  }
+  $sparseConfirmed = Invoke-StoryJson -Method 'POST' -Path '/api/story/curve/confirm' -Body @{
+    storyId = $sparseBoundary.storyId
+    revision = $sparseBoundary.revision
+    curveId = $sparseBoundary.curve.id
+  }
+  Invoke-ExpectedError -Method 'POST' -Path '/api/story/curve/start-spine' -Body @{
+    storyId = $sparseBoundary.storyId
+    revision = $sparseConfirmed.revision
+    curveId = $sparseBoundary.curve.id
+  } -ExpectedCode 'STORY_TURN_NEEDS_AUTHOR_DETAIL'
+}
+
 Invoke-ExpectedError -Method 'POST' -Path '/api/story/co-create/start' -Body @{
   storyId = $cleanId
   revision = $cleanRevision
   versionMode = 'replace-draft'
-  idea = $idea
+  idea = $positiveIdeaForContract
   brief = $brief
 } -ExpectedCode 'STORY_VERSION_PRESERVATION_REQUIRED'
 
@@ -248,7 +269,7 @@ $newVersion = Invoke-StoryJson -Method 'POST' -Path '/api/story/co-create/start'
   storyId = $cleanId
   revision = $cleanRevision
   versionMode = 'new-version'
-  idea = $idea
+  idea = $positiveIdeaForContract
   brief = @{ tones = @('friendship'); dramaticForces = @('relationship-tension'); allowSystemNamedCharacters = $false }
 }
 Assert-True ($newVersion.curveVersions.Count -ge 2) 'deliberate regeneration must preserve an older version'
