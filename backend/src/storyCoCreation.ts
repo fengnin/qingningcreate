@@ -4557,17 +4557,17 @@ function buildModelFactRoleCurvePayload(
   }
 
   const goal = getCurvePlanGoalPhrase(seed, choiceFact)
-  const trigger = getCurvePlanPressurePhrase(triggerFact)
-  const escalation = getCurvePlanPressurePhrase(escalationFact)
+  const subject = getStorySubject(seed)
+  const trigger = getCurvePlanPressurePhrase(triggerFact, goal, subject)
+  const escalation = getCurvePlanPressurePhrase(escalationFact, goal, subject)
   if (!goal || !trigger || !escalation) {
     throwCurveModelValidationFailure('curvePlan 没有提供可逐字承接的目标或压力锚点', value)
   }
 
-  const subject = getStorySubject(seed)
   const direction = getCurvePlanDirectionLanguage(brief)
   const decision = getCurvePlanDecisionPhrase(goal)
   const triggerDetail = `暂定：${trigger}让${subject}${direction.trigger}${decision}`
-  const escalationDetail = `暂定：若${subject}继续考虑${decision}，${direction.escalation}${escalation}`
+  const escalationDetail = `暂定：若${subject}继续${goal}，${direction.escalation}${escalation}`
   const decisionMaterial = getAuthorDecisionMaterial(design.sourceFacts, choiceFact, goal)
   const choiceConstraint = normalizeCurveEvidence(escalation).includes(normalizeCurveEvidence(decisionMaterial.action))
     ? { text: trigger, fact: triggerFact }
@@ -4613,61 +4613,106 @@ function getCurvePlanGoalPhrase(seed: StorySeed, choiceFact: StorySourceFact): s
   const source = lockedGoal && hasModelSourceFactEvidence(lockedGoal, choiceFact.text)
     ? lockedGoal
     : getModelCurveFactAnchor(choiceFact.text)
-  let normalized = source
-    .trim()
-    .replace(/^(?:当前(?:目标|想法)[：:]\s*)/u, '')
-    .replace(/^(?:想要|想|希望|打算|准备|计划)\s*/u, '')
+  let normalized = source.trim().replace(/^(?:当前(?:目标|想法)[：:]\s*)/u, '')
+
+  // Seed extraction can preserve the author's intention wrapper, whereas a
+  // direct seed normally stores only the action. Normalize both forms before
+  // composing causal beats so the goal never renders as "让想..." or carries
+  // a duplicated deadline.
+  for (let pass = 0; pass < 2; pass += 1) {
+    normalized = normalized
+      .replace(/^(?:却|但|同时|并且)\s*/u, '')
+      .replace(/^(?:想要|想|希望|打算|准备|计划)\s*/u, '')
+      .replace(/^在[^，。！？；\n]{1,24}前\s*(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择|判断|想|希望|要不要|是否))/u, '')
+      .replace(/^于[^，。！？；\n]{1,24}\s*(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择|判断|想|希望|要不要|是否))/u, '')
+      .trim()
+  }
 
   // Keep the action/object that the author can review, while leaving the
   // deadline and the decision wrapper to the surrounding sentence. This is
   // what prevents forms such as “在在周五前” and “继续要不要删名”.
-  normalized = normalized
-    .replace(/^在[^，。！？；\n]{1,24}前(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择|判断))/u, '')
-    .replace(/^于[^，。！？；\n]{1,24}(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择|判断))/u, '')
-    .trim()
-  const decision = normalized.match(/(?:决定|选择|判断|确认)(?:要不要|是否)(.+)$/u)
+  normalized = normalized.trim()
+  const decision = normalized.match(/(?:决定|选择|判断|确认)\s*(?:要不要|是否)(.+)$/u)
   if (decision?.[1]?.trim()) return decision[1].trim()
-  const intentionDecision = normalized.match(/(?:在[^，。！？；\n]{0,24})?(?:决定|选择|判断|确认)(?:要不要|是否)(.+)$/u)
+  const intentionDecision = normalized.match(/(?:在[^，。！？；\n]{0,24})?(?:决定|选择|判断|确认)\s*(?:要不要|是否)(.+)$/u)
   if (intentionDecision?.[1]?.trim()) return intentionDecision[1].trim()
-  return normalized || source.trim()
+  return normalized.replace(/^(?:是否|要不要)\s*/u, '').trim() || source.trim()
 }
 
-function getCurvePlanPressurePhrase(fact: StorySourceFact): string {
+function getCurvePlanPressurePhrase(fact: StorySourceFact, goal = '', subject = ''): string {
   const text = fact.text
     .trim()
     .replace(/^(?:却|但|同时|并且|然后|随后)\s*/u, '')
+    .replace(new RegExp(`^(?:${[subject, '我', '我们', '他', '她'].filter(Boolean).map(escapeRegExp).join('|')})\\s*`, 'u'), '')
   const explicitCommitmentDecision = text.match(/((?:按|依照|按照)(?:原有)?承诺[^，。！？；\n]{0,20})/u)
-  if (explicitCommitmentDecision?.[1]?.trim()) return explicitCommitmentDecision[1].trim()
+  if (explicitCommitmentDecision?.[1]?.trim()) return getCurvePlanDistinctPressurePhrase(explicitCommitmentDecision[1], goal)
   const commitment = text.match(/(?:答应过|答应|承诺|约定|保证)(.+)$/u)
   if (commitment?.[1]?.trim()) {
     const marker = text.match(/(?:答应过|答应|承诺|约定|保证)/u)?.[0] ?? '承诺'
-    return `${marker}${commitment[1].trim()}`
+    return getCurvePlanDistinctPressurePhrase(`${marker}${commitment[1].trim()}`, goal)
   }
   const decision = text.match(/(?:不知道|不确定|犹豫)?(?:是否|要不要)(.+)$/u)
-  if (decision?.[1]?.trim()) return decision[1].trim().replace(/^该/u, '')
+  if (decision?.[1]?.trim()) return getCurvePlanDistinctPressurePhrase(decision[1].trim().replace(/^该/u, ''), goal)
+  const discovery = text.match(/(?:发现|看到)(?:和)?(.+)$/u)
+  if (discovery?.[1]?.trim()) return getCurvePlanDistinctPressurePhrase(discovery[1].trim(), goal)
   // Keep the object before a deadline marker. Returning only “今晚要归还”
   // loses the actual pressure carrier and makes different facts look alike.
   if (/(?:今晚|明早|明天|后天|今天|周[一二三四五六日天]|本周|下周|月底|月末|截止|期限|归还|必须在[^，。！？；]{0,24}前|要在[^，。！？；]{0,24}前)/u.test(text)) {
-    return text
+    return getCurvePlanDistinctPressurePhrase(text, goal)
       .replace(/^(?:他|她|我|我们|林澈|沈乔|周岚)\s*/u, '')
       .trim()
   }
-  const discovery = text.match(/(?:发现|看到)(.+)$/u)
-  if (discovery?.[1]?.trim()) return discovery[1].trim()
   const relation = text.match(/((?:姐姐|哥哥|弟弟|妹妹|朋友|队友|家人|同事|伴侣)[^，。！？；\n]{0,28})/u)
-  if (relation?.[1]?.trim()) return relation[1].trim()
-  return text
+  if (relation?.[1]?.trim()) return getCurvePlanDistinctPressurePhrase(relation[1].trim(), goal)
+  return getCurvePlanDistinctPressurePhrase(text, goal)
     .replace(/^(?:他|她|我|我们)\s*/u, '')
     .trim()
 }
 
+/**
+ * A source clause can contain the goal as well as the pressure (for example,
+ * “答应在周五前把手稿交给出版社”).  The goal is rendered separately in
+ * every causal sentence, so keep the shortest pressure handle that remains
+ * visibly traceable to the same author clause.
+ */
+function getCurvePlanDistinctPressurePhrase(value: string, goal: string): string {
+  const normalizedValue = value.trim().replace(/[。！？；]+$/u, '')
+  const normalizedGoal = goal.trim()
+  if (!normalizedGoal || !normalizeCurvePhrase(normalizedValue).includes(normalizeCurvePhrase(normalizedGoal))) {
+    return normalizedValue
+  }
+
+  const commitment = normalizedValue.match(/(?:答应过|答应|承诺|约定|保证)(?:在[^，。！？；\n]{0,16}前)?/u)?.[0]
+  if (commitment && !normalizeCurvePhrase(commitment).includes(normalizeCurvePhrase(normalizedGoal))) return commitment
+  const time = normalizedValue.match(/(?:今晚|明早|明天|后天|今天|周[一二三四五六日天](?:前|后|之前|之后)?|本周|下周|月底|月末|期限|截止|展出前|布置前|交接前|仪式前)/u)?.[0]
+  if (time && !normalizeCurvePhrase(time).includes(normalizeCurvePhrase(normalizedGoal))) return time
+  const discovery = normalizedValue.match(/(?:发现|看到)(?:和)?([^，。！？；\n]{2,24})/u)?.[1]
+  if (discovery && !normalizeCurvePhrase(discovery).includes(normalizeCurvePhrase(normalizedGoal))) return discovery.trim()
+
+  const withoutGoal = normalizedValue
+    .replace(normalizedGoal, '')
+    .replace(/^[，、；：\s]+|[，、；：\s]+$/gu, '')
+    .trim()
+  return withoutGoal || normalizedValue
+}
+
+function normalizeCurvePhrase(value: string): string {
+  return value.replace(/[\s，。！？；、：:「」『』“”"'（）()]/gu, '')
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+}
+
 function getCurvePlanChoicePressure(
   pressure: string,
-  mode: ModelCurveResolutionMode,
 ): string {
-  if (mode === 'address-pressure-before-goal') return `先处理${pressure}`
-  if (mode === 'keep-goal-open-under-pressure') return `暂缓处理${pressure}`
-  return `面对${pressure}`
+  const normalized = pressure.trim().replace(/^(?:先处理|暂缓处理|面对|先面对)\s*/u, '')
+  // The pressure is already an author phrase. Prefixing it with an execution
+  // verb creates accidental action chains such as “先面对不再改动作品”. Keep
+  // the choice sides nominal and let the resolution sentence carry the chosen
+  // mode.
+  return normalized
 }
 
 function getCurvePlanDecisionPhrase(goal: string): string {
@@ -4683,12 +4728,16 @@ function getCurvePlanChoiceDetail(
   mode: ModelCurveResolutionMode,
   suffix: string,
 ): string {
-  const pressureSide = getCurvePlanChoicePressure(pressure, mode)
-  const decision = getCurvePlanDecisionPhrase(goal)
+  const pressureSide = getCurvePlanChoicePressure(pressure)
   // The goal is represented as one compact decision phrase. The pressure side
   // is an unfinished handling choice, so the beat never turns either side into
   // an already-executed result.
-  return `暂定：${subject}必须在${goal}与${pressureSide}之间作出选择${suffix}`
+  const modeHint = mode === 'address-pressure-before-goal'
+    ? '，先回应这项压力'
+    : mode === 'keep-goal-open-under-pressure'
+      ? '，保留目标的决定空间'
+      : ''
+  return `暂定：${subject}必须在${goal}与${pressureSide}之间作出选择${modeHint}${suffix}`
 }
 
 function getCurvePlanDirectionLanguage(brief: CreativeBrief): {
@@ -4745,14 +4794,13 @@ function getCurvePlanResolutionDetail(
   mode: ModelCurveResolutionMode,
   suffix: string,
 ): string {
-  const decision = getCurvePlanDecisionPhrase(goal)
   switch (mode) {
     case 'address-pressure-before-goal':
-      return `暂定：这次选择让${subject}面对${pressure}并调整${decision}${suffix}`
+      return `暂定：这次选择让${subject}优先回应${pressure}并调整${goal}的取舍${suffix}`
     case 'keep-goal-open-under-pressure':
-      return `暂定：这次选择让${subject}暂缓${decision}，同时面对${pressure}${suffix}`
+      return `暂定：这次选择让${subject}暂缓${goal}的决定，同时面对${pressure}${suffix}`
     case 'adjust-goal-under-constraint':
-      return `暂定：这次选择让${subject}调整${decision}，同时面对${pressure}${suffix}`
+      return `暂定：这次选择让${subject}调整${goal}的取舍，同时面对${pressure}${suffix}`
   }
 }
 
