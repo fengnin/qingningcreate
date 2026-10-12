@@ -32,10 +32,21 @@ function stub(payload: unknown) {
   globalThis.fetch = async (_url, init) => {
     const body = JSON.parse(String(init?.body))
     const system = body.messages[0].content
-    const input = system.includes('共创提案编辑') ? JSON.parse(body.messages[1].content) : {}
+    const rawInput = system.includes('共创提案编辑') || system.includes('续推出口判断') || system.includes('独立审查中文故事续推提案') ? JSON.parse(body.messages[1].content) : {}
+    const input = rawInput.task ?? rawInput
     calls.push({ system, input })
-    const reply = structuredClone(payload) as any
+    let reply = system.includes('独立审查中文故事续推提案')
+      ? { checks: ['continuity','causality','requirements','author-control'].map(criterion => ({ criterion, passed: true, evidence: '合同测试审阅桩；不证明故事内容合格。' })), issues: [] }
+      : structuredClone(payload) as any
     if (reply.candidatePlan?.basis) reply.candidatePlan.basis.latestResultFactId = input.lastAuthorConfirmedResult?.factId ?? null
+    if (system.includes('续推出口判断') && reply.candidatePlan && Object.keys(reply).length === 1) {
+      const basis = reply.candidatePlan.basis
+      reply = { route: 'action', unresolved: basis.unresolved.text, reason: basis.reason,
+        sourceIds: basis.unresolved.sourceFactIds.map((id: string) => input.evidence.find((f: any, i: number) => id === `author-${i + 1}`)?.id ?? 'bad'), contradictions: [] }
+    } else if (system.includes('共创提案编辑') && reply.candidatePlan) {
+      reply = { options: reply.candidatePlan.options.map((o: any) => ({ label: o.label, action: o.action, proposedConsequence: o.proposedConsequence,
+        ...('transition' in o ? { transition: o.transition } : {}), ...(o.sourceFactIds.includes('unknown-id') ? { sourceFactIds: o.sourceFactIds } : {}) })) }
+    }
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(reply) } }] }), { status: 200 })
   }
 }
@@ -67,7 +78,7 @@ test('focus -> candidate review -> explicit author result: no model causal claim
   assert.doesNotMatch(before.currentTurn!.conflict.conflict, /形成取舍/u)
   stub(plan()); const callCount = calls.length
   const result = await service.generateSessionStoryTurn(click(before))
-  assert.equal(calls.length - callCount, 1, 'no same-model truth reviewer')
+  assert.equal(calls.length - callCount, 3, 'routing, scene and review; none authorizes facts')
   assert.equal(result.turn.presentation, 'candidate-actions')
   assert.equal(result.revision, before.revision + 1)
   let persisted = diskSession(before.storyId)
@@ -99,8 +110,10 @@ test('focus -> candidate review -> explicit author result: no model causal claim
   assert.deepEqual(added.map((f: { statement: string }) => f.statement), [authorConfirmation.resultText])
   assert.deepEqual(after.history.at(-1)!.selectedOption.transition.authorConfirmation?.resultText, authorConfirmation.resultText)
   assert.equal(after.turn.presentation, 'candidate-actions')
-  assert.equal(calls.at(-1)!.input.lastAuthorConfirmedResult.resultText, authorConfirmation.resultText)
-  assert.ok(calls.at(-1)!.input.sourceFacts.some((f: { text: string }) => f.text === authorConfirmation.resultText))
+  const continuation = calls.filter(call => call.system.includes('共创提案编辑')).at(-1)!
+  assert.equal(continuation.input.latestResult.result, authorConfirmation.resultText)
+  assert.ok(continuation.input.confirmedResults.some((f: { result: string }) => f.result === authorConfirmation.resultText))
+  assert.equal(continuation.input.evidence, undefined)
   await assert.rejects(service.generateSessionStoryTurn(click(before)), hasCode('STORY_SESSION_CONFLICT'))
 })
 

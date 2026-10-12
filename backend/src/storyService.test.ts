@@ -25,6 +25,7 @@ import {
   validateSystemDraftStoryTurnContinuation,
   parseStoryAuthorInstructionRequest,
   parseStoryActionProposalRequest,
+  parseStoryPreparationSuggestionRequest,
   looksLikeAuthorInstruction,
   createDirectCoCreationSeed,
   getStorySessionSnapshot,
@@ -82,6 +83,13 @@ const examples = {
 
 const { idea } = examples.personal
 const seed = examples.personal.seed
+
+test('preparation suggestion reads only current session identifiers', () => {
+  const request = { storyId: 'story-1', revision: 2, curveId: 'curve-1' }
+  assert.deepEqual(parseStoryPreparationSuggestionRequest(request), request)
+  assert.throws(() => parseStoryPreparationSuggestionRequest({ ...request, suggestion: '替作者确认的设定' }),
+    (error: unknown) => error instanceof AppError && error.code === 'INVALID_REQUEST')
+})
 
 function createValidDraft(): StoryConflictCoreSystemDraft {
   return {
@@ -3211,37 +3219,24 @@ test('rich system-draft requests never invite sparse-scene hooks', async () => {
       systemPrompts.push(request.messages?.[0]?.content ?? '')
       userPrompts.push(request.messages?.[1]?.content ?? '')
       return createCurveModelResponse({
-        systemDraft: {
-          stake: '按时提交与最后一页缺失之间存在取舍',
-          constraint: '周五前交稿与最后一页缺失同时存在',
-          directions: [
-            {
-              label: '周五期限',
-              mechanismType: 'window-pressure',
-              premise: '暂定：周五前把祖母的手稿交给出版社，让提交决定不能继续搁置',
-              tradeoff: '在周五前提交祖母的手稿，还是暂缓处理最后一页缺失',
-            },
-            {
-              label: '补写承诺',
-              mechanismType: 'commitment-conflict',
-              premise: '暂定：答应过不擅自补写，让最后一页缺失成为提交取舍',
-              tradeoff: '守住不擅自补写，还是在周五前提交祖母的手稿',
-            },
-            {
-              label: '缺页取舍',
-              mechanismType: 'meaning-commitment',
-              premise: '暂定：祖母的手稿最后一页缺失，让提交决定需要重新判断',
-              tradeoff: '保留最后一页缺失，还是在周五前提交祖母的手稿',
-            },
-          ],
-        },
+        directionPlan: [
+          {
+            mechanismType: 'commitment-conflict',
+            premiseFactId: 'source-fact-3',
+            tradeoffFactId: 'source-fact-2',
+          },
+          {
+            mechanismType: 'information-gap',
+            premiseFactId: 'source-fact-2',
+            tradeoffFactId: 'source-fact-3',
+          },
+          {
+            mechanismType: 'initiation-block',
+            premiseFactId: 'source-fact-2',
+            tradeoffFactId: 'source-fact-3',
+          },
+        ],
       })
-
-      if (systemPrompts.length === 1) {
-        // The direct seed avoids extraction, so the first request is the
-        // system-draft call. Keep the mock response valid and let the normal
-        // direction picker proceed through its own fallback contract.
-      }
     }
 
     const response = await generateDirections({
@@ -3251,13 +3246,17 @@ test('rich system-draft requests never invite sparse-scene hooks', async () => {
     })
     assert.equal(response.conflictCores.length, 3)
 
-    const systemDraftPrompt = systemPrompts.find((prompt) => prompt.includes('信息丰富输入'))
+    const systemDraftPrompt = systemPrompts.find((prompt) => prompt.includes('故事结构选择器'))
     assert.ok(systemDraftPrompt, 'expected the rich system-draft system prompt')
-    assert.match(systemDraftPrompt ?? '', /不得新增任何普通物件、设备、通讯/u)
+    assert.match(systemDraftPrompt ?? '', /只能包含 directionPlan/u)
+    assert.match(systemDraftPrompt ?? '', /不要返回 systemDraft、directions/u)
     assert.doesNotMatch(systemDraftPrompt ?? '', /门票、手机、工作人员等普通词可以/u)
     assert.doesNotMatch(systemDraftPrompt ?? '', /允许一个当前物件/u)
+    assert.equal(userPrompts.every((prompt) => /只输出 directionPlan JSON/u.test(prompt)), true)
+    assert.equal(userPrompts.some((prompt) => /strict.*systemDraft|stake.*constraint/iu.test(prompt)), false)
     assert.equal(userPrompts.some((prompt) => /门票、手机、工作人员等普通词可以/u.test(prompt)), false)
     assert.equal(userPrompts.some((prompt) => /反常痕迹、角色错位、有限意外/u.test(prompt)), false)
+    assert.equal(userPrompts.some((prompt) => /允许压力事实 ID：\["source-fact-2","source-fact-3"\]/u.test(prompt)), true)
   } finally {
     globalThis.fetch = previousFetch
     if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL
@@ -3269,7 +3268,7 @@ test('rich system-draft requests never invite sparse-scene hooks', async () => {
   }
 })
 
-test('recovers a grounded rich direction without applying sparse-hook validation', async () => {
+test('rich system-draft retries stay on directionPlan and do not enter legacy recovery', async () => {
   const previousDisableModel = process.env.STORY_DISABLE_MODEL
   const previousApiKey = process.env.DASHSCOPE_API_KEY
   const previousBaseUrl = process.env.DASHSCOPE_BASE_URL
@@ -3281,56 +3280,32 @@ test('recovers a grounded rich direction without applying sparse-hook validation
   process.env.DASHSCOPE_BASE_URL = 'https://model.test.invalid'
   try {
     let calls = 0
-    globalThis.fetch = async () => {
+    const userPrompts: string[] = []
+    globalThis.fetch = async (_input, init) => {
       calls += 1
-      if (calls <= 3) {
-        return createCurveModelResponse({
-          systemDraft: {
-            stake: '按时提交与最后一页缺失之间存在取舍',
-            constraint: '周五前交稿与最后一页缺失同时存在',
-            directions: [
-              {
-                label: '周五期限',
-                mechanismType: 'window-pressure',
-                premise: '暂定：林澈答应在周五前把祖母的手稿交给出版社',
-                tradeoff: '按承诺提交还是暂缓提交',
-              },
-              {
-                label: '缺页判断',
-                mechanismType: 'information-gap',
-                premise: '暂定：但他发现最后一页缺失',
-                tradeoff: '继续提交还是保留缺失',
-              },
-              {
-                label: '陌生便签',
-                mechanismType: 'commitment-conflict',
-                premise: '暂定：手稿旁多出便签',
-                tradeoff: '按承诺提交还是保留便签',
-              },
-            ],
-          },
-        })
-      }
-
+      const request = JSON.parse(String(init?.body)) as { messages?: Array<{ content?: string }> }
+      userPrompts.push(request.messages?.[1]?.content ?? '')
       return createCurveModelResponse({
-        directions: [{
-          label: '承诺与缺页',
-          mechanismType: 'boundary-conflict',
-          premise: '暂定：他发现最后一页缺失',
-          tradeoff: '继续按承诺提交还是暂缓提交',
-        }],
+        systemDraft: {
+          directions: [],
+        },
       })
     }
 
-    const response = await generateDirections({
-      idea,
-      expansionScope: 'keep-scale',
-      generateSystemDraft: true,
-    })
+    await assert.rejects(
+      () => generateDirections({
+        idea,
+        expansionScope: 'keep-scale',
+        generateSystemDraft: true,
+      }),
+      (error: unknown) => error instanceof AppError
+        && error.code === 'STORY_SYSTEM_DRAFT_MODEL_GENERATION_FAILED'
+        && error.modelDiagnostic?.attempt === 3,
+    )
 
-    assert.equal(response.seed.systemDraft?.origin, 'model')
-    assert.equal(response.seed.systemDraft?.directions?.length, 3)
-    assert.ok(response.seed.systemDraft?.directions?.some((direction) => direction.label === '承诺与缺页'))
+    assert.equal(calls, 3, 'rich output has only its bounded primary attempts')
+    assert.equal(userPrompts.every((prompt) => /只输出 directionPlan JSON/u.test(prompt)), true)
+    assert.equal(userPrompts.some((prompt) => /只补齐|上一版系统暂定设定|以下方向已经合格/u.test(prompt)), false)
   } finally {
     globalThis.fetch = previousFetch
     if (previousDisableModel === undefined) delete process.env.STORY_DISABLE_MODEL

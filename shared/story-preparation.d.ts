@@ -48,6 +48,8 @@ export interface StoryPreparation {
   authorReview?: StoryPreparationReview
   /** Historical proposals are never overwritten by reviewed wording. */
   originalCandidates?: StoryPreparationCandidate[]
+  /** Rejected directions are exclusions, never material or execution facts. */
+  rejectedCandidates?: StoryPreparationCandidate[]
   supplements?: StoryPreparationSupplement[]
   executed: false
 }

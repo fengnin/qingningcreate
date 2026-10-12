@@ -27,6 +27,9 @@ pnpm-debug.log*
 .DS_Store
 Thumbs.db
 
+# Local acceptance evidence, one-off scripts, patches, and isolated runs
+local-evidence/
+
 # Local product notes and private creative references
 ARCHITECTURE.md
 PRODUCT_FLOW.md

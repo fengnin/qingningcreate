@@ -91,6 +91,12 @@ export function requestPreparationAcceptance(request: import('../../../shared/st
 export function requestPreparationSupplement(request: import('../../../shared/story-preparation-request.js').StoryPreparationSupplementRequest): Promise<StoryCurveMutationResponse> {
   return postJson('/api/story/preparation/supplement', request, parseStoryCurveMutationResponse)
 }
+export function requestPreparationRevision(request: import('../../../shared/story-preparation-request.js').StoryPreparationRevisionRequest): Promise<StoryCurveMutationResponse> {
+  return postJson('/api/story/preparation/revise', request, parseStoryCurveMutationResponse)
+}
+export function requestPreparationGoalSuggestion(request: { storyId: string; revision: number; curveId: string }): Promise<string> {
+  return postJson('/api/story/preparation/suggest-goal', request, payload => readText(expectRecord(payload), 'suggestion'))
+}
 
 export function requestCurveBeatUpdate(request: StoryCurveBeatUpdateRequest): Promise<StoryCurveMutationResponse> {
   return postJson('/api/story/curve/beat', request, parseStoryCurveMutationResponse)
@@ -370,7 +376,7 @@ function parseStorySessionSnapshot(payload: unknown): StorySessionSnapshot {
   return {
     ...parseStorySessionVersion(record),
     idea: readText(record, 'idea'),
-    seed: parseStorySeed(record.seed),
+    seed: parseStorySeed(record.seed, predicament?.designProtocol === 'prepared-action' ? 12 : 5),
     brief: parseCreativeBrief(record.brief),
     ...(curve ? { curve } : {}),
     ...(confirmedCurve ? { confirmedCurve } : {}),
@@ -392,10 +398,11 @@ function parseStorySessionSnapshot(payload: unknown): StorySessionSnapshot {
 
 export function parseStoryCurveSpineResponse(payload: unknown): StoryCurveSpineResponse {
   const record = expectRecord(payload)
+  const predicament = parseStoryPredicament(record.predicament)
   return {
     ...parseStoryTurnResponse(record),
-    seed: parseStorySeed(record.seed),
-    predicament: parseStoryPredicament(record.predicament),
+    seed: parseStorySeed(record.seed, predicament.designProtocol === 'prepared-action' ? 12 : 5),
+    predicament,
     approach: parsePredicamentApproach(record.approach),
     headTail: parseHeadTailOption(record.headTail),
   }
@@ -471,7 +478,7 @@ function parseStorySessionVersion(record: Record<string, unknown>): StorySession
   }
 }
 
-function parseStorySeed(value: unknown): StorySeed {
+function parseStorySeed(value: unknown, maximumLockedFacts = 5): StorySeed {
   const record = expectRecord(value)
   const lockedGoal = record.lockedGoal
   if (lockedGoal !== null && (typeof lockedGoal !== 'string' || !lockedGoal.trim())) throwInvalidResponse()
@@ -492,7 +499,7 @@ function parseStorySeed(value: unknown): StorySeed {
     subject: readText(record, 'subject'),
     activeSituation: readText(record, 'activeSituation'),
     lockedGoal: typeof lockedGoal === 'string' ? lockedGoal.trim() : null,
-    lockedFacts: readTextList(record, 'lockedFacts', 0, 5),
+    lockedFacts: readTextList(record, 'lockedFacts', 0, maximumLockedFacts),
     ...(systemDraft ? { systemDraft } : {}),
     ...(creativeBrief ? { creativeBrief } : {}),
     worldMode,
@@ -568,11 +575,21 @@ function parseCreativeBrief(value: unknown): CreativeBrief {
   const dramaticForces = parseCreativeEnumList(record.dramaticForces, ['misunderstanding', 'cost', 'surprise', 'contrast', 'relationship-tension'] as const)
   if (typeof record.allowSystemNamedCharacters !== 'boolean') throwInvalidResponse()
   const note = readOptionalGeneratedText(record.note, 180)
+  let storyRequirements: CreativeBrief['storyRequirements']
+  if (record.storyRequirements !== undefined) {
+    const fields = expectRecord(record.storyRequirements)
+    storyRequirements = {}
+    for (const key of ['setting', 'direction', 'boundaries'] as const) {
+      const content = readOptionalGeneratedText(fields[key], 240)
+      if (content) storyRequirements[key] = content
+    }
+  }
   return {
     tones,
     dramaticForces,
     allowSystemNamedCharacters: record.allowSystemNamedCharacters,
     ...(note ? { note } : {}),
+    ...(storyRequirements && Object.keys(storyRequirements).length ? { storyRequirements } : {}),
   }
 }
 
@@ -1372,8 +1389,9 @@ function parsePreparation(value: unknown): import('../../../shared/story-prepara
     return { id: readIdentifier(s, 'id'), kind: s.kind as 'hypothesis'|'observation'|'criterion'|'condition', text: readText(s, 'text'), question: readText(s, 'question'), materialIds: readIdentifierList(s, 'materialIds'), status: s.status as import('../../../shared/story-preparation.js').StoryPreparationSupplement['status'], ...(s.authorText === undefined ? {} : { authorText: readVerbatimAnswer(s.authorText) }) }
   })
   const originalCandidates = p.originalCandidates === undefined ? undefined : parseCandidates(Array.isArray(p.originalCandidates) ? p.originalCandidates : throwInvalidResponse())
+  const rejectedCandidates = p.rejectedCandidates === undefined ? undefined : parseCandidates(Array.isArray(p.rejectedCandidates) ? p.rejectedCandidates : throwInvalidResponse())
   return { protocol: 1, status: p.status as 'needs-review' | 'accepted-design', executed: false,
-    sources, material, questions, candidates, acceptedCandidateIds: readIdentifierList(p, 'acceptedCandidateIds'), ...(authorReview ? { authorReview } : {}), ...(supplements ? { supplements } : {}), ...(originalCandidates ? { originalCandidates } : {}) }
+    sources, material, questions, candidates, acceptedCandidateIds: readIdentifierList(p, 'acceptedCandidateIds'), ...(authorReview ? { authorReview } : {}), ...(supplements ? { supplements } : {}), ...(originalCandidates ? { originalCandidates } : {}), ...(rejectedCandidates ? { rejectedCandidates } : {}) }
 }
 
 function parseReasoning(value: unknown): StoryReasoningProposal {

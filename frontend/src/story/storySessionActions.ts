@@ -7,6 +7,7 @@ import {
   requestStoryTurnOptionRefinement,
   requestStoryCoCreationStart,
   requestPreparationAcceptance,
+  requestPreparationRevision,
   requestPreparationSupplement,
   requestCurveBeatUpdate,
   requestCurveBeatRegeneration,
@@ -68,6 +69,7 @@ interface ConflictCoreGenerationOptions {
 export interface StorySessionActions {
   reviewPreparationSupplement: (supplementId: string, decision: 'accepted-design' | 'rejected' | 'keep-unknown', authorText: string) => Promise<void>
   acceptPreparation: (candidateIds: string[], authorReview?: import('../../../shared/story-preparation.js').StoryPreparationReview) => Promise<void>
+  revisePreparation: (decision: 'reject' | 'regenerate' | 'revise', candidateId?: string, authorAction?: string) => Promise<void>
   updateIdea: (idea: string) => void
   useExample: () => void
   openConflictCorePicker: () => Promise<void>
@@ -159,6 +161,7 @@ function createCoCreationActions(
   | 'updateCreativeBrief'
   | 'generateProvisionalCurve'
   | 'acceptPreparation'
+  | 'revisePreparation'
   | 'reviewPreparationSupplement'
   | 'updateCurveBeat'
   | 'regenerateCurveBeat'
@@ -175,7 +178,10 @@ function createCoCreationActions(
     // Returning from the opening screen is still part of the current author
     // session. Only a genuinely new session should clear the saved curve and
     // its version history.
-    if (!state.storyId && !state.provisionalCurve) state.resetStoryFoundation()
+    if (!state.storyId && !state.provisionalCurve) {
+      state.resetStoryFoundation()
+      state.setCreativeBrief(state.creativeBrief)
+    }
     state.setView('creative-brief')
   }
 
@@ -223,6 +229,9 @@ function createCoCreationActions(
   }
   const reviewPreparationSupplement = async (supplementId: string, decision: 'accepted-design' | 'rejected' | 'keep-unknown', authorText: string) => {
     await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => requestPreparationSupplement({ storyId, revision, curveId, supplementId, decision, authorText }))
+  }
+  const revisePreparation = async (decision: 'reject' | 'regenerate' | 'revise', candidateId?: string, authorAction?: string) => {
+    await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => requestPreparationRevision({ storyId, revision, curveId, decision, candidateId, authorAction }))
   }
 
   const regenerateCurveBeat = async (beatId: string, feedback?: string, replaceRejected = false) => {
@@ -361,6 +370,7 @@ function createCoCreationActions(
     updateCreativeBrief: state.setCreativeBrief,
     generateProvisionalCurve,
     acceptPreparation,
+    revisePreparation,
     reviewPreparationSupplement,
     updateCurveBeat,
     regenerateCurveBeat,
@@ -393,6 +403,7 @@ function createStoryFoundationActions(
   const updateIdea = (idea: string) => {
     if (idea.trim() !== state.trimmedIdea && (state.conflictCores.length || state.provisionalCurve || state.storyId)) {
       state.resetStoryFoundation()
+      state.setCreativeBrief(state.creativeBrief)
     }
     state.setIdea(idea)
   }
@@ -601,6 +612,13 @@ function createNavigationActions(
   generateProvisionalCurve: StorySessionActions['generateProvisionalCurve'],
 ): Pick<StorySessionActions, 'retryCurrentStage' | 'goBack' | 'goBackToOpening' | 'restartStory'> {
   const retryCurrentStage = async () => {
+    const confirmation = state.pendingActionConfirmation
+    if (state.view === 'story-spine' && confirmation && confirmation.proposalId === state.pendingActionProposal?.id && state.storyId) {
+      await runStorySessionStageRequest(state, stage,
+        () => requestStoryActionProposalConfirmation({ storyId: state.storyId!, revision: state.revision, ...confirmation }),
+        result => { applyStoryTurnState(state, result); state.setPendingActionConfirmation(undefined) })
+      return
+    }
     if (state.view === 'provisional-curve') {
       // A failed regeneration leaves the previous draft visible so the author
       // does not lose work. Retrying must still issue the request; create a
@@ -811,6 +829,7 @@ function createAuthorControlActions(
   const confirmStoryActionProposal = async (mode: Extract<StoryTurnMode, 'continue' | 'conclude'>, authorConfirmation?: { actionText: string; resultText: string }) => {
     const proposal = state.pendingActionProposal
     if (!state.storyId || !proposal) return
+    state.setPendingActionConfirmation({ proposalId: proposal.id, mode, ...(authorConfirmation ? { authorConfirmation } : {}) })
     await runStorySessionStageRequest(
       state,
       stage,
@@ -821,7 +840,7 @@ function createAuthorControlActions(
         mode,
         ...(authorConfirmation ? { authorConfirmation } : {}),
       }),
-      (result) => applyStoryTurnState(state, result),
+      (result) => { applyStoryTurnState(state, result); state.setPendingActionConfirmation(undefined) },
     )
   }
 

@@ -16,6 +16,10 @@ import {
   generateSessionStoryTurnOptionRefinement,
   startStoryCoCreation,
   acceptSessionPreparation,
+  reviseSessionPreparation,
+  parseStoryPreparationSuggestionRequest,
+  suggestSessionPreparationGoal,
+  parseStoryPreparationRevisionRequest,
   parseStoryPreparationAcceptanceRequest,
   parseStoryPreparationSupplementRequest,
   reviewSessionPreparationSupplement,
@@ -120,6 +124,10 @@ registerStoryStage(
   (result) => result satisfies StoryCurveMutationResponse,
 )
 
+registerStoryStage('/api/story/preparation/revise', parseStoryPreparationRevisionRequest, reviseSessionPreparation,
+  (result) => result satisfies StoryCurveMutationResponse)
+registerStoryStage('/api/story/preparation/suggest-goal', parseStoryPreparationSuggestionRequest, suggestSessionPreparationGoal,
+  (result) => result satisfies { suggestion: string })
 registerStoryStage('/api/story/preparation/supplement', parseStoryPreparationSupplementRequest, reviewSessionPreparationSupplement,
   (result) => result satisfies StoryCurveMutationResponse)
 

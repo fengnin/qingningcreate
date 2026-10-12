@@ -335,7 +335,7 @@ export function parseCreativeBrief(value: unknown): CreativeBrief {
   if (!isRecord(value)) {
     throw new AppError('创意方向格式不正确，请重新选择。', 400, 'INVALID_REQUEST')
   }
-  if (Object.keys(value).some((field) => !['tones', 'dramaticForces', 'allowSystemNamedCharacters', 'note'].includes(field))) {
+  if (Object.keys(value).some((field) => !['tones', 'dramaticForces', 'allowSystemNamedCharacters', 'note', 'storyRequirements'].includes(field))) {
     throw new AppError('创意方向包含不支持的字段，请重新提交。', 400, 'INVALID_REQUEST')
   }
 
@@ -346,11 +346,27 @@ export function parseCreativeBrief(value: unknown): CreativeBrief {
   }
 
   const note = readOptionalText(value.note, maximumCurveInstructionLength)
+  let storyRequirements: CreativeBrief['storyRequirements']
+  if (value.storyRequirements !== undefined) {
+    if (!isRecord(value.storyRequirements) || Object.keys(value.storyRequirements).some(k => !['setting', 'direction', 'boundaries'].includes(k))) {
+      throw new AppError('补充故事要求格式不正确。', 400, 'INVALID_REQUEST')
+    }
+    storyRequirements = {}
+    for (const key of ['setting', 'direction', 'boundaries'] as const) {
+      const raw = value.storyRequirements[key]
+      if (raw !== undefined && (typeof raw !== 'string' || raw.length > 240)) {
+        throw new AppError('每项补充故事要求最多240字。', 400, 'INVALID_REQUEST')
+      }
+      const content = typeof raw === 'string' ? raw.trim() : undefined
+      if (content) storyRequirements[key] = content
+    }
+  }
   return {
     tones,
     dramaticForces: forces,
     allowSystemNamedCharacters: value.allowSystemNamedCharacters,
     ...(note ? { note } : {}),
+    ...(storyRequirements && Object.keys(storyRequirements).length ? { storyRequirements } : {}),
   }
 }
 

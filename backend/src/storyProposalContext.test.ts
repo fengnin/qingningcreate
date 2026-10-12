@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { ConfirmedCurve, StorySeed, StoryTurnHistoryItem } from '../../shared/story-contract.js'
-import { createStoryProposalContext, validateProposalFactReferences, validateContinuationBasis } from './storyProposalContext.js'
+import type { ConfirmedCurve, StorySeed, StoryTurnHistoryItem, StoryPredicament } from '../../shared/story-contract.js'
+import { createStoryProposalContext, validateProposalFactReferences, validateContinuationBasis, validateContinuationQualityReview } from './storyProposalContext.js'
+import { generateStoryTurn } from './storyService.js'
+import { AppError } from './qwen.js'
 
 const seed: StorySeed = { subject: '许沅', activeSituation: '修复陶碗', lockedGoal: '修复陶碗',
   lockedFacts: ['陶碗裂口缺一块', '邻居提供同色碎片'], worldMode: 'realistic-default', expansionScope: 'keep-scale', unknowns: [] }
@@ -38,6 +40,10 @@ test('only exact author result receipts feed continuation; model history and tam
   assert.deepEqual(input.executedHistory.map((entry) => entry.resultText), ['测量后确认碎片比缺口窄。'])
   assert.equal(input.lastAuthorConfirmedResult!.resultText, '测量后确认碎片比缺口窄。')
   assert.ok(!input.sourceFacts.some((f) => f.text === '陶碗已经修好。' || f.text === '碎片已经粘牢。'))
+  const systemBeat = { ...curve.beats[0]!, id: 'prediction', source: 'system-proposal' as const, detail: '可能发现陶碗底部破洞。' }
+  const withPrediction = { ...curve, beats: [...curve.beats, systemBeat] } as ConfirmedCurve
+  assert.ok(!createStoryProposalContext(seed, withPrediction, [executed], []).designBeats.some(b => b.id === 'prediction'))
+  assert.ok(createStoryProposalContext(seed, withPrediction, [], []).designBeats.some(b => b.id === 'prediction'))
 })
 
 test('continuation references cannot promote reviewed design or unknown questions to fact evidence', () => {
@@ -63,4 +69,45 @@ test('continuation basis carries the latest receipt and separates optional desig
   assert.throws(() => validateContinuationBasis({ ...basis, contradictions: [{ text: '矛盾', sourceFactIds: ['result'] }] }, context), /至少两项/)
   assert.throws(() => validateContinuationBasis({ ...basis, contradictions: [{ text: '矛盾', sourceFactIds: ['result','b'] }] }, context), /非法事实 ID/)
   assert.equal(validateContinuationBasis({ ...basis, unresolved: { kind: 'next-goal', text: '请作者决定下一目标或收束。', sourceFactIds: [] } }, context).unresolved.kind, 'next-goal')
+  assert.throws(() => validateContinuationBasis({ ...basis, reason: '根据lastAuthorConfirmedResult，没有sourceFact缺口。' }, context), /内部字段/)
+})
+
+test('structurally valid fact references cannot bypass an independent failed content review', async () => {
+  const originalFetch = globalThis.fetch
+  const env = { key: process.env.DASHSCOPE_API_KEY, disable: process.env.STORY_DISABLE_MODEL }
+  process.env.DASHSCOPE_API_KEY = 'stub'; process.env.STORY_DISABLE_MODEL = 'false'
+  const predicament = { id: 'p', designProtocol: 'prepared-action', title: '陶碗', variationAxis: 'commitment',
+    preservedGoal: seed.lockedGoal, immediateSituation: seed.activeSituation, obstacle: '', tradeoff: '', urgency: '', choice: '', plausibleCost: '',
+    approaches: [], facts: [], actions: [] } as StoryPredicament
+  const request = { mode: 'continue', seed, predicament, confirmedCurve: curve, history: [], headTail: null } as unknown as Parameters<typeof generateStoryTurn>[0]
+  const before = structuredClone(request)
+  let generationCalls = 0, reviewCalls = 0
+  const audit = { checks: ['continuity','causality','requirements','author-control'].map(criterion => ({ criterion, passed: criterion !== 'requirements', evidence: criterion === 'requirements' ? '原文没有要求邻居签字；签字被伪装为修碗的必要条件。' : '测试合同证据，非真实内容验收。' })), issues: [] }
+  globalThis.fetch = async (_url, init) => {
+    const input = JSON.parse(String(init?.body)), user = JSON.parse(input.messages[1].content)
+    let output: unknown
+    if (input.messages[0].content.includes('独立审查中文故事续推提案')) {
+      reviewCalls++
+      assert.equal(user.proposal.options[0].action, '先请邻居签字，才能修碗。')
+      output = audit
+    } else if (input.messages[0].content.includes('续推出口判断')) {
+      output = { route: 'action', unresolved: '修复陶碗', reason: '陶碗仍待修复。', sourceIds: ['e0'], contradictions: [] }
+    } else {
+      generationCalls++
+      if (generationCalls > 1) assert.match(user.task.repair, /签字/)
+      output = { options: [{ label: '签字', action: '先请邻居签字，才能修碗。', proposedConsequence: '可能获得修复许可。' }] }
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(output) } }] }), { status: 200 })
+  }
+  try {
+    await assert.rejects(() => generateStoryTurn(request), (e: unknown) => e instanceof AppError && e.code === 'STORY_TURN_QUALITY_FAILED')
+    assert.ok(generationCalls > 1)
+    assert.equal(generationCalls, reviewCalls)
+    assert.deepEqual(request, before)
+    assert.throws(() => validateContinuationQualityReview({ ...audit, checks: audit.checks.slice(1) }), (e: unknown) => e instanceof AppError && e.code === 'INVALID_MODEL_OUTPUT')
+  } finally {
+    globalThis.fetch = originalFetch
+    if (env.key === undefined) delete process.env.DASHSCOPE_API_KEY; else process.env.DASHSCOPE_API_KEY = env.key
+    if (env.disable === undefined) delete process.env.STORY_DISABLE_MODEL; else process.env.STORY_DISABLE_MODEL = env.disable
+  }
 })

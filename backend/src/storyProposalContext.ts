@@ -1,6 +1,7 @@
 import type { ConfirmedCurve, StorySeed, StoryTurnHistoryItem } from '../../shared/story-contract.js'
 import { activePreparationMaterial } from './storyPreparation.js'
 import { AppError } from './qwen.js'
+import { hasProposalProtocolLeak } from './storyProposalProse.js'
 
 export function validateProposalFactReferences(value: unknown, sourceIds: readonly string[], path: string): string[] {
   if (!Array.isArray(value) || value.length > sourceIds.length || value.some(id => typeof id !== 'string') || new Set(value).size !== value.length) {
@@ -20,7 +21,13 @@ export function validateContinuationBasis(value: unknown, context: ReturnType<ty
     if (Object.keys(r).some(k => !keys.includes(k))) return invalid('推进依据含未允许字段。')
     return r
   }
-  const text = (v: unknown) => typeof v === 'string' && v.trim() && v.length <= 240 ? v : invalid('说明必须是1至240字。')
+  const text = (v: unknown) => {
+    if (typeof v !== 'string' || !v.trim() || v.length > 240) return invalid('说明必须是1至240字。')
+    // These are model protocol identifiers, not narrative explanations. Do not
+    // silently rewrite them into prose or expose them as an author obligation.
+    if (hasProposalProtocolLeak(v, context.sourceFacts.map(f => f.text))) return invalid('请用故事中的人物、行动和结果解释承接，不输出内部字段或事实 ID。')
+    return v
+  }
   const refs = (v: unknown, path: string) => validateProposalFactReferences(v, context.referenceContract.sourceFactIds, `candidatePlan.basis.${path}`)
   const b = record(value, ['latestResultFactId', 'unresolved', 'reason', 'contradictions'])
   if (b.latestResultFactId !== (context.lastAuthorConfirmedResult?.factId ?? null)) invalid('必须承接最近作者确认的结果 ID；没有结果时为 null。')
@@ -69,7 +76,10 @@ export function createStoryProposalContext(
     ...authorTexts.map((text, index) => ({ id: `author-${index + 1}`, text, authority: 'author-material' as const })),
     ...executedHistory.map((item) => ({ id: item.factId, text: item.resultText, authority: 'author-confirmed-result' as const })),
   ]
-  const designBeats = curve.beats.filter((beat) => beat.status !== 'rejected').map((beat) => ({
+  // Once execution has begun, system predictions belong to the historical
+  // draft. Keep only explicit author design intent in continuation context.
+  const designBeats = curve.beats.filter((beat) => beat.status !== 'rejected'
+    && (!executedHistory.length || beat.source === 'user-edit')).map((beat) => ({
     id: beat.id, kind: beat.kind, text: beat.detail, dependsOn: beat.dependsOn,
     authority: beat.source === 'user-edit' ? 'author-design' as const : 'reviewed-system-design' as const,
   }))
@@ -101,16 +111,34 @@ export function createStoryProposalContext(
   }
 }
 
-export const storyProposalGenerationInstruction = `你是中文故事共创提案编辑。生成具体、成立、可审阅的下一步行动，不生成既成事件或事实状态。
-先读完整上下文：sourceFacts 是作者材料或逐字确认的实际结果；authorEdits 是作者设计意图而非已发生事实；designBeats 只给结构方向，不能替代因果证据。executedHistory 是已确认行动结果。selectedFocus 是关注角度，不是执行授权，也不能使作者编辑的核心问题消失。
-引用编码：options[].sourceFactIds 与 causalClaims[].sourceFactIds 只能照抄 referenceContract.sourceFactIds。禁止填 designOnlyIds、未确认问题 ID、材料原来的 ID 或示例占位词。引用一个设计节点不是事实依据；没有作者依据的待审假设用空数组并明确提出问题，不能把设计节点转换为事实引用。
-行动、约束和代价分开：行动须说明谁针对什么对象做什么；目标与期限、承诺、资源条件都不是行动选项。比较解决同一当前问题的不同做法，不把可同时满足的条件硬写成二选一。没有期限就不制造倒计时；已有条件可兼容就不声称必然冲突。
-因果依据：事实并列不等于因果，引用 ID 不等于证明。仅作者明确写出的因果关系可以作为成立的理由；从物件用途、关系身份、期限或承诺推断出的能力、动机、权限、回应和代价都不是已知。不要通过新增人员、机构、设备、流程或便利权限绕开核心问题。
-给一至三项有实质差异的角色行动，不为凑数制造新问题。优先使用已有对象和条件。角色向另一角色询问可以是行动，向作者索取资料、检查设计或确认结果必须走 authorReview，不能放进 options[].action。若没有不依赖未知前提的行动，options=[]，提出具体作者问题；作者明确保留未知时，不替作者回答。
-先依据 lastAuthorConfirmedResult 及 executedHistory 确定仍未解决的具体事项，再生成候选。原始材料是较早状态，不得以其中的尚未开始、未来安排否定明确执行结果。作者明确确认完成的目标或满足的条件不需要再次举证、测量或追问成立机制。不得新增稳定时长、物理检查、他人评价等标准作为目标完成或续推的必要条件。若没有作者已提供的未解决事项，可以只提供一项请作者审阅收束或给出下一目标的候选；不要凭空续造障碍。独立新增设计只能自愿审阅，不得伪装成必须解决的现有缺口。
-编辑承接：优先推进 authorEdits 指向的行动与问题；期限仍作约束，不把编辑后的任务变成归还安排等旁支。最近确认结果已解决的事项不能再重复，不推断其未写出的其他后果；后续行动要处理作者仍未解决的部分。
-action 是候选行动，不是执行结果；proposedConsequence 须区分作者已有因果与待核对的条件性承接，不能保证未获证实的效果。整个候选留在待审区不意味着内容合格。不要引用系统模板作为理由。
-先输出 candidatePlan.basis，再给 options。basis.latestResultFactId 逐字使用 lastAuthorConfirmedResult.factId，无执行结果时为 null。basis.unresolved={kind,text,sourceFactIds}：existing 仅用于作者事实仍未解决的事项，引用具体依据；optional-design 是可拒绝且不阻碍原目标完成的新增建议，引用为空；next-goal 表示现有事项已完成或无已知未解决事项，请作者收束或提出新目标，引用为空。basis.reason 解释为何从刚才结果推进到该事项；basis.contradictions=[{text,sourceFactIds}] 只列真正矛盾的作者依据，没有则为空。较早的未开始和较晚的完成只是时序变化，不是矛盾。
-options 只能处理 basis.unresolved；新编号、签收、装帧、检查或他人认可等要求若没有作者依据，只能属于 optional-design，不得称为完成原目标的必需条件。既有目标已明确完成时优先收束，不再让作者证明完成；结果未知时只核对真实未解决事项，不发明验收标准。引用 ID 不能证明语义正确；不能通过 basis 标签包装新增因果。
-三个出口互斥：收束 kind=next-goal 时 options=[]、authorReview=null。作者资料补充或设计审阅时 options=[]、authorReview={summary,questions}，questions 一至四个具体作者问题，不是角色动作。kind=optional-design 必须走作者设计审阅。只有 existing 且有可审阅角色行动才输出一至三项 options，authorReview=null。行动出口不能把作者回答、设计核对或完成证明当成行动；作者审阅不产生执行或事实，作者可补充、保留未知或选择独立替代，经现有作者入口重审主线。
-严格输出 JSON 对象 candidatePlan，不输出 turn、transition、introducedFacts、review 或任何确认凭证。`
+export const continuationQualityCriteria = ['continuity', 'causality', 'requirements', 'author-control'] as const
+
+/** A separate review must cover every dimension; missing review is not a pass. */
+export function validateContinuationQualityReview(value: unknown): void {
+  const invalid = (message: string): never => { throw new AppError(message, 502, 'INVALID_MODEL_OUTPUT') }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) invalid('续推内容审阅缺失。')
+  const audit = value as Record<string, unknown>
+  if (Object.keys(audit).length !== 2 || !Array.isArray(audit.checks) || !Array.isArray(audit.issues)
+      || audit.checks.length !== continuationQualityCriteria.length || audit.issues.length > 4) invalid('续推内容审阅结构不完整。')
+  const checks = (audit.checks as unknown[]).map(value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) invalid('续推内容审阅维度缺失。')
+    const check = value as Record<string, unknown>
+    if (Object.keys(check).length !== 3 || !continuationQualityCriteria.includes(check.criterion as typeof continuationQualityCriteria[number])
+        || typeof check.passed !== 'boolean' || typeof check.evidence !== 'string' || !check.evidence.trim() || check.evidence.length > 400) invalid('续推内容审阅维度不合法。')
+    return check
+  })
+  if (new Set(checks.map(c => c.criterion)).size !== continuationQualityCriteria.length) invalid('续推内容审阅遗漏维度。')
+  const issues = (audit.issues as unknown[]).map(issue => {
+    if (typeof issue !== 'string' || !issue.trim() || issue.length > 400) invalid('续推内容审阅问题不合法。')
+    return issue as string
+  })
+  for (const check of checks.filter(c => !c.passed)) issues.push(`${check.criterion}：${check.evidence}`)
+  if (issues.length) throw new AppError(`续推内容审阅未通过：${issues.join('；')}`, 502, 'STORY_TURN_QUALITY_FAILED')
+}
+
+export const continuationQualityInstruction = `独立审查中文故事续推提案。严格返回 JSON {checks:[{criterion,passed,evidence}],issues:[具体问题]}，四项 criterion 为 continuity,causality,requirements,author-control，每项恰好一次，passed 是布尔值，evidence 引用具体待审措辞说明原因（不超过180字）。issues 只列实质缺陷，最多四项。
+先按reviewMode检查出口：closure只核对作者完成结果和是否遗漏明确未解决事项，不要求新动作或因果链，causality记为通过且说明“收束无新增行动”；question/design只核对问题是否必要且不执行角色动作。不能用行动出口的要求否决合理收束或补充。action才检查具体行动与可能后果，不为了四项维度制造缺陷。
+continuity：先逐字引用最新确认结果里与 unresolved 有关的状态，再引用 proposal.basis 的对应断言，逐一比较；不能仅说‘承接了’就判通过。提案是否承接最近作者确认结果，保留原目标、编辑和条件；过去的初始状态不得覆盖后来的结果，不得重复已完成事项。basis.reason 和 unresolved.text 描述的是当前状态，其中原文没有的观察、故障、身体状态或时间安排不能借提议标签豁免。叶片仍绿不代表必须证明直立，目标未完成不等于缺少测量结果。依据引用ID本身不证明语义正确。此前的预测结果不能成为当前状态，即使它在主线设计中获接受。
+causality：行动是否处理当前具体未解决事项，可能后果是否由行动引发且符合日常常识。多个方向须有不同的实际后果，不以装饰性细节、巧合或无关线索替代进展。仅未确认目标完成不等于存在需要证明完成的技术缺口。提案应继续故事中的问题，不能继续审核故事。说明用叙事语言，不应泄露内部字段、ID或合同术语。
+requirements：不得把新增许可、设备、核查、流程、时长或他人认可设为完成目标的必要条件。人物可以主动尝试已有任务；原文没有要求的检查与评估不能成为核心续推。新增虚构人物回应和直接发展允许作为可拒绝提案，不需要作者证明现实存在。
+author-control：设计和可能结果未执行；未知保持未知，不能被预先确定。authorReview 仅限确实无法避开的作者创作选择，不是重复确认或现实调查；回答不得混入角色行动。已完成且无未解决事项时可走 next-goal 收束，不制造新障碍。不要把所有未来反应都当成越权事实，也不要因文本标了提议就放过缺陷。全部维度通过且无实质问题才返回空 issues。`

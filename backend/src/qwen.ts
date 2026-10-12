@@ -128,6 +128,7 @@ interface QwenRequest {
   temperature: number
   max_tokens: number
   response_format?: { type: 'json_object' }
+  enable_thinking?: boolean
 }
 
 interface QwenCompletionOptions {
@@ -167,6 +168,9 @@ export async function requestQwenJson({
     max_tokens: maxTokens,
     response_format: { type: 'json_object' },
   }
+  // qwen-plus JSON Object mode is documented for non-thinking generation.
+  // Do not silently change mode while the workflow expects parseable JSON.
+  if (/^qwen-plus(?:$|-latest$|-\d{4}-)/u.test(request.model)) request.enable_thinking = false
   const requestAttempts = defaultQwenRequestAttempts
 
   try {
@@ -335,7 +339,12 @@ async function sendRequest(request: QwenRequest, apiKey: string): Promise<unknow
     }
 
     const responseSummary = summarizeModelResponse(responseBody)
-    return parseModelJson(getMessageContent(responseBody), responseSummary)
+    if (responseSummary.finishReason === 'length') {
+      throw new AppError('千问输出达到长度上限，结果被截断；请调整当前步骤的输出预算后重试。', 502, 'QWEN_OUTPUT_TRUNCATED',
+        undefined, undefined, undefined, { stage: 'qwen-output', response: responseSummary })
+    }
+    const content = getMessageContent(responseBody)
+    return parseModelJson(content, responseSummary)
   } catch (error) {
     if (error instanceof AppError) throw error
 

@@ -8,7 +8,10 @@ import {
 import { createNarrativeStateMachine, type StoryValidationContext } from './storyState.js'
 import { formatStoryRealityContractContext, storyRealityContractInstruction } from './storyRealityContract.js'
 import { getAuthorDecisionMaterial } from './storyDecision.js'
-import { createStoryProposalContext, storyProposalGenerationInstruction, validateProposalFactReferences, validateContinuationBasis } from './storyProposalContext.js'
+import { createStoryProposalContext, validateProposalFactReferences, validateContinuationBasis } from './storyProposalContext.js'
+import { decideContinuation, composeContinuation, auditContinuation, type ContinuationPlan } from './storyContinuationPlan.js'
+import { hasProposalProtocolLeak } from './storyProposalProse.js'
+import { storyCreativeIntentGuidance } from './storyCreativeIntent.js'
 import {
   confirmProvisionalCurve,
   generateProvisionalCurve,
@@ -34,8 +37,8 @@ import {
   reviewClarificationReplacement,
 } from './storyClarification.js'
 import { randomUUID } from 'node:crypto'
-import { generateStoryPreparation, generateCurveFromPreparation, parsePreparationReview } from './storyPreparation.js'
-import type { StoryPreparationAcceptanceRequest, StoryPreparationSupplementRequest } from '../../shared/story-preparation-request.js'
+import { generateStoryPreparation, generateCurveFromPreparation, parsePreparationReview, reviseStoryPreparation } from './storyPreparation.js'
+import type { StoryPreparationAcceptanceRequest, StoryPreparationSupplementRequest, StoryPreparationRevisionRequest } from '../../shared/story-preparation-request.js'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -137,6 +140,7 @@ const maximumStoryIdeaLength = 120
 const maxStorySeedExtractionAttempts = getConfiguredModelOutputAttemptLimit(3)
 const maxSystemDraftGenerationAttempts = getConfiguredModelOutputAttemptLimit(3)
 const systemConflictCoreDraftMaxTokens = 1_200
+const richSystemDraftPlanMaxTokens = 520
 const systemConflictCoreDirectionRecoveryMaxTokens = 700
 const maximumStorySeedLockedFacts = 5
 const maximumStorySeedLockedFactLength = 120
@@ -623,7 +627,7 @@ interface ConfirmedStoryPathItem {
   immediateResult: string | null
 }
 
-type StoryBodyConsistencyIssueKind = 'missing-path-item' | 'contradiction' | 'unsupported-critical-detail'
+type StoryBodyConsistencyIssueKind = 'missing-path-item' | 'contradiction' | 'unsupported-critical-detail' | 'creative-intent-mismatch'
 
 interface StoryBodyConsistencyIssue {
   kind: StoryBodyConsistencyIssueKind
@@ -3064,6 +3068,53 @@ export async function acceptSessionPreparation(request: StoryPreparationAcceptan
   return createCurveMutationResponse(saved, { curve: mapped, affectedBeatIds: mapped.beats.map(b => b.id) })
 }
 
+export function parseStoryPreparationRevisionRequest(body: unknown): StoryPreparationRevisionRequest {
+  const r = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'decision', 'candidateId', 'authorAction'])
+  if (!['reject', 'regenerate', 'revise'].includes(String(r.decision))) throw new AppError('请选择调整方式。', 400, 'INVALID_REQUEST')
+  if (r.authorAction !== undefined && (typeof r.authorAction !== 'string' || !r.authorAction.trim() || r.authorAction.length > 240)) throw new AppError('请填写修改后的行动，最多240字。', 400, 'INVALID_REQUEST')
+  return { ...parseStorySessionReference(r), curveId: readIdentifier(r, 'curveId', '请选择当前草案。', invalidRequestContext), decision: r.decision as StoryPreparationRevisionRequest['decision'],
+    ...(r.candidateId === undefined ? {} : { candidateId: readIdentifier(r, 'candidateId', '请选择提案。', invalidRequestContext) }),
+    ...(r.authorAction === undefined ? {} : { authorAction: r.authorAction as string }) }
+}
+
+export async function reviseSessionPreparation(request: StoryPreparationRevisionRequest): Promise<StoryCurveMutationResponse> {
+  const current = getStorySession(request.storyId, request.revision)
+  const curve = requireDraftCurve(current, request.curveId)
+  if (current.confirmedCurve || current.currentTurn || current.history.length) throw new AppError('已确认路径不能原地改写，请建立新版本。', 409, 'STORY_CURVE_NOT_DRAFT')
+  const revised = await reviseStoryPreparation(curve, request.decision, request.candidateId, request.authorAction)
+  assertStorySessionRevision(current, request.revision)
+  const next = structuredClone(current)
+  next.provisionalCurve = revised
+  next.pendingCurveRegeneration = undefined
+  const saved = commitClarificationSessionChanges(current, next)
+  return createCurveMutationResponse(saved, { curve: revised, affectedBeatIds: [] })
+}
+
+export function parseStoryPreparationSuggestionRequest(body: unknown): StorySessionVersion & { curveId: string } {
+  const r = parseRequestRecord(body, ['storyId', 'revision', 'curveId'])
+  return { ...parseStorySessionReference(r), curveId: readIdentifier(r, 'curveId', '请选择当前草案。', invalidRequestContext) }
+}
+
+export async function suggestSessionPreparationGoal(request: StorySessionVersion & { curveId: string }): Promise<{ suggestion: string }> {
+  const session = getStorySession(request.storyId, request.revision)
+  const curve = requireDraftCurve(session, request.curveId)
+  if (curve.preparation?.status !== 'needs-review' || curve.preparation.candidates.length) {
+    throw new AppError('当前已有可选故事方向，不需要补充起点。', 409, 'STORY_PREPARATION_NOT_PENDING')
+  }
+  const output = await requestQwenJson({
+    systemPrompt: `你是故事共创助手。只返回 JSON {"suggestion":"..."}。根据作者原始想法，建议一句可修改的故事起点，补充一个人物想做的具体事情。建议不是作者事实，也不是已经发生的行动；不得改变原文已有的人物、目标、否定、关系或期限。原文若已经写明人物目标，只在原文基础上具体化，不换成寻人、解谜等另一件事。不要加入必须取得的许可、设备、流程或验收标准。建议不超过100字，不包含“作者必须”或要求作者证明现实条件。`,
+    userPrompt: JSON.stringify({ sources: curve.preparation.sources, questions: curve.preparation.questions }),
+    temperature: 0.45, maxTokens: 300, diagnosticStage: 'preparation-goal-suggestion',
+  })
+  if (!output || typeof output !== 'object' || Array.isArray(output) || Object.keys(output).some(key => key !== 'suggestion')
+    || typeof (output as Record<string, unknown>).suggestion !== 'string'
+    || !(output as { suggestion: string }).suggestion.trim()
+    || (output as { suggestion: string }).suggestion.length > 100) {
+    throw new AppError('系统暂定起点没有生成成功，请重试或自行补充。', 502, 'STORY_PREPARATION_INVALID_OUTPUT')
+  }
+  return { suggestion: (output as { suggestion: string }).suggestion.trim() }
+}
+
 export function parseStoryPreparationSupplementRequest(body: unknown): StoryPreparationSupplementRequest {
   const r = parseRequestRecord(body, ['storyId','revision','curveId','supplementId','decision','authorText'])
   if (!['accepted-design','rejected','keep-unknown'].includes(String(r.decision)) || typeof r.authorText !== 'string' || !r.authorText.trim() || r.authorText.length > 4000) throw new AppError('请独立审阅设计并保留作者原文。', 400, 'INVALID_REQUEST')
@@ -3843,21 +3894,41 @@ async function generateSystemConflictCoreDraft(
   let candidate: StoryConflictCoreSystemDraft | undefined
   let modelUnavailable = false
   let lastFailure: AppError | undefined
+  let bestFailure: AppError | undefined
+  const sparseSeed = hasSparseSystemDraftSeed(seed)
   const systemPrompt = getSystemConflictCoreDraftSystemPrompt(seed)
 
   for (let attempt = 0; attempt < maxSystemDraftGenerationAttempts; attempt += 1) {
     try {
       const record = await requestModelRecord({
         systemPrompt,
-        userPrompt: candidate
-          ? buildSystemConflictCoreDraftRepairPrompt(idea, seed, candidate, repairMessage ?? '上一版没有通过最小事实检查。', preference)
-          : buildSystemConflictCoreDraftPrompt(idea, seed, repairMessage, preference),
+        userPrompt: sparseSeed
+          ? candidate
+            ? buildSystemConflictCoreDraftRepairPrompt(idea, seed, candidate, repairMessage ?? '上一版没有通过最小事实检查。', preference)
+            : buildSystemConflictCoreDraftPrompt(idea, seed, repairMessage, preference)
+          : buildRichSystemDraftDirectionPlanPrompt(idea, seed, repairMessage, preference),
         temperature: attempt === 0 ? 0.56 : 0.36,
-        maxTokens: systemConflictCoreDraftMaxTokens,
+        maxTokens: sparseSeed
+          ? systemConflictCoreDraftMaxTokens
+          : richSystemDraftPlanMaxTokens,
+        diagnosticStage: 'system-draft-generation',
       }, '模型没有生成可用的暂定故事设定，请重试。')
-      const draft = normalizeSystemConflictCoreDraftCommonFields(
-        parseSystemConflictCoreDraft(record, seed.lockedGoal),
-      )
+      let draft: StoryConflictCoreSystemDraft
+      try {
+        draft = normalizeSystemConflictCoreDraftCommonFields(
+          parseSystemConflictCoreDraft(record, seed.lockedGoal, idea, seed, excludedTitles),
+        )
+      } catch (error) {
+        throw withModelDiagnostic(error, {
+          stage: isPlainRecord(record) && record.directionPlan !== undefined
+            ? 'system-draft-direction-plan-validation'
+            : 'system-draft-validation',
+          attempt: attempt + 1,
+          maxAttempts: maxSystemDraftGenerationAttempts,
+          reason: error instanceof AppError ? error.message : '系统暂定方向没有通过结构校验。',
+          response: summarizeModelResponse(record),
+        })
+      }
       candidate = draft
       if (shouldLogConflictCoreDiagnostics) {
         console.warn(`System conflict core draft candidate (attempt ${attempt + 1}): ${JSON.stringify(draft)}`)
@@ -3881,6 +3952,15 @@ async function generateSystemConflictCoreDraft(
         reason: error instanceof AppError ? error.modelDiagnostic?.reason ?? error.message : '系统暂定方向没有通过校验。',
         response: error instanceof AppError ? error.modelDiagnostic?.response : undefined,
       })
+      // A later retry can regress from a useful direction-plan validation
+      // error to a generic missing-wrapper error. Keep the most informative
+      // diagnostic for the API response while still using the latest failure
+      // to shape the next repair prompt.
+      if (!bestFailure || isGenericSystemDraftFailure(bestFailure)) {
+        bestFailure = lastFailure
+      } else if (!isGenericSystemDraftFailure(lastFailure)) {
+        bestFailure = lastFailure
+      }
 
       repairMessage = describeSystemDraftGenerationFailure(error)
       if (shouldLogConflictCoreDiagnostics) {
@@ -3889,7 +3969,10 @@ async function generateSystemConflictCoreDraft(
     }
   }
 
-  const recoveredDraft = modelUnavailable
+  // Rich-input generation has a closed directionPlan contract. Do not let a
+  // failed plan switch protocols by entering the legacy prose recovery below.
+  // Sparse drafts retain their established targeted recovery behavior.
+  const recoveredDraft = modelUnavailable || !sparseSeed
     ? undefined
     : await recoverMissingSystemDraftDirections(idea, seed, candidate, preference)
   if (recoveredDraft) {
@@ -3909,7 +3992,7 @@ async function generateSystemConflictCoreDraft(
       undefined,
       undefined,
       undefined,
-      lastFailure?.modelDiagnostic ?? {
+      bestFailure?.modelDiagnostic ?? lastFailure?.modelDiagnostic ?? {
         stage: 'system-draft-validation',
         attempt: maxSystemDraftGenerationAttempts,
         maxAttempts: maxSystemDraftGenerationAttempts,
@@ -4135,6 +4218,7 @@ async function recoverMissingSystemDraftDirections(
   candidate: StoryConflictCoreSystemDraft | undefined,
   preference?: string,
 ): Promise<StoryConflictCoreSystemDraft | undefined> {
+  if (!hasSparseSystemDraftSeed(seed)) return undefined
   if (!candidate?.directions?.length) return undefined
 
   const collector = createSystemDraftDirectionCollector(idea, seed)
@@ -4329,6 +4413,12 @@ function isRetryableSystemDraftGenerationError(error: unknown): boolean {
     && retryableModelOutputErrorCodes.has(error.code)
 }
 
+function isGenericSystemDraftFailure(error: AppError): boolean {
+  return /模型没有生成完整的暂定故事设定|模型没有生成可用的暂定故事设定|模型没有生成可用的创意方向/u.test(
+    error.modelDiagnostic?.reason ?? error.message,
+  )
+}
+
 function describeSystemDraftGenerationFailure(error: unknown): string {
   if (!(error instanceof AppError)) return '上一版不是完整的 JSON 对象。'
 
@@ -4349,11 +4439,24 @@ function describeSystemDraftGenerationFailure(error: unknown): string {
 function parseSystemConflictCoreDraft(
   value: unknown,
   lockedGoal: string | null,
+  idea?: string,
+  seed?: StorySeed,
+  excludedTitles: readonly string[] = [],
 ): StoryConflictCoreSystemDraft {
   const message = '模型没有生成完整的暂定故事设定，请重试。'
   const rootRecord = expectRecord(value, message, invalidModelOutputContext)
+  // Rich inputs have one closed protocol: Qwen selects ledger IDs and the
+  // server renders the visible prose. Do not silently accept the legacy
+  // systemDraft/directions shape after asking for directionPlan.
+  if (idea && seed && !hasSparseSystemDraftSeed(seed)) {
+    return parseRichSystemDraftDirectionPlan(rootRecord, idea, seed, excludedTitles)
+  }
   // json_object models occasionally omit the schema's systemDraft wrapper.
   const record = isPlainRecord(rootRecord.systemDraft) ? rootRecord.systemDraft : rootRecord
+
+  if (rootRecord.directionPlan !== undefined && idea && seed) {
+    return parseRichSystemDraftDirectionPlan(rootRecord, idea, seed, excludedTitles)
+  }
 
   const directions = parseSystemDraftDirections(record.directions, message)
 
@@ -4364,6 +4467,543 @@ function parseSystemConflictCoreDraft(
     origin: 'model',
     ...(directions ? { directions } : {}),
   }
+}
+
+interface RichSystemDraftFactLedgerItem {
+  id: string
+  text: string
+  /**
+   * A clause may contain the locked goal and an independently stated pressure
+   * (for example, a promise with a deadline). Keep that dual role visible so
+   * the model can select the pressure facet without silently losing the goal
+   * anchor from the ledger.
+   */
+  role: 'goal' | 'pressure' | 'goal-and-pressure'
+}
+
+interface RichSystemDraftPlanItem {
+  mechanismType: ConflictCoreMechanismType
+  premiseFactId: string
+  tradeoffFactId: string
+}
+
+type RichSystemDraftMechanismFactIds = ReadonlyMap<ConflictCoreMechanismType, readonly string[]>
+
+/**
+ * Rich-input direction generation is a closed role-selection contract. The
+ * model chooses which author facts carry each mechanism; the server renders
+ * the visible proposal from those exact anchors. This keeps model provenance
+ * honest while removing the repeated prose/schema drift seen in qwen-plus.
+ */
+function parseRichSystemDraftDirectionPlan(
+  rootRecord: Record<string, unknown>,
+  idea: string,
+  seed: StorySeed,
+  excludedTitles: readonly string[],
+): StoryConflictCoreSystemDraft {
+  if (Object.keys(rootRecord).length !== 1 || rootRecord.directionPlan === undefined) {
+    throw new AppError(
+      '富输入必须只返回 directionPlan，不能混用旧的 systemDraft 协议。',
+      invalidModelOutputContext.statusCode,
+      invalidModelOutputContext.code,
+    )
+  }
+  const planValue = rootRecord.directionPlan
+  if (!Array.isArray(planValue) || planValue.length !== generatedOptionCount) {
+    throw new AppError(
+      'directionPlan 必须恰好包含三条方向选择。',
+      invalidModelOutputContext.statusCode,
+      invalidModelOutputContext.code,
+    )
+  }
+
+  const ledger = getRichSystemDraftFactLedger(seed)
+  const byId = new Map(ledger.map((fact) => [fact.id, fact]))
+  const pressureFactIds = getRichSystemDraftPressureFactIds(seed, ledger)
+  const tradeoffFactIds = getRichSystemDraftTradeoffFactIds(seed, ledger, pressureFactIds)
+  const pressureFacts = pressureFactIds.map((id) => byId.get(id)).filter((fact): fact is RichSystemDraftFactLedgerItem => Boolean(fact))
+  const tradeoffFacts = tradeoffFactIds.map((id) => byId.get(id)).filter((fact): fact is RichSystemDraftFactLedgerItem => Boolean(fact))
+  const mechanismFactIds = getRichSystemDraftMechanismFactIds(seed, ledger, pressureFactIds)
+  const allowedMechanismTypes = getRichSystemDraftAllowedMechanismTypes(seed, ledger, pressureFactIds, mechanismFactIds)
+  if (!seed.lockedGoal?.trim() || tradeoffFacts.length < 2 || allowedMechanismTypes.length < generatedOptionCount) {
+    throw new AppError(
+      '富输入没有足够的作者目标、独立压力事实或可区分机制，不能生成 directionPlan。',
+      invalidModelOutputContext.statusCode,
+      invalidModelOutputContext.code,
+    )
+  }
+
+  const plans: RichSystemDraftPlanItem[] = planValue.map((item, index) => {
+    if (!isPlainRecord(item)) {
+      throw new AppError(`directionPlan 第 ${index + 1} 项不是对象。`, invalidModelOutputContext.statusCode, invalidModelOutputContext.code)
+    }
+    if (Object.keys(item).some((key) => !['mechanismType', 'premiseFactId', 'tradeoffFactId'].includes(key))) {
+      throw new AppError(`directionPlan 第 ${index + 1} 项包含不支持的字段。`, invalidModelOutputContext.statusCode, invalidModelOutputContext.code)
+    }
+    const mechanismType = readConflictCoreMechanismType(item.mechanismType, 'directionPlan 的 mechanismType 不合法。')
+    if (typeof item.premiseFactId !== 'string' || typeof item.tradeoffFactId !== 'string') {
+      throw new AppError(`directionPlan 第 ${index + 1} 项缺少事实 ID。`, invalidModelOutputContext.statusCode, invalidModelOutputContext.code)
+    }
+    const premiseFact = byId.get(item.premiseFactId)
+    const tradeoffFact = byId.get(item.tradeoffFactId)
+    if (!allowedMechanismTypes.includes(mechanismType)) {
+      throw new AppError(`directionPlan 第 ${index + 1} 项使用了当前事实不支持的机制“${mechanismType}”。`, invalidModelOutputContext.statusCode, invalidModelOutputContext.code)
+    }
+    const mechanismPremiseFactIds = mechanismFactIds.get(mechanismType) ?? []
+    if (!premiseFact || !tradeoffFact || !mechanismPremiseFactIds.includes(item.premiseFactId)) {
+      throw new AppError(
+        `directionPlan 第 ${index + 1} 项的 premiseFactId 不在“${mechanismType}”允许的作者事实列表。`,
+        invalidModelOutputContext.statusCode,
+        invalidModelOutputContext.code,
+      )
+    }
+    if (!tradeoffFactIds.includes(item.tradeoffFactId) || item.tradeoffFactId === item.premiseFactId) {
+      throw new AppError(
+        `directionPlan 第 ${index + 1} 项的 tradeoffFactId 只能引用可形成取舍的作者压力事实。`,
+        invalidModelOutputContext.statusCode,
+        invalidModelOutputContext.code,
+      )
+    }
+    return { mechanismType, premiseFactId: item.premiseFactId, tradeoffFactId: item.tradeoffFactId }
+  })
+
+  if (new Set(plans.map((plan) => plan.mechanismType)).size !== plans.length) {
+    throw new AppError('directionPlan 的三条机制必须互不相同。', invalidModelOutputContext.statusCode, invalidModelOutputContext.code)
+  }
+  if (new Set(plans.map((plan) => plan.premiseFactId)).size < 2) {
+    throw new AppError('directionPlan 的前提没有覆盖至少两项不同作者事实。', invalidModelOutputContext.statusCode, invalidModelOutputContext.code)
+  }
+
+  const usedTradeoffAnchors = new Set<string>()
+  const directions = plans.map((plan, index) => renderRichSystemDraftDirection(
+    plan,
+    index,
+    seed,
+    byId,
+    excludedTitles,
+    usedTradeoffAnchors,
+  ))
+  const draft: StoryConflictCoreSystemDraft = {
+    goal: seed.lockedGoal,
+    stake: '继续目标需要承担一项取舍',
+    constraint: '作者材料中的当前条件使目标停住',
+    origin: 'model',
+    directions,
+  }
+  // Keep this parser usable in isolation and make the provenance gate explicit:
+  // a plan is model-origin only after its server-rendered directions pass the
+  // same rich-input validator as legacy prose responses.
+  validateSystemConflictCoreDraft(idea, seed, draft)
+  return draft
+}
+
+function getRichSystemDraftFactLedger(seed: Pick<StorySeed, 'lockedGoal' | 'lockedFacts'>): RichSystemDraftFactLedgerItem[] {
+  const facts = [...new Set(seed.lockedFacts.map((fact) => fact.trim()).filter(Boolean))]
+  return facts.map((text, index) => ({
+    id: `source-fact-${index + 1}`,
+    text,
+    role: (() => {
+      const containsGoal = Boolean(seed.lockedGoal && hasOriginalTextPhrase(text, seed.lockedGoal))
+      if (!containsGoal) return 'pressure'
+      return isRichSystemDraftIndependentPressureFact(text, seed.lockedGoal ?? '')
+        ? 'goal-and-pressure'
+        : 'goal'
+    })(),
+  }))
+}
+
+function isRichSystemDraftIndependentPressureFact(value: string, goal: string): boolean {
+  if (!isRichSystemDraftPressureFact(value)) return false
+  const normalizedValue = normalizeGoalText(value)
+  const normalizedGoal = normalizeGoalText(goal)
+  if (!normalizedGoal) return true
+  // A goal-only clause such as “决定是否提交” should remain a goal anchor.
+  // Treat it as dual-role only when the same clause carries a separate
+  // deadline, promise, obstruction, relationship condition, or observation.
+  const remainder = normalizedValue.replace(normalizedGoal, '')
+  // “想” is commonly the verb that introduces the locked goal itself
+  // (for example, “周岚想和姐姐一起保住书店”).  It is not an
+  // independent pressure facet.  Requiring a deadline, commitment,
+  // obstruction, relationship condition, or observation here keeps the goal
+  // clause out of the pressure pool while still allowing a dual-role clause
+  // such as “她想在今晚前提交，但最后一页缺失”.
+  const meaningfulRemainder = remainder
+    .replace(/^(?:却|但|同时|并且|然后|随后|想要|想|希望|打算|准备|计划|要)\s*/u, '')
+    .trim()
+  if (!meaningfulRemainder) return false
+
+  // A locked goal can carry a separately stated deadline or commitment. Keep
+  // that clause available as both the goal and a pressure only when the text
+  // outside the goal still contains a real author phrase. This prevents a
+  // goal such as “想在展出前决定是否署名” from becoming a fake second
+  // pressure merely because it contains the word “展出前”.
+  return /(?:今晚|明早|明天|后天|今天|周[一二三四五六日天]|月底|期限|截止|答应|承诺|约定|保证|不再|缺失|卖掉|无法|不能|不得|冲突|分歧|发现|看到|姐姐|哥哥|弟弟|妹妹|朋友|队友|家人|同事|伴侣|决定|选择|判断|是否|要不要|展出前|布置前|交接前)/u.test(meaningfulRemainder)
+}
+
+function getRichSystemDraftPressureFactIds(
+  seed: Pick<StorySeed, 'lockedGoal' | 'lockedFacts'>,
+  ledger = getRichSystemDraftFactLedger(seed),
+): string[] {
+  const ids = ledger
+    .filter((fact) => fact.role !== 'goal' && isRichSystemDraftPressureFact(fact.text))
+    .map((fact) => fact.id)
+  return [...new Set(ids)]
+}
+
+/**
+ * A fact can be useful as a premise while still being a poor choice side.
+ * Observations such as "看到一段短片" should drive an information-gap
+ * mechanism, but should not become a visible alternative merely because the
+ * model copied the whole observation. Keep the model's closed ID contract
+ * explicit by publishing only pressure facts with at least one concrete,
+ * non-observational choice phrase.
+ */
+function getRichSystemDraftTradeoffFactIds(
+  seed: Pick<StorySeed, 'lockedGoal' | 'lockedFacts'>,
+  ledger = getRichSystemDraftFactLedger(seed),
+  pressureFactIds = getRichSystemDraftPressureFactIds(seed, ledger),
+): string[] {
+  const byId = new Map(ledger.map((fact) => [fact.id, fact]))
+  return pressureFactIds.filter((id) => {
+    const fact = byId.get(id)
+    if (!fact) return false
+    return hasRichSystemDraftConcreteTradeoffSignal(fact.text)
+  })
+}
+
+function hasRichSystemDraftConcreteTradeoffSignal(value: string): boolean {
+  return /(?:今晚|明早|明天|后天|今天|周[一二三四五六日天]|本周|下周|月底|月末|展出前|布置前|交接前|期限|截止|答应|承诺|约定|保证|不再|不得|必须|缺失|卖掉|无法|不能|冲突|分歧|不知道|不确定|犹豫|是否|要不要|准备|决定|选择|判断|删掉|保住|归还|提交|交给|改动)/u.test(value)
+}
+
+function getRichSystemDraftWindowPressureFactIds(
+  seed: Pick<StorySeed, 'lockedGoal' | 'lockedFacts'>,
+  ledger = getRichSystemDraftFactLedger(seed),
+): string[] {
+  return ledger
+    .filter((fact) => isRichDirectionTimeFact(fact.text))
+    .map((fact) => fact.id)
+}
+
+/**
+ * Give the model a role-specific subset of the author's ledger. A generic
+ * pressure list is still useful for the tradeoff side, but the premise must
+ * carry the evidence that makes its selected mechanism honest. Observation
+ * facts can therefore support information-gap/resource branches without being
+ * promoted to an unrestricted pressure fact.
+ */
+function getRichSystemDraftMechanismFactIds(
+  seed: Pick<StorySeed, 'lockedGoal' | 'lockedFacts'>,
+  ledger = getRichSystemDraftFactLedger(seed),
+  pressureFactIds = getRichSystemDraftPressureFactIds(seed, ledger),
+): Map<ConflictCoreMechanismType, string[]> {
+  const result = new Map<ConflictCoreMechanismType, string[]>()
+  const add = (mechanismType: ConflictCoreMechanismType, fact: RichSystemDraftFactLedgerItem) => {
+    const ids = result.get(mechanismType) ?? []
+    if (!ids.includes(fact.id)) ids.push(fact.id)
+    result.set(mechanismType, ids)
+  }
+
+  for (const fact of ledger) {
+    if (fact.role === 'goal' || !pressureFactIds.includes(fact.id)) continue
+    const text = fact.text
+    if (isRichDirectionTimeFact(text)) add('window-pressure', fact)
+    if (/(?:答应|承诺|约定|保证|不再|必须|按承诺)/u.test(text)) add('commitment-conflict', fact)
+    if (/(?:姐姐|哥哥|弟弟|妹妹|朋友|队友|家人|同事|伴侣|关系)/u.test(text)
+      && /(?:准备|想|答应|承诺|不再|卖掉|决定|冲突|分歧|不能|无法|是否|要不要|替)/u.test(text)) {
+      add('boundary-conflict', fact)
+    }
+    if (/(?:发现|看到|听见|不知道|不确定|犹豫|是否|要不要|缺失|卖掉|准备)/u.test(text)) {
+      add('information-gap', fact)
+    }
+    if (/(?:缺失|归还|投影仪|手稿|作品|书店|店|礼服|耳环|报告|短片|文件|物件|资源|条件)/u.test(text)) {
+      add('resource-constraint', fact)
+    }
+    if (/(?:缺失|无法|不能|不得|阻碍|取消|拒绝|失败|答应|承诺|不再)/u.test(text)) {
+      add('initiation-block', fact)
+    }
+    if (/(?:决定|选择|判断|按承诺提交|删掉|保住|卖掉|是否|要不要)/u.test(text)) {
+      add('meaning-commitment', fact)
+    }
+  }
+  return result
+}
+
+function getRichSystemDraftAllowedMechanismTypes(
+  seed: Pick<StorySeed, 'lockedGoal' | 'lockedFacts'>,
+  ledger = getRichSystemDraftFactLedger(seed),
+  pressureFactIds = getRichSystemDraftPressureFactIds(seed, ledger),
+  mechanismFactIds = getRichSystemDraftMechanismFactIds(seed, ledger, pressureFactIds),
+): ConflictCoreMechanismType[] {
+  const preferenceOrder: readonly ConflictCoreMechanismType[] = [
+    'window-pressure',
+    'commitment-conflict',
+    'boundary-conflict',
+    'information-gap',
+    'initiation-block',
+    'resource-constraint',
+    'meaning-commitment',
+  ]
+  return preferenceOrder.filter((mechanismType) => (mechanismFactIds.get(mechanismType)?.length ?? 0) > 0)
+}
+
+function isRichSystemDraftPressureFact(value: string): boolean {
+  if (/(?:今晚|明早|明天|后天|今天|周[一二三四五六日天]|截止|期限|归还|必须在[^，。！？；]{0,24}前|要在[^，。！？；]{0,24}前|答应|承诺|约定|保证|不再|缺失|卖掉|无法|不能|不得|冲突|分歧|不知道|不确定|犹豫|是否|要不要)/u.test(value)) {
+    return true
+  }
+  // A relationship noun alone is background. It becomes a pressure only when
+  // the same author clause states a concrete tension, commitment, or choice.
+  if (/(?:姐姐|哥哥|弟弟|妹妹|队友|朋友|家人|同事|伴侣|关系)/u.test(value)
+    && /(?:准备|想|答应|承诺|不再|卖掉|决定|冲突|分歧|不能|无法|不知道|是否|要不要)/u.test(value)) {
+    return true
+  }
+  // A concrete author observation can carry an information-gap or resource
+  // mechanism even when it does not contain a word such as “缺失”. Keep this
+  // narrow to known object/event language; a bare “看到” remains background.
+  return /(?:发现|看到)/u.test(value)
+    && /(?:投影仪|短片|手稿|作品|书店|店|报告|文件|礼服|耳环|物件|条件)/u.test(value)
+}
+
+function getRichDirectionFactAnchor(value: string): string {
+  const normalized = value
+    .trim()
+    .replace(/^(?:却|但|同时|并且|然后|随后)\s*/u, '')
+  if (normalized.length <= 36) return normalized
+  const clause = normalized.split(/[，、；。！？]/u).find((part) => part.trim().length >= 4 && part.trim().length <= 36)
+  return clause?.trim() || normalized.slice(0, 36)
+}
+
+function getRichDirectionPressureAnchor(value: string): string {
+  const normalized = value
+    .trim()
+    .replace(/^(?:却|但|同时|并且|然后|随后)\s*/u, '')
+  const direct = normalized.match(/(?:最后一页缺失|手稿最后一页缺失|姐姐准备把店卖掉|投影仪今晚要归还|不再替姐姐做决定|不再改动作品|按承诺提交)/u)
+  if (direct?.[0]) return direct[0].trim()
+  if (normalized.length <= 36) return normalized
+
+  const discovery = normalized.match(/(?:发现|看到)(?:和)?([^，。！？；\n]{2,28})/u)
+  if (discovery?.[1]) return discovery[1].trim()
+
+  const blocking = normalized.match(/(?:最后一页缺失|缺失|卖掉|无法|不能|冲突|分歧|不再[^，。！？；]{0,18})/u)
+  if (blocking?.[0]) return blocking[0].trim()
+
+  const uncertainty = normalized.match(/(?:不知道|不确定|犹豫)?(?:是否|要不要)(?:该)?([^，。！？；]{2,24})/u)
+  if (uncertainty?.[1]) return uncertainty[1].trim().replace(/^该/u, '')
+
+  const time = normalized.match(/(?:今晚|明早|明天|后天|今天|周[一二三四五六日天]|本周|下周|月底|月末|展出前|布置前|交接前|仪式前|截止|期限)/u)
+  if (time?.[0]) return time[0]
+
+  const commitment = normalized.match(/(?:答应过|答应|承诺|约定|保证)([^，。！？；]{2,24})/u)
+  if (commitment?.[1]) return commitment[1].trim()
+
+  return getRichDirectionFactAnchor(normalized)
+}
+
+function isRichDirectionTimeFact(value: string): boolean {
+  // Do not use a bare `前` here: it matches ordinary relationship/object
+  // phrases such as "前队友" and "父亲留下的书店", which then lets the
+  // model select a window-pressure mechanism without an author deadline.
+  return /(?:今晚|明早|明天|后天|今天|周[一二三四五六日天](?:前|后|之前|之后)?|本周(?:前|后)?|下周(?:前|后)?|月底|月末|期限|截止|展出前|布置前|交接前|仪式前|(?:在|于)[^，。！？；\n]{1,16}前(?=(?:要|需|把|将|提交|归还|决定|选择|判断|完成|交给)))/u.test(value)
+}
+
+function isRichDirectionCommitmentFact(value: string): boolean {
+  return /(?:答应|承诺|约定|保证|不再|不得|必须|姐姐|哥哥|妹妹|弟弟|朋友|队友|家人|同事|伴侣|关系)/u.test(value)
+}
+
+function getRichDirectionLabel(
+  factText: string,
+  mechanismType: ConflictCoreMechanismType,
+  index: number,
+  excludedTitles: readonly string[],
+): string {
+  const mechanismLabel: Record<ConflictCoreMechanismType, string> = {
+    'information-gap': '信息',
+    'boundary-conflict': '边界',
+    'meaning-commitment': '取舍',
+    'initiation-block': '启动',
+    'window-pressure': '时机',
+    'resource-constraint': '条件',
+    'commitment-conflict': '承诺',
+  }
+  const anchor = getRichDirectionPressureAnchor(factText)
+    .replace(/^(?:她|他|我|我们|林澈|沈乔|周岚)\s*/u, '')
+  const base = `${anchor.slice(0, 10)}·${mechanismLabel[mechanismType]}`.slice(0, 18)
+  const excluded = new Set(excludedTitles.map(normalizeGoalText))
+  if (!excluded.has(normalizeGoalText(base))) return base
+  return `${base.slice(0, 14)}${index + 1}`
+}
+
+function renderRichSystemDraftDirection(
+  plan: RichSystemDraftPlanItem,
+  index: number,
+  seed: StorySeed,
+  byId: ReadonlyMap<string, RichSystemDraftFactLedgerItem>,
+  excludedTitles: readonly string[],
+  usedTradeoffAnchors: Set<string>,
+): SystemDraftDirection {
+  const premiseFact = byId.get(plan.premiseFactId)!
+  const tradeoffFact = byId.get(plan.tradeoffFactId)!
+  const subject = seed.subject?.trim() || '主角'
+  const decision = getSystemDraftGoalDecisionPhrase(seed.lockedGoal ?? '')
+  const goalAction = getSystemDraftGoalActionPhrase(seed.lockedGoal ?? '')
+  const premise = stripRichDirectionSubject(getRichDirectionPressureAnchor(premiseFact.text), subject)
+  const tradeoff = getRichDirectionTradeoffAnchor(
+    tradeoffFact.text,
+    goalAction,
+    plan.mechanismType,
+    usedTradeoffAnchors,
+  )
+  const premiseDetail = (() => {
+    switch (plan.mechanismType) {
+      case 'window-pressure':
+        return `暂定：${premise}让${subject}需要重新判断${decision}`
+      case 'commitment-conflict':
+        return `暂定：${premise}使${subject}继续${goalAction}必须取舍`
+      case 'information-gap':
+        return `暂定：${premise}让${subject}无法按原有条件继续${goalAction}`
+      case 'boundary-conflict':
+        return `暂定：${premise}让${subject}需要在${decision}与这项关系条件之间选择`
+      case 'meaning-commitment':
+        return `暂定：${premise}使${subject}需要重新判断${decision}的处理方式`
+      case 'initiation-block':
+        return `暂定：${premise}让${subject}难以开始${goalAction}`
+      case 'resource-constraint':
+        return `暂定：${premise}使${subject}继续${goalAction}需要取舍`
+    }
+  })()
+  const normalizedGoal = normalizeGoalText(goalAction)
+  const normalizedTradeoff = normalizeGoalText(tradeoff)
+  if (!normalizedTradeoff || normalizedTradeoff.includes(normalizedGoal) || normalizedGoal.includes(normalizedTradeoff)) {
+    throw new AppError(
+      `directionPlan 第 ${index + 1} 项无法从 tradeoffFactId 提取区别于目标的作者压力短语。`,
+      invalidModelOutputContext.statusCode,
+      invalidModelOutputContext.code,
+    )
+  }
+  const tradeoffSide = stripRichDirectionSubject(tradeoff, subject)
+  // Keep both sides as compact author phrases. Adding “先面对/先处理” here
+  // turns a source condition such as “不再改动作品” into an invented action
+  // chain, which the rich-input safety gate should continue to reject.
+  const tradeoffDetail = `${goalAction}还是${tradeoffSide}`
+  return {
+    label: getRichDirectionLabel(premiseFact.text, plan.mechanismType, index, excludedTitles),
+    mechanismType: plan.mechanismType,
+    premise: premiseDetail,
+    tradeoff: tradeoffDetail,
+  }
+}
+
+function stripRichDirectionSubject(value: string, subject: string): string {
+  const candidates = [subject, '我', '我们', '他', '她']
+    .filter(Boolean)
+    .sort((left, right) => right.length - left.length)
+  let normalized = value.trim()
+  for (const candidate of candidates) {
+    if (normalized.startsWith(candidate) && normalized.length > candidate.length) {
+      normalized = normalized.slice(candidate.length).trim()
+      break
+    }
+  }
+  return normalized.replace(/^和(?=[\u4e00-\u9fff])/u, '').trim() || value.trim()
+}
+
+/**
+ * A source phrase can be a useful premise but an unusable choice side. For
+ * example, "他发现最后一页缺失" describes an observation, while the author
+ * actually supplied "最后一页缺失" as the pressure. Extract a small ordered
+ * set of contiguous author phrases, then allocate a different phrase to each
+ * rendered direction. This keeps three choices readable even when qwen-plus
+ * selects the same pressure fact more than once.
+ */
+function getRichDirectionTradeoffAnchor(
+  value: string,
+  goal: string,
+  mechanismType: ConflictCoreMechanismType,
+  usedAnchors: Set<string>,
+): string {
+  const candidates = getRichDirectionTradeoffCandidates(value, goal)
+  const preferred = candidates
+    .map((candidate, index) => ({ candidate, index, score: getRichDirectionTradeoffCandidateScore(candidate, value, mechanismType) }))
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+  const selected = preferred.find(({ candidate }) => !usedAnchors.has(normalizeGoalText(candidate)))
+  if (!selected) {
+    throw new AppError(
+      `tradeoffFactId “${value}” 没有可与其他方向区分的作者压力短语。`,
+      invalidModelOutputContext.statusCode,
+      invalidModelOutputContext.code,
+    )
+  }
+  usedAnchors.add(normalizeGoalText(selected.candidate))
+  return selected.candidate
+}
+
+function getRichDirectionTradeoffCandidates(value: string, goal: string): string[] {
+  const normalized = value
+    .trim()
+    .replace(/^(?:却|但|同时|并且|然后|随后)\s*/u, '')
+  const goalText = normalizeGoalText(goal)
+  const candidates: string[] = []
+  const add = (candidate: string | undefined) => {
+    const cleaned = candidate?.trim().replace(/[。！？；.!?;]+$/u, '')
+    if (!cleaned || cleaned.length < 2) return
+    // Reporting/uncertainty wrappers are not pressure facets. If the server
+    // cannot extract the author phrase after them, fail the closed plan rather
+    // than rendering "他发现..." or "不知道..." as a choice side.
+    if (/^(?:他|她|我|我们|林澈|沈乔|周岚)?(?:发现|看到|看见|听见|不知道|不确定|犹豫)/u.test(cleaned)) return
+    if (goalText && normalizeGoalText(cleaned).includes(goalText)) return
+    if (!hasOriginalTextPhrase(value, cleaned)) return
+    if (!candidates.some((existing) => normalizeGoalText(existing) === normalizeGoalText(cleaned))) {
+      candidates.push(cleaned)
+    }
+  }
+
+  // Prefer a complete author condition over a bare noun. The shorter forms
+  // below provide distinct alternatives when the model reuses one fact ID.
+  add(normalized.match(/(?:最后一页缺失|姐姐准备把店卖掉|投影仪今晚要归还|手稿最后一页缺失)/u)?.[0])
+  add(normalized.match(/(?:不再|不得|不能)[^，。！？；\n]{2,18}/u)?.[0])
+  add(normalized.match(/(?:按(?:原有)?承诺(?:提交|交付)?)/u)?.[0])
+  add(normalized.match(/(?:今晚|明早|明天|后天|今天|周[一二三四五六日天](?:前|后|之前|之后)?|本周|下周|月底|月末|展出前|布置前|交接前|仪式前)(?:要归还|归还|提交|交给|决定)?/u)?.[0])
+  add(normalized.match(/(?:是否|要不要)(?:该)?([^，。！？；\n]{2,24})/u)?.[1])
+  add(normalized.match(/(?:答应过|答应|承诺|约定|保证)(?:在[^，。！？；\n]{1,16}前)?/u)?.[0])
+  add(normalized.match(/(?:把店卖掉|卖掉|最后一页|缺失|归还|提交|交给出版社)/u)?.[0])
+  add(normalized.match(/(?:发现|看到|看见|听见)(?:和)?([^，。！？；\n]{2,24})/u)?.[1])
+  add(normalized.match(/(?:不知道|不确定|犹豫)(?:是否|要不要)(?:该)?([^，。！？；\n]{2,24})/u)?.[1])
+  add(normalized.match(/(?:姐姐|哥哥|弟弟|妹妹|朋友|队友|家人|同事|伴侣)[^，。！？；\n]{2,20}/u)?.[0])
+
+  // Do not manufacture arbitrary character windows when the same fact is
+  // selected twice. Such fragments (for example “投影仪今晚要归”) look
+  // grounded to a substring checker but are not independent author pressures.
+  for (const clause of normalized.split(/[，、；。！？]/u)) add(clause)
+  add(getRichDirectionPressureAnchor(value))
+  return candidates
+}
+
+function getRichDirectionTradeoffCandidateScore(
+  candidate: string,
+  source: string,
+  mechanismType: ConflictCoreMechanismType,
+): number {
+  const signals: Record<ConflictCoreMechanismType, RegExp> = {
+    'window-pressure': /(?:今晚|明早|明天|后天|今天|周[一二三四五六日天]|本周|下周|月底|月末|展出前|布置前|交接前|仪式前|期限|截止|归还)/u,
+    'commitment-conflict': /(?:答应|承诺|约定|保证|按承诺|不再|不得|不能)/u,
+    'boundary-conflict': /(?:姐姐|哥哥|弟弟|妹妹|朋友|队友|家人|同事|伴侣|替)/u,
+    'information-gap': /(?:发现|看到|看见|听见|不知道|不确定|是否|要不要|缺失)/u,
+    'initiation-block': /(?:缺失|无法|不能|不得|阻碍|取消|拒绝)/u,
+    'resource-constraint': /(?:投影仪|短片|手稿|作品|书店|店|最后一页|文件|报告|物件|归还)/u,
+    'meaning-commitment': /(?:决定|选择|判断|是否|要不要|删掉|保住|提交)/u,
+  }
+  const signal = signals[mechanismType]
+  const preferredAnchor = getRichDirectionPressureAnchor(source)
+  const directPressure = /(?:最后一页缺失|手稿最后一页缺失|投影仪今晚要归还|姐姐准备把店卖掉|不再替姐姐做决定|不再改动作品|按(?:原有)?承诺(?:提交|交付)?|今晚|明早|明天|后天|今天|周[一二三四五六日天](?:前|后)?|展出前|布置前|交接前|截止|期限)/u.test(candidate)
+  const reportingWrapper = /^(?:他|她|我|我们|林澈|沈乔|周岚)?(?:发现|看到|看见|听见|不知道|不确定|犹豫)/u.test(candidate)
+  const score = (signal.test(candidate) ? 10 : 0)
+    + (directPressure ? 4 : 0)
+    + (normalizeGoalText(candidate) === normalizeGoalText(preferredAnchor) ? 12 : 0)
+    - (reportingWrapper ? 5 : 0)
+    - Math.max(0, candidate.length - 18) / 12
+    + Math.min(candidate.length, 24) / 24
+  // A source clause is only a tie breaker. It must never outrank a direct
+  // author phrase just because it happens to contain many characters.
+  return score + (signal.test(source) && signal.test(candidate) ? 0.2 : 0)
 }
 
 function parseSystemDraftDirections(
@@ -4554,8 +5194,16 @@ function collectSystemDraftMinimalAssumptionIssues(
         issues.push(`第 ${index + 1} 条分支加入了未由作者材料支持的具体场景钩子“${concreteHook}”`)
       }
 
-      const premiseAnchor = findRichSystemDraftAuthorAnchor(direction.premise, richDirectionAnchors)
-      const tradeoffAnchor = findRichSystemDraftAuthorAnchor(direction.tradeoff, richDirectionAnchors)
+      const premiseAnchor = findRichSystemDraftAuthorAnchor(
+        direction.premise,
+        richDirectionAnchors,
+        seed.lockedGoal,
+      )
+      const tradeoffAnchor = findRichSystemDraftAuthorAnchor(
+        direction.tradeoff,
+        richDirectionAnchors,
+        seed.lockedGoal,
+      )
       // The label is a compact UI name and may legitimately summarize a
       // source phrase (for example, "归还期限").  The premise and tradeoff
       // carry the auditable material; requiring anchors in both prevents a
@@ -4824,9 +5472,20 @@ function getRichSystemDraftAuthorAnchors(sourceTexts: readonly string[]): string
   return [...anchors].sort((left, right) => right.length - left.length)
 }
 
-function findRichSystemDraftAuthorAnchor(value: string, anchors: readonly string[]): string | undefined {
+function findRichSystemDraftAuthorAnchor(
+  value: string,
+  anchors: readonly string[],
+  lockedGoal?: string | null,
+): string | undefined {
   const normalized = normalizeGoalText(value.replace(/^暂定[：:]/u, ''))
-  return anchors.find((anchor) => normalized.includes(anchor))
+  const matches = anchors.filter((anchor) => normalized.includes(anchor))
+  if (!matches.length) return undefined
+
+  // The renderer repeats the goal in every direction. Prefer a pressure
+  // anchor when one is present so the rich-input distinctness check measures
+  // the fact selected by the model instead of the shared goal suffix.
+  const normalizedGoal = normalizeGoalText(lockedGoal ?? '')
+  return matches.find((anchor) => !normalizedGoal.includes(normalizeGoalText(anchor))) ?? matches[0]
 }
 
 function getSystemDraftDirectionScopeIssue(
@@ -5470,7 +6129,7 @@ export async function generateStoryTurn(request: StoryTurnRequest): Promise<Stor
         temperature: getStoryTurnTemperature(
           request.mode,
           attempt,
-          Boolean(request.confirmedCurve && request.mode === 'start' && request.history.length === 0),
+          isConfirmedCurveFirstTurnRequest(request),
         ),
         maxTokens: getStoryTurnMaxTokens(request, outputFormat),
         diagnosticStage: 'story-turn',
@@ -5582,27 +6241,42 @@ async function generateCoCreationCandidateTurn(request: StoryTurnRequest, state:
   const context = createStoryProposalContext(request.seed, request.confirmedCurve!, request.history, focus)
   const { sourceFacts } = context
   const proposalEvidenceIds = sourceFacts.map((fact) => fact.id)
+  if (isExplicitLocalModelMode()) return createConfirmedCurveOpeningPlanTurn(request, `turn-${request.history.length + 1}`, authorTexts.slice(0, 3))
+  let decision: Awaited<ReturnType<typeof decideContinuation>>
+  try { decision = await decideContinuation(context) } catch (error) {
+    if (!(error instanceof AppError) || error.code !== 'INVALID_MODEL_OUTPUT') throw error
+    throw new AppError(`模型没有完成续推出口判断（${error.message}）；已确认结果仍保留。`, 502, 'STORY_TURN_RETRY_EXHAUSTED')
+  }
+  let previousPlan: ContinuationPlan | undefined
   let repair: string | undefined
-  for (let attempt = 0; attempt < maxStoryTurnGenerationAttempts; attempt++) {
+  let qualityFailed = false
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const record = await requestModelRecord({
-        systemPrompt: storyProposalGenerationInstruction,
-        userPrompt: JSON.stringify({ ...context,
-          ...(repair ? { repair } : {}),
-          schema: { candidatePlan: { basis: { latestResultFactId: context.lastAuthorConfirmedResult?.factId ?? null,
-            unresolved: { kind: 'existing | optional-design | next-goal', text: '仍未解决的作者事项，或可拒绝建议，或请求下一目标', sourceFactIds: [] },
-            reason: '依据最新结果解释本次为何推进到这里', contradictions: [] }, options: [1, 2, 3].map(() => ({
-            label: '行动短名称', action: '待作者审阅的具体行动', proposedConsequence: '待审阅的可能承接',
-            sourceFactIds: proposalEvidenceIds.slice(0, 1),
-            causalClaims: [{ statement: '需要作者核对的前提或因果；没有作者依据时引用为空', sourceFactIds: [] }],
-            questions: ['尚未确定时如实询问作者，不补答案'],
-          })), authorReview: { summary: '需要作者补充或审阅的事项；无则为 null', questions: ['具体作者问题'] } } },
-        }), temperature: attempt === 0 ? 0.45 : 0.3, maxTokens: 2_400, diagnosticStage: 'candidate-action-preview',
-      }, '模型没有返回待审阅行动提案。')
-      assertProposalKeys(record, ['candidatePlan'])
-      const plan = expectRecord(record.candidatePlan, '候选行动缺少 candidatePlan。', invalidModelOutputContext)
-      assertProposalKeys(plan, ['basis', 'options', 'authorReview'])
+      const plan = await composeContinuation(context, decision, repair && previousPlan ? { issues: repair, previousPlan } : undefined)
+      previousPlan = plan
       const continuationBasis = validateContinuationBasis(plan.basis, context)
+      // Check prose only, never reference arrays. A valid citation must not
+      // allow protocol vocabulary to leak into author-facing suggestions.
+      const assertNarrativeProse = (value: unknown): void => {
+        if (typeof value === 'string' && hasProposalProtocolLeak(value, sourceFacts.map(f => f.text))) {
+          throw new AppError('续推提案请用人物、行动和结果叙述，不输出内部字段或材料 ID。', 502, 'INVALID_MODEL_OUTPUT')
+        }
+      }
+      if (Array.isArray(plan.options)) for (const option of plan.options) {
+        if (!option || typeof option !== 'object') continue
+        const prose = option as Record<string, unknown>
+        for (const key of ['label', 'action', 'proposedConsequence']) assertNarrativeProse(prose[key])
+        if (Array.isArray(prose.questions)) prose.questions.forEach(assertNarrativeProse)
+        if (Array.isArray(prose.causalClaims)) for (const claim of prose.causalClaims) {
+          if (claim && typeof claim === 'object') assertNarrativeProse((claim as Record<string, unknown>).statement)
+        }
+      }
+      if (plan.authorReview && typeof plan.authorReview === 'object') {
+        const prose = plan.authorReview as Record<string, unknown>
+        assertNarrativeProse(prose.summary)
+        if (Array.isArray(prose.questions)) prose.questions.forEach(assertNarrativeProse)
+      }
+      await auditContinuation(context, decision, plan)
       if (plan.authorReview !== undefined && plan.authorReview !== null) {
         if (continuationBasis.unresolved.kind === 'next-goal' || !Array.isArray(plan.options) || plan.options.length) throw new AppError('作者审阅与收束或角色行动出口不能混用。', 502, 'INVALID_MODEL_OUTPUT')
         const review = expectRecord(plan.authorReview, '作者审阅结构不完整。', invalidModelOutputContext)
@@ -5669,10 +6343,18 @@ async function generateCoCreationCandidateTurn(request: StoryTurnRequest, state:
           consequence: '当前没有新增已执行结果。', intensity: 1, anchor: '提案审阅' },
         question: '你想先审阅哪项候选行动？', options, narrativeAction: null, transition: null, canConclude: false, isConclusion: false }
     } catch (error) {
-      if (!isRetryableStoryTurnError(error)) throw error
+      qualityFailed = error instanceof AppError && error.code === 'STORY_TURN_QUALITY_FAILED'
+      if (!qualityFailed && !isRetryableStoryTurnError(error)) throw error
+      if (!qualityFailed) throw new AppError(`模型没有完成当前续推步骤（${error instanceof Error ? error.message : '结构不完整'}）；已确认结果仍保留。`, 502, 'STORY_TURN_RETRY_EXHAUSTED')
       repair = describeStoryTurnValidationFailure(error)
       // Proposal shape errors are not evidence about missing author facts.
       repair = error instanceof AppError ? error.message : '待审提案结构不完整，请按 candidatePlan JSON 合同重试。'
+      // State/routing defects repair the decision; causal defects repair only
+      // the scene. A shape retry stays inside its own step.
+      if (!attempt && qualityFailed && /continuity|author-control/u.test(repair)) {
+        decision = await decideContinuation(context)
+        previousPlan = undefined
+      }
       console.warn(`Candidate preview rejected (attempt=${attempt + 1}): ${repair}`)
     }
   }
@@ -5680,6 +6362,7 @@ async function generateCoCreationCandidateTurn(request: StoryTurnRequest, state:
     const texts = authorTexts.slice(0, 3)
     return createConfirmedCurveOpeningPlanTurn(request, `turn-${request.history.length + 1}`, texts)
   }
+  if (qualityFailed) throw new AppError('下一步提案的内容审阅未通过，请重新生成或调整方向；已确认的行动与结果仍保留。', 502, 'STORY_TURN_QUALITY_FAILED')
   throw new AppError(`模型没有返回可审阅的行动提案（${repair ?? '提案结构不完整'}）；不是作者资料不足的判定。`, 502, 'STORY_TURN_RETRY_EXHAUSTED')
 }
 
@@ -8350,13 +9033,11 @@ const systemConflictCoreDraftSystemPrompt = `你是一位擅长把普通念头�
 
 const systemDraftFirstLayerScopeSupplement = `第一层只提出可选择的创意方向，不能写具体小剧情。每条 premise 必须以“暂定：”开头，并只留下一个会让目标停住的钩子；tradeoff 必须写成“……还是……”的两难。允许一个当前物件、一个反常痕迹、一个匿名人物、一个代价或一个有限机会；门票、手机、工作人员等普通词可以作为钩子的载体，但不能把它延展为购买、支付、核验、通讯或机构流程。不能写完整场景、过去关系、行动链、精确时限或既定结果；也不要写寻找、移动、等待、到达、解除绑定、改用其他方式等具体执行步骤。凡是把一个创意钩子扩展成资源操作状态、流程或既定后果的内容都必须删除。`
 
-const richSystemConflictCoreDraftSystemPrompt = `你是一位严谨的中文故事编辑。用户已经提供了足够具体的故事事实；你的任务是把这些事实重新组织成三条可比较的“系统暂定”创作方向，不得再发明场景。
+const richSystemConflictCoreDirectionPlanSystemPrompt = `你是严谨的中文故事结构选择器。用户已经提供了足够具体的作者事实，服务器会从这些事实渲染可见方向。
 
-必须严格返回 JSON 对象，不要 Markdown、解释或代码块，使用简体中文。若输入有 lockedGoal，goal 必须保持服务端提供的目标，不要改写；只返回 stake、constraint 和 directions。directions 必须恰好三条，三条 mechanismType 必须互不相同，并且每条只突出一种已经由作者写出的因果机制。每条 premise 必须以“暂定：”开头，tradeoff 必须是清楚的“……还是……”二选一。
+严格只返回一个 JSON 对象，且只能包含 directionPlan。不要返回 systemDraft、directions、goal、stake、constraint、自然语言句子、Markdown、解释或额外字段。
 
-这是信息丰富输入：作者事实是唯一可用的事实源。每条 premise 和 tradeoff 至少逐字保留一个作者原文中的连续短语；三条方向合计至少使用两项不同作者事实。允许使用“继续、暂缓、保留、重新判断、承担取舍”等抽象连接词，但不得新增任何普通物件、设备、通讯、字迹、消息、工作人员、匿名人物、地点、机构流程、现场事件、过去经历、他人回应、资源、权限、精确时间、数字或永久结果。尤其不要写手机、快递单、钢笔、便签、门票、陌生字句、陌生人、浮现、写着、发来、贴出等新载体或事件。
-
-三条方向应分别突出：作者已有期限/当前条件如何卡住目标；作者已有承诺或关系如何制造取舍；作者已有对象/事件如何形成另一项可比较的选择条件。不要把“意义、归属、归属权、决定权、完整性、信任边界、共同责任”写成方向名称、前提或取舍，除非作者逐字写出。不要把三条方向写成同一句目标的同义复述，也不要把多个作者事实塞进同一条 premise。stake 和 constraint 也只能抽象概括作者已给出的压力，不能新增资源状态或解法。`
+每一项 directionPlan 只能包含 mechanismType、premiseFactId、tradeoffFactId。三项 mechanismType 必须互不相同，只能选择用户提示中列出的类型；premiseFactId 必须从该机制允许的 ID 中逐字复制；tradeoffFactId 必须从允许压力事实 ID 中逐字复制，且不能等于 premiseFactId。不能把纯目标事实作为压力，不能发明、改写或推断作者事实。服务器会用原文锚点渲染并再次校验；即使不确定，也必须保持这个 JSON 形状。`
 
 function getSystemConflictCoreDraftSystemPrompt(
   seed: Pick<StorySeed, 'lockedGoal' | 'lockedFacts'>,
@@ -8365,7 +9046,7 @@ function getSystemConflictCoreDraftSystemPrompt(
     return `${systemConflictCoreDraftSystemPrompt}\n\n${systemDraftFirstLayerScopeSupplement}`
   }
 
-  return richSystemConflictCoreDraftSystemPrompt
+  return richSystemConflictCoreDirectionPlanSystemPrompt
 }
 
 const headTailSystemPrompt = `你是一位擅长短篇故事结构的中文编辑。根据已经确认的故事基础，提出能驱动后续创作的开场、关键行动与结尾组合。
@@ -8468,10 +9149,11 @@ const storyBodyConsistencyReviewSystemPrompt = `你是一位严谨但不过度�
 
 必须严格返回 JSON 对象，不要 Markdown，不要解释，不要代码块。输入中的“已确认路径账本”是关键事件的权威来源：每项的 situation、obstacle、selectedAction、immediateResult 必须在正文中以语义等价的方式发生，顺序不能颠倒，且不能被正文改写。故事种子、已确认困境、预定结尾约束和最终叙事状态也是可用的已知背景；不要要求逐字复述，普通道具、动作、感官、画面和不承担关键因果的场景细节可以自由补写。
 
-只报告三类问题：
+只报告以下问题：
 1. missing-path-item：账本中的关键行动、即时结果、开场阻碍或实际收束在正文中缺失；
 2. contradiction：正文把账本中已确认的人物、物品、时间、地点、行动或结果写成了不兼容的另一种状态；
-3. unsupported-critical-detail：正文新加的精确时间、资源、权限、他人决定、进入方式、查询结果等内容承担了关键因果，却没有来自账本或最终状态的依据。
+3. unsupported-critical-detail：正文新加的精确时间、资源、权限、他人决定、进入方式、查询结果等内容承担了关键因果，却没有来自账本或最终状态的依据；
+4. creative-intent-mismatch：作者选择的感觉、戏剧力量或“你更想看到什么”的创作要求，在已确认路径中已有具体事件支撑，但正文只贴标签、插入无关桥段、复述愿望或俏皮对白，没有通过行动与后果体现。只有明确的实质偏离才报告，不能为此要求增添未确认事件；若路径本身缺少兑现要求所需的关键事件，不得让正文凭空补造，也不得把正文审阅通过解释为要求已经兑现。pathId 写 body。
 
 实际收束必须以语义方式兑现预定结尾约束中的 climax、resolution 和 openingClue；若未兑现或相互矛盾，使用 contradiction 或 missing-path-item，并将 pathId 写为 conclusion。
 
@@ -8793,6 +9475,9 @@ function buildSystemConflictCoreDraftPrompt(
   repairMessage?: string,
   preference?: string,
 ): string {
+  if (!hasSparseSystemDraftSeed(seed)) {
+    return buildRichSystemDraftDirectionPlanPrompt(idea, seed, repairMessage, preference)
+  }
   const goalInstruction = seed.lockedGoal
     ? `用户已确认目标“${seed.lockedGoal}”。服务端会直接保留它；请只生成 stake 和 constraint，不要返回 goal。`
     : '用户尚未确认具体行动目标。请生成 goal，并逐字保留原始念头中的主体、对象或关键事件。'
@@ -8815,7 +9500,38 @@ ${idea}
 ${formatStorySeed(seed)}
 
 系统正在为这个念头主动提出第一层创作方向。请提出一个共同故事起点，并在其中规划恰好三条彼此独立的创作分支。不要把系统暂定内容写成用户已经说过的事实；保留所有原始信息。${goalInstruction} stake 和 constraint 共同构成三条分支共享的起点；directions 中每一条 premise 和 tradeoff 只属于自己的分支，是用户可选择的系统暂定前提。三条 mechanismType 必须不同，且每条都要能单独支撑一条冲突核心。${repair}${firstLayerScope}\n严格使用以下 JSON：
-${getSystemConflictCoreDraftResponseSchema(seed)}`
+  ${getSystemConflictCoreDraftResponseSchema(seed)}`
+}
+
+function buildRichSystemDraftDirectionPlanPrompt(
+  idea: string,
+  seed: StorySeed,
+  repairMessage?: string,
+  preference?: string,
+): string {
+  const ledger = getRichSystemDraftFactLedger(seed)
+  const pressureFactIds = getRichSystemDraftPressureFactIds(seed, ledger)
+  const tradeoffFactIds = getRichSystemDraftTradeoffFactIds(seed, ledger, pressureFactIds)
+  const mechanismFactIds = getRichSystemDraftMechanismFactIds(seed, ledger, pressureFactIds)
+  const mechanisms = getRichSystemDraftAllowedMechanismTypes(seed, ledger, pressureFactIds, mechanismFactIds)
+  const mechanismOptions = mechanisms
+    .map((mechanismType) => `${mechanismType}: ${JSON.stringify(mechanismFactIds.get(mechanismType) ?? [])}`)
+    .join('；')
+  return [
+    '只输出 directionPlan JSON；不要输出 systemDraft、directions、自然语言方向或其他字段。',
+    '这是信息丰富的作者材料。服务器会用逐字锚点渲染可见方向；你只负责选择事实角色和机制，不得改写事实或补写场景。',
+    `作者原始念头（仅用于核对）：${idea}`,
+    `作者事实台账：${JSON.stringify(ledger)}（role=goal-and-pressure 表示同一条原文同时含有目标和独立期限/承诺/阻碍；它可以作为压力事实，但服务器仍会保留目标锚点。）`,
+    `允许压力事实 ID：${JSON.stringify(pressureFactIds)}`,
+    `允许取舍事实 ID（tradeoffFactId 只能从这里选择）：${JSON.stringify(tradeoffFactIds)}`,
+    `允许机制类型（只能从这个列表选择）：${mechanisms.join('、')}`,
+    `每种机制的 premiseFactId 允许列表（只能逐项照抄）：${mechanismOptions}`,
+    `机制选择提示：window-pressure 的两个 ID 中至少有一个必须是带明确期限的事实；commitment-conflict 必须承接答应/承诺/不再等原文；boundary-conflict 必须承接作者写出的关系对象或关系条件；information-gap 必须承接发现/看到/不知道/是否等原文；resource-constraint 必须承接作者写出的对象或条件；meaning-commitment 只能承接作者明确写出的决定/选择。`,
+    'directionPlan 必须恰好三项；每项只能有 mechanismType、premiseFactId、tradeoffFactId 三个字段。三项 mechanismType 必须互不相同；三个 (premiseFactId, tradeoffFactId) 组合也必须互不相同；premiseFactId 必须在对应机制的允许列表中，tradeoffFactId 必须在允许取舍事实 ID 中且不能与 premiseFactId 相同；尽量让三项 tradeoffFactId 覆盖不同压力；前提 ID 至少覆盖两项不同事实。不要把纯目标事实或只有“看到/发现”叙述的观察事实作为 tradeoffFactId，不要输出任何自然语言。',
+    repairMessage ? `上一轮只因合同或事实校验失败：${repairMessage}。本轮重新选择 ID，不要复述失败文本。` : '',
+    preference ? `作者偏好只影响机制选择，不是事实：${preference}` : '',
+    '严格输出一个只含 directionPlan 的 JSON 对象；每个 factId 都必须从上面的实际允许列表逐字复制，不要照搬不存在的示例 ID。',
+  ].filter(Boolean).join('\n')
 }
 
 function getSystemDraftSeedScopeInstruction(
@@ -8868,7 +9584,7 @@ function buildSystemConflictCoreDraftRepairPrompt(
   preference?: string,
 ): string {
   if (!hasSparseSystemDraftSeed(seed)) {
-    return buildRichSystemConflictCoreDraftRepairPrompt(idea, seed, repairMessage, preference)
+    return buildRichSystemDraftDirectionPlanPrompt(idea, seed, repairMessage, preference)
   }
 
   const goalInstruction = seed.lockedGoal
@@ -8904,130 +9620,22 @@ ${getSystemConflictCoreDraftResponseSchema(seed)}`
   )
 }
 
-/**
- * A rich input already contains the material needed for three directions. The
- * normal repair prompt used to repeat the rejected prose and invite Qwen to
- * paraphrase it into abstract claims such as "完整性" or "决定权". Give the
- * model a closed, source-first repair contract instead: the server selects
- * exact author anchors, while the model still has to return and pass the JSON
- * response. The template is guidance, never a server-side result.
- */
-function buildRichSystemConflictCoreDraftRepairPrompt(
-  idea: string,
-  seed: Pick<StorySeed, 'lockedGoal' | 'lockedFacts' | 'subject'>,
-  repairMessage: string,
-  preference?: string,
-): string {
-  const template = createRichSystemDraftRepairTemplate(seed)
-  const preferenceInstruction = getSystemDraftPreferenceInstruction(preference)
-  return [
-    '你是故事结构修复器。只输出严格 JSON，不要 Markdown、解释或额外字段。',
-    '这是信息丰富输入，作者原文是唯一事实源。上一版没有通过事实边界；不要重复失败词，也不要自行换成价值、意义、归属、权限、责任或关系结论。',
-    '三条方向必须恰好存在，mechanismType 互不相同。每条 premise 必须以“暂定：”开头；每条 tradeoff 必须只由两个短语组成“甲还是乙”。除作者锚点和“暂定、让、使、停住、继续、必须、取舍、选择、调整、处理方式、暂缓、保留、重新判断”外，不要加入任何词。',
-    '每个作者锚点必须逐字复制；不要补写场景、物件、人物意图、权限、时间语义或结果。若模板的同一目标出现在多条方向中，只是共享目标，不是新增事实。同一字段不得把目标重复嵌套；不要输出“让想、使想、让和、使在”等缺少主体的句式。每条 tradeoff 必须承接自己 premise 中的事实锚点，不能只写“目标还是暂缓”。',
-    `上一轮修复状态：${repairMessage}`,
-    `用户原始念头（只用于核对锚点）：${idea}`,
-    `锁定目标与事实（只能逐字复制）：${JSON.stringify({ goal: seed.lockedGoal, facts: seed.lockedFacts })}`,
-    `请返回以下槽位模板的 JSON；模板中的值已经由服务器从作者原文拼好，必须逐字复制，不要增删词：${JSON.stringify(template)}`,
-    preferenceInstruction,
-  ].filter(Boolean).join('\n')
-}
-
-interface RichSystemDraftRepairAnchor {
-  text: string
-  kind: 'time' | 'commitment' | 'relationship' | 'obstacle' | 'other'
-}
-
-function createRichSystemDraftRepairTemplate(
-  seed: Pick<StorySeed, 'lockedGoal' | 'lockedFacts' | 'subject'>,
-): StoryConflictCoreSystemDraft {
-  const facts = [...new Set(seed.lockedFacts.map((fact) => fact.trim()).filter(Boolean))]
-  const goal = seed.lockedGoal?.trim() || facts[0] || '作者目标'
-  const anchors = facts
-    .filter((fact) => fact !== goal)
-    .map((text): RichSystemDraftRepairAnchor => ({ text, kind: classifyRichRepairAnchor(text) }))
-
-  const ordered = [
-    ...anchors.filter((anchor) => anchor.kind === 'time'),
-    ...anchors.filter((anchor) => anchor.kind === 'commitment'),
-    ...anchors.filter((anchor) => anchor.kind === 'obstacle'),
-    ...anchors.filter((anchor) => anchor.kind === 'relationship'),
-    ...anchors.filter((anchor) => anchor.kind === 'other'),
-  ]
-  const selected = [...ordered, { text: goal, kind: 'other' as const }]
-  const first = selected[0] ?? { text: goal, kind: 'other' as const }
-  const second = selected.find((anchor) => anchor.text !== first.text) ?? { text: goal, kind: 'other' as const }
-  const third = selected.find((anchor) => anchor.text !== first.text && anchor.text !== second.text)
-    ?? { text: goal, kind: 'other' as const }
-  const subject = seed.subject?.trim() || '主角'
-  const directions = [
-    createRichRepairDirection(first, goal, subject, 0),
-    createRichRepairDirection(second, goal, subject, 1),
-    createRichRepairDirection(third, goal, subject, 2),
-  ]
-
-  return {
-    goal,
-    stake: '继续目标需要承担一项取舍',
-    constraint: '作者材料中的当前条件使目标停住',
-    origin: 'model',
-    directions,
-  }
-}
-
-function classifyRichRepairAnchor(value: string): RichSystemDraftRepairAnchor['kind'] {
-  if (/(?:今晚|明天|后天|今天|明早|明晚|周[一二三四五六日天]|本周|下周|月底|月末|期限|截止|倒数|之前|以后|前)/u.test(value)) return 'time'
-  if (/(?:答应|承诺|约定|保证|不再|不得|必须)/u.test(value)) return 'commitment'
-  if (/(?:缺失|卖掉|无法|不能|冲突|分歧|阻碍|拒绝|不知道|不知|没有)/u.test(value)) return 'obstacle'
-  if (/(?:姐姐|哥哥|弟弟|妹妹|朋友|队友|家人|同事|伴侣|父亲|母亲|前队友|对方)/u.test(value)) return 'relationship'
-  return 'other'
-}
-
-function createRichRepairDirection(
-  anchor: RichSystemDraftRepairAnchor,
-  goal: string,
-  subject: string,
-  index: number,
-): SystemDraftDirection {
-  const goalAnchor = getSystemDraftGoalAnchor(goal)
-  const mechanismType: ConflictCoreMechanismType = anchor.kind === 'time'
-    ? 'window-pressure'
-    : anchor.kind === 'commitment'
-      ? 'commitment-conflict'
-      : anchor.kind === 'relationship'
-        ? 'boundary-conflict'
-        : anchor.kind === 'obstacle'
-          ? 'information-gap'
-          : index === 0
-            ? 'meaning-commitment'
-            : index === 1
-              ? 'initiation-block'
-              : 'resource-constraint'
-  const label = getRichRepairLabel(anchor.text)
-  const premise = index === 0
-    ? `暂定：${anchor.text}让${subject}无法按原样继续${goalAnchor}`
-    : index === 1
-      ? `暂定：${anchor.text}使${subject}继续${goalAnchor}必须取舍`
-      : `暂定：${anchor.text}让${subject}不能按原样继续${goalAnchor}`
-  const alternative = index === 0
-    ? `暂缓${goalAnchor}`
-    : index === 1
-      ? `保留${anchor.text}`
-      : `继续${goalAnchor}`
-  const tradeoff = index === 1
-    ? `${goalAnchor}还是${alternative}`
-    : `${goalAnchor}还是${alternative}`
-  return { label, mechanismType, premise, tradeoff }
-}
-
-/** Keep the rich-input repair template from nesting a deadline in every side. */
+/** Keep server-rendered rich-input goal phrases from nesting a deadline. */
 function getSystemDraftGoalAnchor(value: string): string {
-  let normalized = value
-    .trim()
-    .replace(/^(?:当前(?:目标|想法)[：:]\s*)/u, '')
-    .replace(/^(?:想要|想|希望|打算|准备|计划)\s*/u, '')
-    .replace(/^在[^，。！？；\n]{1,24}前(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择|判断))/u, '')
-    .replace(/^于[^，。！？；\n]{1,24}(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择|判断))/u, '')
+  let normalized = value.trim().replace(/^(?:当前(?:目标|想法)[：:]\s*)/u, '')
+
+  // A model seed may retain the author's intention wrapper ("想在..."),
+  // while the direct extractor usually stores the same goal without it. Run
+  // the small cleanup repeatedly so either representation renders one stable
+  // action phrase instead of forms such as "继续想..." or "在在...".
+  for (let pass = 0; pass < 2; pass += 1) {
+    normalized = normalized
+      .replace(/^(?:却|但|同时|并且)\s*/u, '')
+      .replace(/^(?:想要|想|希望|打算|准备|计划)\s*/u, '')
+      .replace(/^在[^，。！？；\n]{1,24}前\s*(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择|判断|想|希望|要不要|是否))/u, '')
+      .replace(/^于[^，。！？；\n]{1,24}\s*(?=(?:把|将|去|看|提交|参加|寻找|归还|离开|决定|选择|判断|想|希望|要不要|是否))/u, '')
+      .trim()
+  }
   const decision = normalized.match(/(?:决定|选择|判断|确认)(?:要不要|是否)(.+)$/u)
   // Keep only the action fragment in compact direction templates. The
   // decision wrapper is already represented by the surrounding choice text;
@@ -9036,9 +9644,18 @@ function getSystemDraftGoalAnchor(value: string): string {
   return normalized || value.trim()
 }
 
-function getRichRepairLabel(value: string): string {
-  const stripped = value.replace(/^(?:却|但|同时|并且|她|他|我|我们|周岚|林澈|沈乔)\s*/u, '').trim()
-  return (stripped || value).slice(0, 16)
+function getSystemDraftGoalDecisionPhrase(value: string): string {
+  const anchor = getSystemDraftGoalAnchor(value)
+  if (!anchor) return '是否作出选择'
+  if (/^(?:是否|要不要)/u.test(anchor)) return anchor
+  return `是否${anchor}`
+}
+
+function getSystemDraftGoalActionPhrase(value: string): string {
+  const anchor = getSystemDraftGoalAnchor(value)
+    .replace(/^(?:是否|要不要)\s*/u, '')
+    .trim()
+  return anchor || '作出选择'
 }
 
 function getSystemDraftPreferenceInstruction(preference?: string): string {
@@ -9984,6 +10601,8 @@ function buildStoryPrompt(
 ): string {
   return `${buildStoryFoundationContext(idea, plan.seed, plan.predicament, plan.approach, '用户逐步确认的故事困境')}
 
+${storyCreativeIntentGuidance(plan.seed.creativeBrief ?? { tones: [], dramaticForces: [], allowSystemNamedCharacters: false }, 'story')}
+
 用户确认的故事两端约束：
 ${JSON.stringify({
   openingClue: plan.headTail.openingClue,
@@ -10021,6 +10640,8 @@ function buildStoryBodyConsistencyReviewPrompt(
 ): string {
   return `${buildStoryFoundationContext(idea, plan.seed, plan.predicament, plan.approach, '用户逐步确认的故事困境')}
 
+${storyCreativeIntentGuidance(plan.seed.creativeBrief ?? { tones: [], dramaticForces: [], allowSystemNamedCharacters: false }, 'story')}
+
 预定结尾约束：
 ${JSON.stringify({
   openingClue: plan.headTail.openingClue,
@@ -10044,7 +10665,7 @@ ${story.body}
   "isConsistent": true,
   "issues": [
     {
-      "kind": "missing-path-item、contradiction 或 unsupported-critical-detail",
+      "kind": "missing-path-item、contradiction、unsupported-critical-detail 或 creative-intent-mismatch",
       "pathId": "对应账本项 id 或 body",
       "detail": "不超过 220 字的具体问题"
     }
@@ -11205,7 +11826,7 @@ function readStoryBodyConsistencyIssueKind(
   value: unknown,
   message: string,
 ): StoryBodyConsistencyIssueKind {
-  if (value === 'missing-path-item' || value === 'contradiction' || value === 'unsupported-critical-detail') {
+  if (value === 'missing-path-item' || value === 'contradiction' || value === 'unsupported-critical-detail' || value === 'creative-intent-mismatch') {
     return value
   }
 

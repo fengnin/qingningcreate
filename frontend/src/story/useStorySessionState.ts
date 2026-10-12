@@ -32,6 +32,11 @@ export interface PendingTurnRequest {
   turnId?: string
   optionId?: string
 }
+export interface PendingActionConfirmation {
+  proposalId: string
+  mode: 'continue' | 'conclude'
+  authorConfirmation?: { actionText: string; resultText: string }
+}
 
 export interface StorySessionState {
   view: StoryView
@@ -90,6 +95,8 @@ export interface StorySessionState {
   activeCurveVersionId: string | undefined
   setActiveCurveVersionId: (versionId: string | undefined) => void
   pendingActionProposal: StoryActionProposal | undefined
+  pendingActionConfirmation: PendingActionConfirmation | undefined
+  setPendingActionConfirmation: (confirmation: PendingActionConfirmation | undefined) => void
   setPendingActionProposal: (proposal: StoryActionProposal | undefined) => void
   pendingCurveRegeneration: StoryCurveRegenerationPreview | undefined
   setPendingCurveRegeneration: (preview: StoryCurveRegenerationPreview | undefined) => void
@@ -158,6 +165,7 @@ export function useStorySessionState(): StorySessionState {
   const [curveVersions, setCurveVersions] = useState<StoryCurveVersion[]>([])
   const [activeCurveVersionId, setActiveCurveVersionId] = useState<string>()
   const [pendingActionProposal, setPendingActionProposal] = useState<StoryActionProposal>()
+  const [pendingActionConfirmation, setPendingActionConfirmation] = useState<PendingActionConfirmation>()
   const [pendingCurveRegeneration, setPendingCurveRegeneration] = useState<StoryCurveRegenerationPreview>()
   const [restoreAttempted, setRestoreAttempted] = useState(false)
   const [restoreLoading, setRestoreLoading] = useState(false)
@@ -187,6 +195,7 @@ export function useStorySessionState(): StorySessionState {
   )
 
   const resetStorySpine = () => {
+    setPendingActionConfirmation(undefined)
     setCommittedHeadTailId(undefined)
     setTurnHistory([])
     setCurrentTurn(undefined)
@@ -253,6 +262,7 @@ export function useStorySessionState(): StorySessionState {
   }
 
   const applySessionSnapshot = (snapshot: StorySessionSnapshot) => {
+    setPendingActionConfirmation(undefined)
     setStoryId(snapshot.storyId)
     setRevision(snapshot.revision)
     setIdea(snapshot.idea)
@@ -339,6 +349,8 @@ export function useStorySessionState(): StorySessionState {
     activeCurveVersionId,
     setActiveCurveVersionId,
     pendingActionProposal,
+    pendingActionConfirmation,
+    setPendingActionConfirmation,
     setPendingActionProposal,
     pendingCurveRegeneration,
     setPendingCurveRegeneration,

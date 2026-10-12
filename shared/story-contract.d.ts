@@ -104,6 +104,7 @@ export interface CreativeBrief {
   dramaticForces: DramaticForce[]
   allowSystemNamedCharacters: boolean
   note?: string
+  storyRequirements?: { setting?: string; direction?: string; boundaries?: string }
 }
 
 export type CurveBeatKind =

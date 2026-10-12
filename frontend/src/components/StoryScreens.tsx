@@ -454,6 +454,7 @@ export function StorySpineScreen({ session }: { session: StorySession }) {
       ) : (
         <StepContent
           loading={session.stageStatus === 'loading'}
+          preserveWhileLoading
           error={session.stageError}
           loadingLabel="正在承接这次选择，生成下一段情境"
           loadingDetail="只会生成当前这一步，并保留此前已经确认的行动和后果。"
@@ -638,16 +639,17 @@ function StoryWorkspace({
   )
 }
 
-function StepContent({ loading, error, loadingLabel, loadingDetail, onRetry, children }: {
+function StepContent({ loading, error, loadingLabel, loadingDetail, onRetry, children, preserveWhileLoading = false }: {
   loading: boolean
+  preserveWhileLoading?: boolean
   error: string | undefined
   loadingLabel: string
   loadingDetail: string
   onRetry: () => void
   children: ReactNode
 }) {
-  if (loading) return <GenerationNotice label={loadingLabel} detail={loadingDetail} />
-  return <>{error && <GenerationError message={error} onRetry={onRetry} />}{children}</>
+  if (loading && !preserveWhileLoading) return <GenerationNotice label={loadingLabel} detail={loadingDetail} />
+  return <>{loading && <GenerationNotice label={loadingLabel} detail={loadingDetail} />}{error && <GenerationError message={error} onRetry={onRetry} />}{children}</>
 }
 
 function StageActions({ onRegenerate, onNext, nextLabel, disabled }: {
@@ -1171,7 +1173,9 @@ function ProgressSummary({ option, history, currentTurn, hasGeneratedStory }: {
     ? '已收束，可以写成故事'
     : history.length
       ? `已确认 ${history.length} 次行动`
-      : '正在生成第一个情境'
+      : currentTurn ? '首回合提案待审阅' : '正在生成第一个情境'
+  const reviewsFutureActions = ['candidate-actions', 'author-review', 'closure-review'].includes(currentTurn?.presentation ?? '')
+  const latestResult = history.at(-1)?.selectedOption.transition.authorConfirmation?.resultText
 
   return (
     <>
@@ -1180,12 +1184,13 @@ function ProgressSummary({ option, history, currentTurn, hasGeneratedStory }: {
       <h2>{currentLabel}</h2>
       <dl className="anchor-preview">
         <div><dt>开场</dt><dd>{option.opening}</dd></div>
-        <div><dt>结尾</dt><dd>{option.resolution}</dd></div>
+        <div><dt>{reviewsFutureActions ? '未来设计' : '结尾'}</dt><dd>{option.resolution}</dd></div>
+        {reviewsFutureActions && latestResult && <div><dt>最近确认结果</dt><dd>{latestResult}</dd></div>}
         <div><dt>线索</dt><dd>{option.openingClue}</dd></div>
-        <div><dt>最终行动</dt><dd>{option.climax}</dd></div>
-        <div><dt>要承担的代价</dt><dd>{option.cost}</dd></div>
+        {option.climax && <div><dt>最终行动</dt><dd>{option.climax}</dd></div>}
+        {option.cost && <div><dt>要承担的代价</dt><dd>{option.cost}</dd></div>}
       </dl>
-      <div className="aside-principle"><Lightbulb size={16} /><span>{hasGeneratedStory ? '完整正文仍保留这条已确认的因果链，修改时可以回到路径中的任一步。' : '每次选择都会承接前一段的后果，并朝已确认的结尾推进。'}</span></div>
+      <div className="aside-principle"><Lightbulb size={16} /><span>{hasGeneratedStory ? '完整正文仍保留这条已确认的因果链，修改时可以回到路径中的任一步。' : reviewsFutureActions ? '未来设计可修改；后续承接你确认的实际结果。' : '每次选择都会承接前一段的后果，并朝已确认的结尾推进。'}</span></div>
     </>
   )
 }
