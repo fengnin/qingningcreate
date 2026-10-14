@@ -5224,6 +5224,9 @@ textarea:focus-visible {
 .preparation-choice-indicator { display: grid; place-items: center; width: 26px; height: 26px; border: 1px solid #66766b; border-radius: 50%; color: #fff; }
 .preparation-proposal.is-selected .preparation-choice-indicator { border-color: #d76a52; background: #d76a52; }
 .preparation-proposal.is-selected .preparation-choice-outcome { border-color: #7c887d; }
+.curve-future-choice { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 12px; margin: 20px 0; padding: 12px 0; border-top: 1px solid #526258; border-bottom: 1px solid #526258; color: #d9e1d9; font-size: 13px; line-height: 1.7; }
+.curve-future-choice strong { color: #e18369; font-size: 12px; font-weight: 600; }
+.curve-future-choice span { overflow-wrap: anywhere; }
 .preparation-actions { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; padding: 0 14px 8px 101px; }
 .preparation-actions button, .preparation-question button { min-height: 44px; }
 .preparation-actions .primary-action { padding-inline: 20px; border-radius: 6px; font-weight: 500; }
@@ -5242,6 +5245,15 @@ textarea:focus-visible {
 .preparation-evidence dl { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 12px; padding: 16px 0; border-top: 1px solid #36483e; }
 .preparation-evidence dt { color: #aab9ad; }
 .preparation-evidence dd { margin: 0; }
+.preparation-card-evidence { margin: 0 14px 12px 101px; color: #aab9ad; }
+.preparation-card-evidence dl { padding: 12px 0 4px; }
+.preparation-card-evidence .preparation-evidence-note { margin: 4px 0 0; color: #aab9ad; font-size: 12px; line-height: 1.6; }
+.preparation-card-evidence dd { min-width: 0; color: #d5dfd5; white-space: pre-wrap; }
+.preparation-card-evidence blockquote { margin: 0 0 8px; padding-left: 10px; border-left: 2px solid #52675a; color: #d5dfd5; }
+.preparation-card-evidence blockquote:last-child { margin-bottom: 0; }
+.preparation-action-part, .preparation-action-legacy { display: block; }
+.preparation-action-part + .preparation-action-part { margin-top: 8px; }
+.preparation-action-part small, .preparation-action-legacy small { display: block; margin-bottom: 3px; color: #e18369; font-size: 11px; font-weight: 700; letter-spacing: .04em; }
 .preparation-editor { display: grid; gap: 16px; margin: 12px 14px 16px 101px; padding-top: 16px; border-top: 1px solid #36483e; animation: sceneEnter 220ms ease both; }
 .preparation-editor label { display: grid; gap: 8px; color: #b7c6b9; font-size: 13px; }
 .preparation-editor textarea { width: 100%; min-height: 112px; padding: 14px; border: 1px solid #52665a; background: #14231f; color: #edf3ec; border-radius: 6px; font: inherit; font-size: 15px; line-height: 1.8; resize: vertical; }
@@ -5291,12 +5303,14 @@ textarea:focus-visible {
   .preparation-choice { grid-template-columns: 23px 29px minmax(0, 1fr) 24px; gap: 8px; padding: 14px 10px 8px; }
   .preparation-choice-icon { width: 27px; height: 27px; }
   .preparation-choice-outcome { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .curve-future-choice { grid-template-columns: minmax(0, 1fr); gap: 4px; }
   .preparation-actions { padding: 0 10px 8px 79px; }
   .preparation-missing-condition, .preparation-editor { margin-left: 79px; margin-right: 10px; }
   .preparation-actions { gap: 8px 16px; }
   .preparation-actions .primary-action { width: 100%; justify-content: center; }
   .preparation-evidence dl { grid-template-columns: 1fr; gap: 6px; }
   .preparation-evidence dd { margin-bottom: 12px; }
+  .preparation-card-evidence { margin-left: 79px; margin-right: 10px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

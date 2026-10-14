@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { AppError } from './qwen.js'
-import { acceptPreparation, activePreparationMaterial, framePreparationSources, generateStoryPreparation, generateCurveFromPreparation, parsePreparationMaterial, parsePreparationCandidates, parsePreparationReview, preparationReferenceContract, reviseStoryPreparation } from './storyPreparation.js'
+import { acceptPreparation, activePreparationMaterial, framePreparationSources, generateStoryPreparation, generateCurveFromPreparation, parsePreparationMaterial, parsePreparationCandidates, parsePreparationReview, preparationReferenceContract, projectFutureChoices, reviseStoryPreparation } from './storyPreparation.js'
 import { confirmProvisionalCurve, materializeConfirmedCurve, parseCreativeBrief } from './storyCoCreation.js'
 import { requiredDesignProposalIds } from './storyDesignReview.js'
 import { preserveRequirementRoles, preparationSources, reviewPreparationUncertainty } from './storyPreparation.js'
@@ -11,12 +11,12 @@ const source = { id: 'author-input', text: '方屿想核对书单；逐项计数
 const material = framePreparationSources([source]).map((m, i) => ({ ...m, role: (i === 0 ? 'goal' : i === 4 ? 'unknown' : 'condition') as 'goal' | 'unknown' | 'condition' }))
 const classification = { material: material.map(({ id, role }) => ({ id, role })) }
 const qualityPass = { checks: ['facts', 'causality', 'requirements', 'author-control', 'questions'].map(criterion => ({ criterion, passed: true, evidence: '测试用审阅证据；不作为实际内容验收。' })), issues: [] }
-const candidate = { id: 'count', action: '方屿逐项计数并核对书单。', materialIds: ['m0'], preconditionIds: ['m1','m2'], possibleResult: '若完成逐项计数，可能发现书单与实物数量差异；原因仍未知。', resultBasisIds: ['m1'], unknownIds: [] }
+const candidate = { id: 'count', action: '方屿逐项计数并核对书单。', futureChoice: '若数量不一致，他要选择先公开差异，还是先追查原因。', materialIds: ['m0'], preconditionIds: ['m1','m2'], possibleResult: '若完成逐项计数，可能发现书单与实物数量差异；原因仍未知。', resultBasisIds: ['m1'], unknownIds: [] }
 const directions = [
   { ...candidate, id: 'c0' },
   { ...candidate, id: 'c1', action: '方屿先和同伴分组核对书单，发现两人对分类的理解不同，决定重新商定分类。', possibleResult: '重新分类后，两人可能找到数量差异的来源，并保留尚未确定的原因。' },
   { ...candidate, id: 'c2', action: '方屿从实物清点入手，遇到书单顺序不一致，决定按书架位置重新对应。', possibleResult: '对应完成后，可能缩小差异范围，仍需继续查明原因。' },
-]
+].map(direction => ({ ...direction, causalBridge: { method: direction.action, change: direction.possibleResult, methodBasisIds: ['m0'], changeBasisIds: ['m1'] } }))
 const brief = { tones: ['growth' as const], dramaticForces: [], allowSystemNamedCharacters: false }
 const code = (name: string) => (e: unknown) => e instanceof AppError && e.code === name
 
@@ -210,7 +210,8 @@ test('independent intent check recovers an explicit goal missed by the first cla
     else if (prompt.includes('核对人物当下意图')) { checked = true; output = { characterGoalIds: ['m0'] } }
     else if (prompt.includes('从作者的想法提出恰好三种')) {
       assert.ok(checked)
-      output = { candidates: directions.map((c, i) => ({ ...c, id: `d${i}`, materialIds: ['m0'], preconditionIds: [], resultBasisIds: ['m0'] })), questions: [] }
+      output = { candidates: directions.map((c, i) => ({ ...c, id: `d${i}`, materialIds: ['m0'], preconditionIds: [], resultBasisIds: ['m0'],
+        causalBridge: { ...c.causalBridge, changeBasisIds: ['m0'] } })), questions: [] }
     } else output = qualityPass
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(output) } }] }))
   }
@@ -388,10 +389,21 @@ test('content rejection gets one model revision and stays distinct from structur
     const prompt = input.messages[0].content
     let output: unknown = prompt.includes('核对人物当下意图') ? { characterGoalIds: ['m0'] } : classification
     if (prompt.includes('从作者的想法提出恰好三种')) {
+      assert.match(prompt, /短输入可以创作目标、代价、期限、人物、道具或往事/)
+      assert.match(prompt, /每条卡围绕一个有意义的新事件发展/)
+      assert.match(prompt, /意外不必由人物造成，也不必在卡片里解释完整来历/)
+      assert.match(prompt, /人物提议先陪朋友玩旋转木马/)
+      assert.match(prompt, /遗失门票后向游客中心询问能否补票可以提议/)
+      assert.match(prompt, /不能靠拼贴假票突然获得扫码入园或闭园后游玩资格/)
       proposals++
       if (proposals === 2) assert.match(user.validationFailure, /内容审阅/)
       output = { candidates: directions, questions: [] }
     } else if (prompt.includes('审查故事提案质量')) {
+      assert.match(prompt, /作者原文没有提供，本身不构成失败/)
+      assert.match(prompt, /未交代核验条件就断言凭朋友身份证号代办成功，不应通过/)
+      assert.match(prompt, /拼贴可扫码假票换取闭园后游玩资格/)
+      assert.match(prompt, /不能把几项互不相关的设定叠成唯一解决路径/)
+      assert.match(prompt, /卡片不必解释完整事件来历或写完故事曲线/)
       reviews++
       output = { ...qualityPass, checks: qualityPass.checks.map(c => c.criterion === 'causality' ? { ...c, passed: false, evidence: '发展只复述原目标，没有具体事件。' } : c), issues: [] }
     }
@@ -433,10 +445,17 @@ test('coverage recovery preserves omitted promises; rejection and revised action
     let output: unknown
     if (input.messages[0].content.includes('核对人物当下意图')) output = { characterGoalIds: ['m0'] }
     else if (input.messages[0].content.includes('审查故事提案质量')) output = qualityPass
+    else if (input.messages[0].content.includes('你是故事大纲编辑')) output = {
+      bridges: user.candidates.map((c: typeof candidate) => ({ id: c.id, method: c.action, change: c.possibleResult, methodBasisIds: ['m0'], changeBasisIds: ['m1'] })),
+      futureChoices: user.candidates.map((c: typeof candidate) => ({ id: c.id, text: '若核对后仍有差异，他要选择公开差异还是继续查明原因。' })),
+    }
+    else if (input.messages[0].content.includes('审查每条方向的')) output = {
+      checks: user.candidates.map((c: typeof candidate) => ({ id: c.id, valid: true, reason: '测试桩通过；不代表实际内容合格。' })),
+    }
     else if (input.messages[0].content.includes('从作者的想法提出恰好三种')) {
       assert.deepEqual(user.material, material)
       if (user.rejectedCandidates.length) assert.ok(user.rejectedCandidates.some((c: { action: string }) => c.action === candidate.action))
-      output = { candidates: user.rejectedCandidates.length ? directions.map((c, i) => ({ ...c, action: `另一版方向${i}：${c.action}` })) : directions, questions: [] }
+      output = { candidates: directions.map(({ causalBridge, futureChoice, ...c }, i) => user.rejectedCandidates.length ? { ...c, action: `另一版方向${i}：${c.action}` } : c), questions: [] }
     } else if (user.validationFailure) {
       assert.match(user.validationFailure, /覆盖全部固定材料/)
       assert.deepEqual(user.sources, [source])
@@ -446,7 +465,7 @@ test('coverage recovery preserves omitted promises; rejection and revised action
   }
   try {
     const curve = await generateStoryPreparation(source.text, brief)
-    assert.equal(calls, 5)
+    assert.equal(calls, 7)
     const rejected = await reviseStoryPreparation(curve, 'reject', curve.preparation!.candidates[0]!.id)
     assert.equal(curve.preparation!.candidates.length, 3)
     assert.equal(rejected.preparation!.candidates.length, 2)
@@ -477,7 +496,7 @@ test('candidates cannot cite unknown material as result evidence; question-only 
   const questions = [{ id: 'q', question: '差异原因是什么？', materialIds: ['m4'] }]
   assert.equal(parsePreparationCandidates({ candidates: [], questions }, material).questions.length, 1)
   assert.throws(() => parsePreparationCandidates({ candidates: [{ ...candidate, resultBasisIds: ['m4'] }], questions }, material), code('STORY_PREPARATION_INVALID_OUTPUT'))
-  assert.throws(() => parsePreparationCandidates({ candidates: [{ ...candidate, resultBasisIds: [] }], questions }, material), code('STORY_PREPARATION_INVALID_OUTPUT'))
+  assert.deepEqual(parsePreparationCandidates({ candidates: [{ ...candidate, resultBasisIds: [] }], questions: [] }, material).candidates[0]?.resultBasisIds, [])
   const p = { protocol: 1 as const, status: 'needs-review' as const, sources: [source], material, candidates: [{ ...candidate, unknownIds: ['q'] }], questions, acceptedCandidateIds: [], executed: false as const }
   assert.throws(() => acceptPreparation(p, ['count']), code('STORY_PREPARATION_UNKNOWN_DEPENDENCY'))
   assert.deepEqual(p.acceptedCandidateIds, [])
@@ -499,6 +518,97 @@ test('candidate reference contract separates unknown material from question depe
   assert.deepEqual(parsePreparationCandidates({ candidates: [pending], questions }, material), { candidates: [pending], questions })
   assert.deepEqual(material, before)
 })
+
+test('new possible result may have no author result quote while keeping its goal source', () => {
+  const original = { ...candidate, resultBasisIds: [], unknownIds: [] }
+  const parsed = parsePreparationCandidates({ candidates: [original], questions: [] }, material)
+  assert.deepEqual(parsed.candidates[0]?.resultBasisIds, [])
+  const preparation = { protocol: 1 as const, status: 'needs-review' as const, sources: [source], material,
+    candidates: parsed.candidates, questions: [], acceptedCandidateIds: [], executed: false as const }
+  const accepted = acceptPreparation(preparation, [candidate.id])
+  assert.deepEqual(accepted.candidates[0]?.materialIds, ['m0'])
+  assert.deepEqual(accepted.candidates[0]?.resultBasisIds, [])
+  assert.equal(accepted.executed, false)
+})
+
+test('a model-created result without an author result quote reaches the reviewable curve', async () => {
+  const originalFetch = globalThis.fetch
+  const env = { key: process.env.DASHSCOPE_API_KEY, disable: process.env.STORY_DISABLE_MODEL }
+  process.env.DASHSCOPE_API_KEY = 'stub'; process.env.STORY_DISABLE_MODEL = 'false'
+  const proposed = { ...candidate, resultBasisIds: [], unknownIds: [] }
+  const curve = { id: 'creative-result', title: '待审', status: 'draft' as const, brief, beats: [], instructions: [], createdAt: 1, updatedAt: 1,
+    preparation: { protocol: 1 as const, status: 'needs-review' as const, sources: [source], material,
+      candidates: [proposed], questions: [], acceptedCandidateIds: [], executed: false as const } }
+  globalThis.fetch = async (_url, init) => {
+    const request = JSON.parse(String(init?.body))
+    const prompt = request.messages[0].content as string
+    const output = prompt.includes('核对作者目标分类') ? { goalMaterialId: 'm0' } : { steps: [
+      { kind: 'current-state', title: material[0]!.quote, text: material[0]!.quote, candidateIds: [], materialIds: ['m0','m1','m2','m3'] },
+      { kind: 'trigger', title: proposed.action, text: proposed.action, candidateIds: [proposed.id], materialIds: ['m0'] },
+      { kind: 'resolution', title: proposed.possibleResult, text: proposed.possibleResult, candidateIds: [proposed.id], materialIds: [] },
+    ], supplements: [] }
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(output) } }] }))
+  }
+  try {
+    const mapped = await generateCurveFromPreparation(curve, [proposed.id])
+    assert.equal(mapped.beats.at(-1)?.detail, proposed.possibleResult)
+    assert.deepEqual(mapped.reasoning?.relations[0]?.basis, { kind: 'design-proposal', evidence: [], unknownIds: [] })
+    assert.deepEqual(mapped.reasoning?.relations[0]?.toIds, ['prepared-goal'])
+    assert.deepEqual(mapped.preparation?.candidates[0]?.resultBasisIds, [])
+    assert.equal(mapped.preparation?.executed, false)
+  } finally {
+    globalThis.fetch = originalFetch
+    if (env.key === undefined) delete process.env.DASHSCOPE_API_KEY; else process.env.DASHSCOPE_API_KEY = env.key
+    if (env.disable === undefined) delete process.env.STORY_DISABLE_MODEL; else process.env.STORY_DISABLE_MODEL = env.disable
+  }
+})
+
+test('causal bridge may describe a new change without pretending it came from author text', () => {
+  const proposed = { ...candidate, resultBasisIds: [], causalBridge: {
+    method: '方屿先逐项核对书单。', change: '核对后可能发现新的差异。', methodBasisIds: ['m0'], changeBasisIds: [],
+  } }
+  const parsed = parsePreparationCandidates({ candidates: [proposed], questions: [] }, material)
+  assert.deepEqual(parsed.candidates[0]?.causalBridge?.changeBasisIds, [])
+  assert.throws(() => parsePreparationCandidates({ candidates: [{ ...proposed, causalBridge: {
+    ...proposed.causalBridge, changeBasisIds: ['m4'],
+  } }], questions: [] }, material), code('STORY_PREPARATION_INVALID_OUTPUT'))
+})
+test('opt-in preparation diagnostics retain passing quality judgments without exposing requests', async () => {
+  const originalFetch = globalThis.fetch, originalWarn = console.warn
+  const env = { key: process.env.DASHSCOPE_API_KEY, disable: process.env.STORY_DISABLE_MODEL, diagnostics: process.env.STORY_PREPARATION_DIAGNOSTICS }
+  process.env.DASHSCOPE_API_KEY = 'stub'; process.env.STORY_DISABLE_MODEL = 'false'; process.env.STORY_PREPARATION_DIAGNOSTICS = 'true'
+  const logs: string[] = []
+  console.warn = (...args: unknown[]) => { logs.push(args.map(String).join(' ')) }
+  globalThis.fetch = async (_url, init) => {
+    const staged = stagedFixture(init); if (staged) return staged
+    const request = JSON.parse(String(init?.body)), prompt = request.messages[0].content as string
+    const output = prompt.includes('先整理作者材料') ? classification
+      : prompt.includes('核对人物当下意图') ? { characterGoalIds: ['m0'] }
+      : prompt.includes('从作者的想法提出恰好三种') ? { candidates: directions, questions: [] }
+      : qualityPass
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(output) } }] }))
+  }
+  try {
+    await generateStoryPreparation(source.text, brief)
+    const reviewLog = logs.find(line => line.startsWith('[preparation] review '))
+    assert.ok(reviewLog)
+    const record = JSON.parse(reviewLog.slice('[preparation] review '.length))
+    assert.equal(record.stage, 'quality')
+    assert.equal(record.attempt, 1)
+    assert.deepEqual(record.candidateIds, ['c0', 'c1', 'c2'])
+    assert.equal(record.decision.checks.length, 5)
+    assert.equal(record.decision.checks[0].evidence, qualityPass.checks[0]!.evidence)
+    assert.deepEqual(record.decision.issues, [])
+    assert.ok(!reviewLog.includes('DASHSCOPE_API_KEY'))
+  } finally {
+    globalThis.fetch = originalFetch
+    console.warn = originalWarn
+    for (const [key, value] of [['DASHSCOPE_API_KEY', env.key], ['STORY_DISABLE_MODEL', env.disable], ['STORY_PREPARATION_DIAGNOSTICS', env.diagnostics]]) {
+      if (value === undefined) delete process.env[key!]; else process.env[key!] = value
+    }
+  }
+})
+
 test('extraction, proposal and quality review stop before curve; only acceptance permits arrangement', async () => {
   const originalFetch = globalThis.fetch
   const env = { key: process.env.DASHSCOPE_API_KEY, disable: process.env.STORY_DISABLE_MODEL }
@@ -573,6 +683,182 @@ test('author review preserves exact original text and covers exactly the selecte
   assert.throws(() => parsePreparationReview({ ...review, originalText: '' }, ['count']), code('INVALID_REQUEST'))
 })
 
+test('future story choice remains an editable proposal through acceptance', () => {
+  const parsed = parsePreparationCandidates({ candidates: [{ ...candidate, futureChoice: '核对后要公开差异，还是先寻找原因？' }], questions: [] }, material)
+  assert.equal(parsed.candidates[0]?.futureChoice, '核对后要公开差异，还是先寻找原因？')
+  const preparation = { protocol: 1 as const, status: 'needs-review' as const, sources: [source], material,
+    candidates: parsed.candidates, questions: [], acceptedCandidateIds: [], executed: false as const }
+  const review = { originalText: '我选择这条未来故事方向，尚未发生。', candidates: [{ id: candidate.id,
+    action: candidate.action, possibleResult: candidate.possibleResult,
+    futureChoice: '如果发现差异，他要决定先告诉同伴，还是先核对原始记录。' }] }
+  const accepted = acceptPreparation(preparation, [candidate.id], review)
+  assert.equal(accepted.candidates[0]?.futureChoice, review.candidates[0]?.futureChoice)
+  assert.equal(accepted.executed, false)
+  assert.equal(accepted.originalCandidates?.[0]?.futureChoice, parsed.candidates[0]?.futureChoice)
+  const cleared = acceptPreparation(preparation, [candidate.id], { ...review,
+    candidates: [{ ...review.candidates[0]!, futureChoice: '' }] })
+  assert.equal(cleared.candidates[0]?.futureChoice, undefined)
+  assert.equal(cleared.originalCandidates?.[0]?.futureChoice, parsed.candidates[0]?.futureChoice)
+  assert.throws(() => acceptPreparation(preparation, [candidate.id], { ...review,
+    candidates: [{ ...review.candidates[0]!, action: `${candidate.action} Changed`, possibleResult: `${candidate.possibleResult} Changed`, futureChoice: parsed.candidates[0]!.futureChoice }] }),
+  code('STORY_PREPARATION_DERIVED_RESULT_STALE'))
+  assert.throws(() => acceptPreparation(preparation, [candidate.id], { ...review,
+    candidates: [{ ...review.candidates[0]!, possibleResult: `${candidate.possibleResult} Changed`, futureChoice: parsed.candidates[0]!.futureChoice }] }),
+  code('STORY_PREPARATION_DERIVED_RESULT_STALE'))
+})
+
+test('causal bridge remains internal future design with explicit material references', () => {
+  assert.throws(() => parsePreparationCandidates({ candidates: [null], questions: [] }, material), code('STORY_PREPARATION_INVALID_OUTPUT'))
+  const withBridge = { candidates: [{ ...candidate, causalBridge: {
+    method: '方屿先逐项核对书单与实物。', change: '核对后可能发现数量差异，原有安排需要重新判断。',
+    methodBasisIds: ['m0'], changeBasisIds: ['m1'],
+  } }], questions: [] }
+  const parsed = parsePreparationCandidates(withBridge, material)
+  assert.equal(parsed.candidates[0]?.causalBridge?.methodBasisIds[0], 'm0')
+  assert.equal(parsed.candidates[0]?.causalBridge?.changeBasisIds[0], 'm1')
+  assert.throws(() => parsePreparationCandidates({ candidates: [{ ...candidate, causalBridge: {
+    method: '方屿先逐项核对书单与实物。', change: '方屿先逐项核对书单与实物。', methodBasisIds: ['m0'], changeBasisIds: ['m1'],
+  } }], questions: [] }, material), code('STORY_PREPARATION_INVALID_OUTPUT'))
+})
+
+test('editing a direction invalidates its derived causal bridge', () => {
+  const p = { protocol: 1 as const, status: 'needs-review' as const, sources: [source], material, candidates: [{ ...candidate,
+    causalBridge: { method: '先核对书单。', change: '核对后可能发现差异。', methodBasisIds: ['m0'], changeBasisIds: ['m1'] },
+  }], questions: [], acceptedCandidateIds: [], executed: false as const }
+  const accepted = acceptPreparation(p, [candidate.id], { originalText: '作者编辑方向', candidates: [{ id: candidate.id,
+    action: `${candidate.action} 改写`, possibleResult: `${candidate.possibleResult} 改写`, futureChoice: '' }] })
+  assert.equal(accepted.candidates[0]?.causalBridge, undefined)
+  assert.equal(accepted.originalCandidates?.[0]?.causalBridge?.method, '先核对书单。')
+})
+
+test('future choice review requires all causal bridges before directions can be shown', async () => {
+  const originalFetch = globalThis.fetch
+  const originalWarn = console.warn
+  const env = { key: process.env.DASHSCOPE_API_KEY, disable: process.env.STORY_DISABLE_MODEL, diagnostics: process.env.STORY_PREPARATION_DIAGNOSTICS }
+  process.env.DASHSCOPE_API_KEY = 'stub'; process.env.STORY_DISABLE_MODEL = 'false'; process.env.STORY_PREPARATION_DIAGNOSTICS = 'true'
+  const base = directions.map(({ futureChoice, causalBridge, ...rest }) => rest)
+  let calls = 0
+  const logs: string[] = []
+  console.warn = (...args: unknown[]) => { logs.push(args.map(String).join(' ')) }
+  globalThis.fetch = async (_url, init) => {
+    const request = JSON.parse(String(init?.body))
+    const input = JSON.parse(request.messages[1].content)
+    calls++
+    assert.equal(input.candidates.length, calls === 3 ? 2 : 3)
+    const content = calls === 1 || calls === 3
+      ? { bridges: input.candidates.map((item: typeof base[number]) => ({ id: item.id, method: item.action, change: item.possibleResult, methodBasisIds: ['m0'], changeBasisIds: ['m1'] })),
+          futureChoices: input.candidates.map((item: typeof base[number], index: number) => ({ id: item.id, text: `Future story tradeoff ${index}` })) }
+      : { checks: base.map((item, index) => ({ id: item.id, valid: index === 0,
+          reason: index ? 'Invented required resource' : 'Distinct future choice' })) }
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }] }))
+  }
+  try {
+    await assert.rejects(() => projectFutureChoices(base, [source], brief), code('STORY_PREPARATION_QUALITY_FAILED'))
+    assert.equal(calls, 4)
+    assert.ok(base.every(item => !('futureChoice' in item)))
+    const reviewLog = logs.find(line => line.startsWith('[preparation] review '))
+    assert.ok(reviewLog)
+    const decision = JSON.parse(reviewLog.slice('[preparation] review '.length))
+    assert.equal(decision.stage, 'future-choice')
+    assert.equal(decision.decision.checks[1].reason, 'Invented required resource')
+  } finally {
+    globalThis.fetch = originalFetch
+    console.warn = originalWarn
+    if (env.key === undefined) delete process.env.DASHSCOPE_API_KEY; else process.env.DASHSCOPE_API_KEY = env.key
+    if (env.disable === undefined) delete process.env.STORY_DISABLE_MODEL; else process.env.STORY_DISABLE_MODEL = env.disable
+    if (env.diagnostics === undefined) delete process.env.STORY_PREPARATION_DIAGNOSTICS; else process.env.STORY_PREPARATION_DIAGNOSTICS = env.diagnostics
+  }
+})
+
+test('invalid future choice review cannot release directions without causal bridges', async () => {
+  const originalFetch = globalThis.fetch
+  const env = { key: process.env.DASHSCOPE_API_KEY, disable: process.env.STORY_DISABLE_MODEL }
+  process.env.DASHSCOPE_API_KEY = 'stub'; process.env.STORY_DISABLE_MODEL = 'false'
+  const base = directions.map(({ futureChoice, causalBridge, ...rest }) => rest)
+  let calls = 0
+  globalThis.fetch = async (_url, init) => {
+    const request = JSON.parse(String(init?.body))
+    calls++
+    const content = calls === 1 || calls === 3
+      ? { bridges: base.map(item => ({ id: item.id, method: item.action, change: item.possibleResult, methodBasisIds: ['m0'], changeBasisIds: ['m1'] })),
+          futureChoices: base.map(item => ({ id: item.id, text: 'A future choice' })) }
+      : { checks: [{ id: base[0]!.id, valid: true, reason: 'Incomplete review' }] }
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }] }))
+  }
+  try {
+    await assert.rejects(() => projectFutureChoices(base, [source], brief), code('STORY_PREPARATION_INVALID_OUTPUT'))
+    assert.equal(calls, 4)
+  } finally {
+    globalThis.fetch = originalFetch
+    if (env.key === undefined) delete process.env.DASHSCOPE_API_KEY; else process.env.DASHSCOPE_API_KEY = env.key
+    if (env.disable === undefined) delete process.env.STORY_DISABLE_MODEL; else process.env.STORY_DISABLE_MODEL = env.disable
+  }
+})
+
+test('future choice repair rewrites only rejected direction and preserves approved bridges', async () => {
+  const originalFetch = globalThis.fetch
+  const env = { key: process.env.DASHSCOPE_API_KEY, disable: process.env.STORY_DISABLE_MODEL }
+  process.env.DASHSCOPE_API_KEY = 'stub'; process.env.STORY_DISABLE_MODEL = 'false'
+  const base = directions.map(({ futureChoice, causalBridge, ...rest }) => rest)
+  let calls = 0
+  globalThis.fetch = async (_url, init) => {
+    const request = JSON.parse(String(init?.body))
+    const input = JSON.parse(request.messages[1].content)
+    calls++
+    let content
+    if (calls === 1 || calls === 3) {
+      const expected = calls === 3 ? [base[1]!.id] : base.map(item => item.id)
+      assert.deepEqual(input.candidates.map((item: typeof base[number]) => item.id), expected)
+      if (calls === 3) assert.match(input.repairReasons[0].reason, /school system/)
+      content = { bridges: input.candidates.map((item: typeof base[number]) => ({ id: item.id,
+        method: calls === 3 ? 'Ask the park desk to verify the ticket' : `Method ${item.id}`,
+        change: calls === 3 ? 'Ticket verification may let her enter the park' : `Change ${item.id}`,
+        methodBasisIds: ['m0'], changeBasisIds: [] })),
+        futureChoices: input.candidates.map((item: typeof base[number]) => ({ id: item.id, text: calls === 3 ? 'Enter the park or ask the friend to wait' : `Choice ${item.id}` })) }
+    } else {
+      content = { checks: base.map((item, index) => ({ id: item.id, valid: calls === 4 || index !== 1,
+        reason: index === 1 && calls === 2 ? 'Unexplained school system link diverts the park goal' : 'Coherent story direction' })) }
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }] }))
+  }
+  try {
+    const projected = await projectFutureChoices(base, [source], brief)
+    assert.equal(calls, 4)
+    assert.equal(projected[0]?.causalBridge?.method, `Method ${base[0]!.id}`)
+    assert.equal(projected[1]?.causalBridge?.method, 'Ask the park desk to verify the ticket')
+    assert.equal(projected[1]?.causalBridge?.change, 'Ticket verification may let her enter the park')
+    assert.equal(projected[2]?.causalBridge?.method, `Method ${base[2]!.id}`)
+  } finally {
+    globalThis.fetch = originalFetch
+    if (env.key === undefined) delete process.env.DASHSCOPE_API_KEY; else process.env.DASHSCOPE_API_KEY = env.key
+    if (env.disable === undefined) delete process.env.STORY_DISABLE_MODEL; else process.env.STORY_DISABLE_MODEL = env.disable
+  }
+})
+
+test('approved causal bridges are attached to every direction', async () => {
+  const originalFetch = globalThis.fetch
+  const env = { key: process.env.DASHSCOPE_API_KEY, disable: process.env.STORY_DISABLE_MODEL }
+  process.env.DASHSCOPE_API_KEY = 'stub'; process.env.STORY_DISABLE_MODEL = 'false'
+  const base = directions.map(({ futureChoice, causalBridge, ...rest }) => rest)
+  let calls = 0
+  globalThis.fetch = async () => {
+    const content = ++calls === 1
+      ? { bridges: base.map(item => ({ id: item.id, method: item.action, change: item.possibleResult, methodBasisIds: ['m0'], changeBasisIds: ['m1'] })),
+          futureChoices: base.map(item => ({ id: item.id, text: 'A future choice' })) }
+      : { checks: base.map(item => ({ id: item.id, valid: true, reason: 'Bridge is coherent' })) }
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }] }))
+  }
+  try {
+    const projected = await projectFutureChoices(base, [source], brief)
+    assert.equal(calls, 2)
+    assert.ok(projected.every(item => item.causalBridge && item.futureChoice))
+  } finally {
+    globalThis.fetch = originalFetch
+    if (env.key === undefined) delete process.env.DASHSCOPE_API_KEY; else process.env.DASHSCOPE_API_KEY = env.key
+    if (env.disable === undefined) delete process.env.STORY_DISABLE_MODEL; else process.env.STORY_DISABLE_MODEL = env.disable
+  }
+})
+
 test('long reviewed text keeps exact evidence and history while stage titles satisfy the reasoning contract', async () => {
   const originalFetch = globalThis.fetch
   const env = { key: process.env.DASHSCOPE_API_KEY, disable: process.env.STORY_DISABLE_MODEL }
@@ -622,7 +908,7 @@ test('editing an action invalidates its old derived possible result while preser
   const unchangedResult = { originalText: '改动行动。', candidates: [{ id: candidate.id, action: '方屿改为先清点借阅记录。', possibleResult: candidate.possibleResult }] }
   assert.throws(() => acceptPreparation(p, [candidate.id], unchangedResult), code('STORY_PREPARATION_DERIVED_RESULT_STALE'))
   const revised = { ...unchangedResult, candidates: [{ ...unchangedResult.candidates[0]!, possibleResult: '新的行动结果仍待作者确认。', resultBasisIds: [] }] }
-  assert.throws(() => acceptPreparation(p, [candidate.id], revised), code('STORY_PREPARATION_REVISION_BASIS_REQUIRED'))
+  assert.deepEqual(acceptPreparation(p, [candidate.id], revised).candidates[0]?.resultBasisIds, [])
   assert.deepEqual(p.candidates, [candidate])
 })
 
@@ -672,7 +958,7 @@ test('missing goal role is recovered only by model selection of active original 
 test('explicit supersession preserves originals, requires reviewed replacement basis and excludes old material', () => {
   const p = { protocol: 1 as const, status: 'needs-review' as const, sources: [source], material, candidates: [candidate], questions: [], acceptedCandidateIds: [], executed: false as const }
   const review = { originalText: '计数可能发现差异，尚未计数。', supersededMaterialIds: ['m1'], confirmedQuotes: ['计数可能发现差异'], candidates: [{ id: 'count', action: candidate.action, possibleResult: '可能发现差异，尚未确认。' }] }
-  assert.throws(() => acceptPreparation(p, ['count'], review), code('STORY_PREPARATION_REVISION_BASIS_REQUIRED'))
+  assert.deepEqual(acceptPreparation(p, ['count'], review).candidates[0]?.resultBasisIds, [])
   const accepted = acceptPreparation(p, ['count'], { ...review, candidates: [{ ...review.candidates[0]!, resultBasisIds: ['author-review-1'] }] })
   assert.deepEqual(accepted.material, material)
   assert.deepEqual(accepted.originalCandidates, [candidate])

@@ -1368,7 +1368,10 @@ function parsePreparation(value: unknown): import('../../../shared/story-prepara
   })
   const parseCandidates = (items: unknown[]) => items.map(v => {
     const c = expectRecord(v)
+    const bridge = c.causalBridge === undefined ? undefined : expectRecord(c.causalBridge)
     return { id: readIdentifier(c, 'id'), action: readText(c, 'action'), possibleResult: readText(c, 'possibleResult'),
+      ...(c.futureChoice === undefined ? {} : { futureChoice: readText(c, 'futureChoice') }),
+      ...(bridge === undefined ? {} : { causalBridge: { method: readText(bridge, 'method'), change: readText(bridge, 'change'), methodBasisIds: readIdentifierList(bridge, 'methodBasisIds'), changeBasisIds: readIdentifierList(bridge, 'changeBasisIds') } }),
       materialIds: readIdentifierList(c, 'materialIds'), preconditionIds: readIdentifierList(c, 'preconditionIds'),
       resultBasisIds: readIdentifierList(c, 'resultBasisIds'), unknownIds: readIdentifierList(c, 'unknownIds') }
   })
@@ -1379,7 +1382,8 @@ function parsePreparation(value: unknown): import('../../../shared/story-prepara
     if (!Array.isArray(review.candidates)) throwInvalidResponse()
     authorReview = { originalText: readText(review, 'originalText'), candidates: review.candidates.map(v => {
       const c = expectRecord(v)
-      return { id: readIdentifier(c, 'id'), action: readText(c, 'action'), possibleResult: readText(c, 'possibleResult'), ...(c.resultBasisIds === undefined ? {} : { resultBasisIds: readIdentifierList(c, 'resultBasisIds') }) }
+      return { id: readIdentifier(c, 'id'), action: readText(c, 'action'), possibleResult: readText(c, 'possibleResult'),
+        ...(c.futureChoice === undefined ? {} : { futureChoice: readText(c, 'futureChoice') }), ...(c.resultBasisIds === undefined ? {} : { resultBasisIds: readIdentifierList(c, 'resultBasisIds') }) }
     }), ...(review.supersededMaterialIds === undefined ? {} : { supersededMaterialIds: readIdentifierList(review, 'supersededMaterialIds') }),
       ...(review.confirmedQuotes === undefined ? {} : { confirmedQuotes: readIdentifierList(review, 'confirmedQuotes') }) }
   }

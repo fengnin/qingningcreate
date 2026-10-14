@@ -10,20 +10,30 @@ export interface StoryPreparationQuestion {
   question: string
   materialIds: string[]
 }
+export interface StoryCausalBridge {
+  method: string
+  change: string
+  methodBasisIds: string[]
+  changeBasisIds: string[]
+}
 export interface StoryPreparationCandidate {
   id: string
   action: string
+  /** A provisional next-level story choice, not a character decision already made. */
+  futureChoice?: string
   materialIds: string[]
   preconditionIds: string[]
   /** A possible result, never a prediction certified by the server. */
   possibleResult: string
   resultBasisIds: string[]
   unknownIds: string[]
+  /** Internal causal bridge; all text remains future design, never execution. */
+  causalBridge?: StoryCausalBridge
 }
 /** Author-reviewed wording; accepting a future design is never execution. */
 export interface StoryPreparationReview {
   originalText: string
-  candidates: { id: string; action: string; possibleResult: string; resultBasisIds?: string[] }[]
+  candidates: { id: string; action: string; possibleResult: string; futureChoice?: string; resultBasisIds?: string[] }[]
   /** Explicit author revision; originals remain in material for audit. */
   supersededMaterialIds?: string[]
   confirmedQuotes?: string[]
