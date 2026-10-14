@@ -126,7 +126,7 @@ interface QwenRequest {
   model: string
   messages: QwenMessage[]
   temperature: number
-  max_tokens: number
+  max_tokens?: number
   response_format?: { type: 'json_object' }
   enable_thinking?: boolean
 }
@@ -135,7 +135,7 @@ interface QwenCompletionOptions {
   systemPrompt: string
   userPrompt: string
   temperature?: number
-  maxTokens?: number
+  maxTokens?: number | null
   diagnosticStage?: string
 }
 
@@ -165,7 +165,7 @@ export async function requestQwenJson({
       { role: 'user', content: userPrompt },
     ],
     temperature,
-    max_tokens: maxTokens,
+    ...(maxTokens === null ? {} : { max_tokens: maxTokens }),
     response_format: { type: 'json_object' },
   }
   // qwen-plus JSON Object mode is documented for non-thinking generation.

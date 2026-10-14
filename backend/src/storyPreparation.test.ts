@@ -582,10 +582,11 @@ test('opt-in preparation diagnostics retain passing quality judgments without ex
   globalThis.fetch = async (_url, init) => {
     const staged = stagedFixture(init); if (staged) return staged
     const request = JSON.parse(String(init?.body)), prompt = request.messages[0].content as string
+    if (prompt.includes('审查故事提案质量')) assert.equal(request.max_tokens, 1800)
     const output = prompt.includes('先整理作者材料') ? classification
       : prompt.includes('核对人物当下意图') ? { characterGoalIds: ['m0'] }
       : prompt.includes('从作者的想法提出恰好三种') ? { candidates: directions, questions: [] }
-      : qualityPass
+      : { ...qualityPass, checks: qualityPass.checks.map(check => ({ ...check, evidence: `${check.evidence}${'x'.repeat(250)}` })) }
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(output) } }] }))
   }
   try {
@@ -597,7 +598,7 @@ test('opt-in preparation diagnostics retain passing quality judgments without ex
     assert.equal(record.attempt, 1)
     assert.deepEqual(record.candidateIds, ['c0', 'c1', 'c2'])
     assert.equal(record.decision.checks.length, 5)
-    assert.equal(record.decision.checks[0].evidence, qualityPass.checks[0]!.evidence)
+    assert.ok(record.decision.checks[0].evidence.length > 240)
     assert.deepEqual(record.decision.issues, [])
     assert.ok(!reviewLog.includes('DASHSCOPE_API_KEY'))
   } finally {
@@ -841,17 +842,45 @@ test('approved causal bridges are attached to every direction', async () => {
   process.env.DASHSCOPE_API_KEY = 'stub'; process.env.STORY_DISABLE_MODEL = 'false'
   const base = directions.map(({ futureChoice, causalBridge, ...rest }) => rest)
   let calls = 0
-  globalThis.fetch = async () => {
+  globalThis.fetch = async (_url, init) => {
+    const request = JSON.parse(String(init?.body))
+    if (calls === 1) assert.equal('max_tokens' in request, false)
     const content = ++calls === 1
       ? { bridges: base.map(item => ({ id: item.id, method: item.action, change: item.possibleResult, methodBasisIds: ['m0'], changeBasisIds: ['m1'] })),
-          futureChoices: base.map(item => ({ id: item.id, text: 'A future choice' })) }
-      : { checks: base.map(item => ({ id: item.id, valid: true, reason: 'Bridge is coherent' })) }
+          futureChoices: base.map(item => ({ id: item.id, text: `A future choice ${'x'.repeat(110)}` })) }
+      : { checks: base.map(item => ({ id: item.id, valid: true, reason: `Bridge is coherent ${'x'.repeat(240)}` })) }
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }] }))
   }
   try {
     const projected = await projectFutureChoices(base, [source], brief)
     assert.equal(calls, 2)
     assert.ok(projected.every(item => item.causalBridge && item.futureChoice))
+    assert.ok(projected.every(item => item.futureChoice!.length > 100))
+  } finally {
+    globalThis.fetch = originalFetch
+    if (env.key === undefined) delete process.env.DASHSCOPE_API_KEY; else process.env.DASHSCOPE_API_KEY = env.key
+    if (env.disable === undefined) delete process.env.STORY_DISABLE_MODEL; else process.env.STORY_DISABLE_MODEL = env.disable
+  }
+})
+
+test('causal review reports the exact field when an explanation exceeds the safety limit', async () => {
+  const originalFetch = globalThis.fetch
+  const env = { key: process.env.DASHSCOPE_API_KEY, disable: process.env.STORY_DISABLE_MODEL }
+  process.env.DASHSCOPE_API_KEY = 'stub'; process.env.STORY_DISABLE_MODEL = 'false'
+  const base = directions.map(({ futureChoice, causalBridge, ...rest }) => rest)
+  let calls = 0
+  globalThis.fetch = async () => {
+    const content = ++calls % 2
+      ? { bridges: base.map(item => ({ id: item.id, method: item.action, change: item.possibleResult, methodBasisIds: ['m0'], changeBasisIds: ['m1'] })),
+          futureChoices: base.map(item => ({ id: item.id, text: 'A future choice' })) }
+      : { checks: base.map((item, index) => ({ id: item.id, valid: true, reason: index ? 'Coherent' : 'x'.repeat(501) })) }
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }] }))
+  }
+  try {
+    await assert.rejects(() => projectFutureChoices(base, [source], brief), (error: unknown) =>
+      error instanceof AppError && error.code === 'STORY_PREPARATION_INVALID_OUTPUT'
+      && /checks\[c0\]\.reason长度为 501，超过 500 字上限/.test(error.message))
+    assert.equal(calls, 4)
   } finally {
     globalThis.fetch = originalFetch
     if (env.key === undefined) delete process.env.DASHSCOPE_API_KEY; else process.env.DASHSCOPE_API_KEY = env.key

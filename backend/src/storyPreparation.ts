@@ -46,8 +46,9 @@ function list(value: unknown, max = 24): unknown[] {
   if (!Array.isArray(value) || value.length > max) invalid('列表缺失或过长。')
   return value as unknown[]
 }
-function text(value: unknown, max = 240): string {
-  if (typeof value !== 'string' || !value.trim() || value.length > max) invalid('文本缺失或过长。')
+function text(value: unknown, max = 240, field = '文本'): string {
+  if (typeof value !== 'string' || !value.trim()) return invalid(`${field}缺失。`)
+  if (value.length > max) return invalid(`${field}长度为 ${value.length}，超过 ${max} 字上限。`)
   return value as string
 }
 function ids(value: unknown, allowed: Set<string>, path = '引用'): string[] {
@@ -180,7 +181,7 @@ export function parsePreparationCandidates(value: unknown, material: StoryPrepar
     }
     const item: StoryPreparationCandidate = { id: text(c.id, 80), action: text(c.action), materialIds: candidateMaterialIds,
       preconditionIds: ids(c.preconditionIds, known, `candidates[${i}].preconditionIds`), possibleResult: text(c.possibleResult), resultBasisIds, unknownIds: ids(c.unknownIds, questionIds, `candidates[${i}].unknownIds`),
-      ...(c.futureChoice === undefined ? {} : { futureChoice: text(c.futureChoice, 100) }), ...(causalBridge ? { causalBridge } : {}) }
+      ...(c.futureChoice === undefined ? {} : { futureChoice: text(c.futureChoice, 240, `candidates[${i}].futureChoice`) }), ...(causalBridge ? { causalBridge } : {}) }
     for (const prose of [item.action, item.possibleResult, item.futureChoice].filter((value): value is string => !!value)) {
       if (hasProposalProtocolLeak(prose, material.map(m => m.quote))) invalid('故事提案不能包含内部引用字段或材料 ID；引用只放在引用数组。')
     }
@@ -212,7 +213,7 @@ function parseFutureChoiceProjection(raw: unknown, candidates: StoryPreparationC
   if (!coversCandidates(bridges, candidates)) invalid('因果桥没有覆盖全部方向。')
   const choices = list(output.futureChoices, candidates.length).map(value => {
     const item = object(value, ['id', 'text'])
-    return { id: text(item.id, 80), value: text(item.text, 100) }
+    return { id: text(item.id, 80), value: text(item.text, 240, 'futureChoices[].text') }
   })
   if (!coversCandidates(choices, candidates)) invalid('后续故事取舍没有覆盖全部方向。')
   return { bridges, choices }
@@ -251,17 +252,18 @@ method 是人物在方向卡眼前取舍中可能采取的办法，change 是办
           || bridge.changeBasisIds.some(id => !candidate.resultBasisIds.includes(id))) invalid(`${candidate.id} 因果桥引用或内容不合法。`)
       }
       const review = object(await requestQwenJson({
-        systemPrompt: `审查每条方向的“办法→处境变化→故事将推向”因果桥，不修改原困境。返回精确 JSON {checks:[{id,valid,reason}]}，每个 id 恰好一项，valid 为布尔值，reason 为简短具体原因。
+        systemPrompt: `审查每条方向的“办法→处境变化→故事将推向”因果桥，不修改原困境。返回精确 JSON {checks:[{id,valid,reason}]}，每个 id 恰好一项，valid 为布尔值，reason 点明关键证据与修复方向，尽量控制在 250 字内。
  逐条核对两个断点：一，决定结果的关键设定（机构间数据互通、专用资源、审批或设备能力等）在原文、方向或通常世界中是否有可信来由；普通服务、合理偶然和可拒绝的创作细节不因作者未写就拒绝。二，办法后的变化如何让人物更接近或远离原目标，或改变已经建立的关系；取舍不能转向与之无关的新任务。若不通过，reason 必须指出具体设定或偏航处及可修复方向，不能只说“缺少作者依据”。
  来源层级必须分清：sources 是作者材料；candidates 是系统已审、但仍可拒绝的方向；bridges 和 futureChoices 是本轮新设计。新设计中的一句“该通道为研学备案机制预留”不能反过来证明这个通道可信；具体、可验证、带数字的细节也不等于现实可信。若方向只提出“去询问能否人工核验”，桥却保证出现教育专用通道、跨机构自动同步、特殊权限或语音识别设备，且没有作者设定或方向内可信铺垫，应拒绝桥，不要把它夸成合理升级。另核对方向内已写明的限制：若人物只记得证件号后四位，不能靠“准确说出完整号码”作为解决办法。不要用后续取舍仍提到游乐园，就掩盖实际主冲突已转成学校数据或设备审批。
  其他条件：办法是眼前选择的自然发展，不是下一秒微动作；故事将推向的取舍比眼前操作更重要，仍是可拒绝的未来设计；不是重复修补、再等片刻、抽象说教或确定结局。新事件可以偶然出现，不要求它由上一行动造成，也不要求短方向卡交代完整来历；但办法后的变化不能再靠无关巧合、突然生效的设备功能或他人默认同意来完成。遗失门票后询问游客中心能否补办是可信的提案，不因作者未写补票流程就拒绝；但不能未经交代就保证凭他人身份证号代办成功。作者明确给出的架空规则应保留。可以留待曲线展开具体细节，不能仅因卡片尚未解释完毕就判失败。不能让作者或角色替另一人物接受改动。判断具体文本，不要因为它没有完整结局就拒绝。`,
         userPrompt: JSON.stringify({ sources, candidates: input.candidates, bridges, futureChoices: choices.map(choice => ({ id: choice.id, text: choice.value })) }),
-        temperature: 0.1, maxTokens: 800, diagnosticStage: 'preparation-future-choice-review',
+        temperature: 0.1, maxTokens: null, diagnosticStage: 'preparation-future-choice-review',
       }), ['checks'])
       const checks = list(review.checks, candidates.length).map(value => {
         const item = object(value, ['id', 'valid', 'reason'])
         if (typeof item.valid !== 'boolean') invalid('后续取舍审阅判断不合法。')
-        return { id: text(item.id, 80), valid: item.valid, reason: text(item.reason, 200) }
+        const id = text(item.id, 80)
+        return { id, valid: item.valid, reason: text(item.reason, 500, `checks[${id}].reason`) }
       })
       if (!coversCandidates(checks, candidates)) invalid('后续取舍审阅没有覆盖全部方向。')
       logPreparationReview('future-choice', attempt + 1, candidates.map(candidate => candidate.id), { checks })
@@ -463,11 +465,11 @@ ${storyCreativeIntentGuidance(brief, 'directions')}
           reviewMode: result.candidates.length ? authorAction ? '作者编辑的方向与可能发展核对' : '三条故事困境的共同目标、阻碍差异和选择因果核对' : '仅补充创作选择，不要求行动、结果或完整因果链' }),
         temperature: 0.1, maxTokens: 1800, diagnosticStage: 'preparation-quality-review',
       }), ['checks', 'issues'])
-      const issues = list(audit.issues, 8).map(v => text(v))
+      const issues = list(audit.issues, 8).map((v, i) => text(v, 500, `issues[${i}]`))
       const checks = list(audit.checks, 5).map(v => {
         const check = object(v, ['criterion', 'passed', 'evidence'])
         if (!preparationQualityCriteria.includes(check.criterion as typeof preparationQualityCriteria[number]) || typeof check.passed !== 'boolean') invalid('内容审阅维度或判断不合法。')
-        return { criterion: String(check.criterion), passed: check.passed, evidence: text(check.evidence) }
+        return { criterion: String(check.criterion), passed: check.passed, evidence: text(check.evidence, 320, `checks[${String(check.criterion)}].evidence`) }
       })
       if (checks.length !== 5 || new Set(checks.map(c => c.criterion)).size !== 5) invalid('内容审阅没有完成全部维度。')
       logPreparationReview('quality', attempt + 1, result.candidates.map(candidate => candidate.id), { checks, issues })
