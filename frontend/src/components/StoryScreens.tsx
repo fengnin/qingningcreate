@@ -91,7 +91,7 @@ export function OpeningScreen({ session }: { session: StorySession }) {
             <textarea
               value={session.idea}
               onChange={(event) => session.updateIdea(event.target.value)}
-              placeholder="例如：青柠想去游乐园玩"
+              placeholder="例如：青柠想在家里给朋友准备一场寻宝生日惊喜。"
               maxLength={maximumStoryIdeaLength}
               disabled={session.restoreLoading}
             />

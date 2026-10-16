@@ -33,9 +33,16 @@ class PreparationMaterialIdError extends AppError {
     super('材料 ID 必须唯一，且不能与 sources.id 相同。', 502, 'STORY_PREPARATION_INVALID_OUTPUT')
   }
 }
+const causalBridgeMaxAttempts = 3
 class PreparationQualityError extends AppError {
-  constructor(readonly issues: string[], readonly origin: 'directions' | 'causal-bridge' = 'directions') {
-    super('这个方向的内容审阅未通过，请换一个提案或调整想法；尚未生成故事曲线。', 502, 'STORY_PREPARATION_QUALITY_FAILED')
+  constructor(readonly issues: string[], readonly origin: 'directions' | 'causal-bridge' = 'directions', attempt = 1, issueTypes: string[] = []) {
+    super('这个方向的内容审阅未通过，请换一个提案或调整想法；尚未生成故事曲线。', 502, 'STORY_PREPARATION_QUALITY_FAILED',
+      undefined, undefined, undefined, {
+        stage: origin === 'causal-bridge' ? 'preparation-future-choice:content-review' : 'preparation-directions:content-review',
+        attempt, maxAttempts: origin === 'causal-bridge' ? causalBridgeMaxAttempts : 2,
+        // Categories only: author text and model criticism stay out of API diagnostics.
+        reason: [...new Set(issueTypes)].join(',') || 'content-review-rejected',
+      })
   }
 }
 const preparationQualityCriteria = ['facts', 'causality', 'requirements', 'author-control', 'questions'] as const
@@ -384,7 +391,7 @@ method 是人物在方向卡眼前取舍中可能采取的办法，change 是办
   let repairReasons: { id: string; issueType: string; reason: string; evidence?: BridgeEvidence[] }[] = []
   let projectionValidationFailure: string | undefined
   let previousProjectionOutput: unknown
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < causalBridgeMaxAttempts; attempt++) {
     try {
       const pending = attempt && repairReasons.length ? candidates.filter(candidate => repairReasons.some(issue => issue.id === candidate.id)) : candidates
       const pendingInput = { ...input, candidates: input.candidates.filter(candidate => pending.some(item => item.id === candidate.id)),
@@ -481,12 +488,12 @@ ${storySemanticReviewGuidance}`,
       logPreparationReview('future-choice', attempt + 1, reviewCandidates.map(candidate => candidate.id), { checks })
       const rejected = checks.filter(check => !check.valid)
       if (rejected.length) {
-        if (!attempt) {
+        if (attempt + 1 < causalBridgeMaxAttempts) {
           repairReasons = rejected.map(check => stateChecks.has(check.id)
             ? { id: check.id, issueType: check.issueType, reason: check.reason } : bridgeRepairDiagnostic(check))
           continue
         }
-        throw new PreparationQualityError(rejected.map(check => `${check.id} 因果桥：${check.reason}`), 'causal-bridge')
+        throw new PreparationQualityError(rejected.map(check => `${check.id} 因果桥：${check.reason}`), 'causal-bridge', attempt + 1, rejected.map(check => check.issueType))
       }
       const bridgeById = new Map(bridges.map(bridge => [bridge.id, bridge]))
       const choiceById = new Map(choices.map(choice => [choice.id, choice.value]))
@@ -872,7 +879,7 @@ ${storyCreativeFocusGuidance}
       if (!issues.length) for (const check of checks.filter(c => !c.passed)) issues.push(`${check.criterion}：${check.evidence}`)
       return issues
       })
-      if (issues.length) throw new PreparationQualityError(issues)
+      if (issues.length) throw new PreparationQualityError(issues, 'directions', attempt + 1)
       if (result.candidates.length) {
         const projected = await projectFutureChoices(result.candidates, sources, brief, mainlineAnchors, mainlineGoals, creativeFocus)
         return { ...result, candidates: projected }

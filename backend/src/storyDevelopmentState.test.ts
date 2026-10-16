@@ -161,12 +161,12 @@ for (const defect of ['state', 'capability'] as const) test(`local ${defect} mis
   })
 })
 
-test('a repeated declared contradiction exhausts one local repair without releasing the bad direction', async () => {
+test('a repeated declared contradiction exhausts two local repairs without releasing the bad direction', async () => {
   let generations = 0, reviews = 0
   await withModel(async () => {
     await assert.rejects(() => projectFutureChoices(candidates().slice(0, 1), [source], brief),
       (error: unknown) => error instanceof AppError && error.code === 'STORY_PREPARATION_QUALITY_FAILED')
-    assert.equal(generations, 2)
+    assert.equal(generations, 3)
     assert.equal(reviews, 0)
   }, (stage, input) => {
     assert.equal(stage, 'preparation-future-choice'); generations++

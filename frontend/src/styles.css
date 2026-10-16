@@ -683,13 +683,105 @@ textarea:focus-visible {
   padding: 48px 0;
 }
 
-.curve-empty-state .generation-error {
-  margin: 0;
+.preparation-recovery {
+  width: min(680px, 100%);
+  margin: 0 auto;
+  padding: clamp(28px, 5vw, 52px) 0;
+  border-top: 1px solid #41534a;
+  animation: sceneEnter 320ms ease both;
 }
 
-.curve-empty-state .generation-error .primary-action {
-  width: max-content;
+.preparation-recovery-copy .eyebrow {
+  margin: 0 0 16px;
+  color: #e28a70;
+}
+
+.preparation-recovery-copy h1 {
+  margin: 0;
+  color: #f2f4ee;
+  font-family: Georgia, "Songti SC", serif;
+  font-size: clamp(30px, 4vw, 44px);
+  font-weight: 500;
+  line-height: 1.35;
+  text-wrap: balance;
+}
+
+.preparation-recovery-copy > p:not(.eyebrow) {
+  max-width: 520px;
+  margin: 16px 0 0;
+  color: #b8c5bc;
+  font-size: 14px;
+  line-height: 1.85;
+  overflow-wrap: anywhere;
+}
+
+.preparation-recovery-draft {
+  margin-top: 36px;
+  padding: 24px 0;
+  border-top: 1px solid #35483e;
+  border-bottom: 1px solid #35483e;
+}
+
+.preparation-recovery-draft > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #a5b9aa;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.preparation-recovery-draft blockquote {
+  max-height: 240px;
+  margin: 14px 0 0;
+  overflow-y: auto;
+  color: #e2e9df;
+  font-family: Georgia, "Songti SC", serif;
+  font-size: clamp(18px, 2vw, 22px);
+  line-height: 1.8;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.preparation-recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
   margin-top: 16px;
+}
+
+.preparation-recovery-actions button {
+  min-height: 44px;
+}
+
+.preparation-recovery .preparation-recovery-actions {
+  gap: 12px 24px;
+  margin-top: 28px;
+}
+
+.preparation-recovery .preparation-recovery-actions button {
+  min-height: 46px;
+}
+
+.preparation-recovery .primary-action {
+  min-width: 146px;
+}
+
+.preparation-recovery .text-action {
+  color: #becbc0;
+}
+
+.preparation-recovery .text-action:hover {
+  color: #f1aa97;
+}
+
+.preparation-recovery .primary-action svg {
+  transition: transform 180ms ease;
+}
+
+.preparation-recovery .primary-action:hover svg {
+  transform: rotate(-30deg);
 }
 
 .curve-building {
@@ -5200,9 +5292,6 @@ textarea:focus-visible {
 .preparation-direction-column > .preparation-proposal + .preparation-proposal { margin-top: 8px; }
 .preparation-direction-column > .preparation-proposal + .text-action { margin-top: 18px; }
 .preparation-building-map { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.preparation-recovery-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; margin-top: 16px; }
-.preparation-recovery-actions button { min-height: 44px; }
-.preparation-recovery-idea { margin: 16px 0; padding-left: 16px; border-left: 2px solid #65786d; white-space: pre-wrap; overflow-wrap: anywhere; }
 .preparation-generation-feedback { margin-bottom: 20px; padding: 18px 20px; border-left: 2px solid #82947c; background: #1b3028; color: #d7e1d7; line-height: 1.8; }
 .preparation-generation-feedback strong { font-size: 14px; font-weight: 500; }
 .preparation-generation-feedback p { margin: 8px 0 0; font-size: 13px; color: #b7c6b9; }

@@ -162,7 +162,7 @@ export function CreativeBriefScreen({ session }: { session: StorySession }) {
 
           <label className="brief-permission">
             <input type="checkbox" checked={brief.allowSystemNamedCharacters} onChange={(event) => setBrief((current) => ({ ...current, allowSystemNamedCharacters: event.target.checked }))} disabled={isLoading} />
-            <span><strong>允许系统提出具名人物</strong><small>关闭时，系统只使用“陌生人”“工作人员”等匿名称呼。</small></span>
+            <span><strong>允许系统提出具名人物</strong><small>关闭时，系统不给人物起具体名字。</small></span>
           </label>
 
           {session.stageError && <p className="cocreation-error" role="alert"><CircleAlert size={16} /> {session.stageError}</p>}
@@ -397,8 +397,8 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
 }
 
 function preparationErrorMessage(session: StorySession) {
-  if (session.stageErrorCode === 'STORY_PREPARATION_QUALITY_FAILED') return '这次故事方向没能合理接上你的想法。可以重新构思，也可以修改想法后再试。'
-  if (session.stageErrorCode === 'STORY_PREPARATION_INVALID_OUTPUT') return '这次故事方向没有整理完整。可以重新构思；你的想法无需重复填写。'
+  if (session.stageErrorCode === 'STORY_PREPARATION_QUALITY_FAILED') return '模型生成的内容存在不确定性，本次结果未通过系统审阅。请再试一次。'
+  if (session.stageErrorCode === 'STORY_PREPARATION_INVALID_OUTPUT') return '这次没能整理出完整的方向，可以用原来的想法再试一次。'
   return session.stageError
 }
 
@@ -439,17 +439,19 @@ function ProvisionalCurveEmptyState({ session, isLoading }: { session: StorySess
             </blockquote>
           </div>
         ) : session.stageError ? (
-          <div className="generation-error" role="alert">
-            <CircleAlert size={17} />
-            <div>
-              <strong>这次方向还没准备好</strong>
+          <div className="preparation-recovery">
+            <div className="preparation-recovery-copy" role="alert">
+              <p className="eyebrow">故事方向</p>
+              <h1>故事方向暂未生成</h1>
               <p>{preparationErrorMessage(session)}</p>
-              <p>你的想法仍保留在这里。</p>
-              <blockquote className="preparation-recovery-idea">{session.trimmedIdea}</blockquote>
-              <div className="preparation-recovery-actions">
-                <button className="primary-action" type="button" onClick={() => void session.retryCurrentStage()}>重新构思 <RefreshCcw size={16} /></button>
-                <button className="text-action" type="button" onClick={session.goBackToOpening}><PencilLine size={16} /> 修改想法</button>
-              </div>
+            </div>
+            <div className="preparation-recovery-draft">
+              <span><Check size={14} aria-hidden="true" /> 你的想法已保留</span>
+              <blockquote>{session.trimmedIdea}</blockquote>
+            </div>
+            <div className="preparation-recovery-actions">
+              <button className="primary-action" type="button" onClick={() => void session.retryCurrentStage()}><RefreshCcw size={16} aria-hidden="true" /> 再试一次</button>
+              <button className="text-action" type="button" onClick={session.goBackToOpening}><PencilLine size={15} aria-hidden="true" /> 修改想法</button>
             </div>
           </div>
         ) : <p className="setup-lead">故事方向还没有生成。</p>}

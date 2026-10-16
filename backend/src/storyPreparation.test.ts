@@ -301,8 +301,15 @@ test('author fact conflict requires a real quote and stops before plausibility r
     return new Response(JSON.stringify({ choices: [{ message: { content: modelJson(projectionWire(output), init) } }] }))
   }
   try {
-    await assert.rejects(() => projectFutureChoices(base, [storySource], brief), code('STORY_PREPARATION_QUALITY_FAILED'))
-    assert.equal(factReviews, 2)
+    await assert.rejects(() => projectFutureChoices(base, [storySource], brief), (error: unknown) => {
+      assert.ok(error instanceof AppError)
+      assert.equal(error.code, 'STORY_PREPARATION_QUALITY_FAILED')
+      assert.deepEqual(error.modelDiagnostic, { stage: 'preparation-future-choice:content-review',
+        attempt: 3, maxAttempts: 3, reason: 'author-conflict' })
+      assert.ok(!JSON.stringify(error.modelDiagnostic).includes(storySource.text))
+      return true
+    })
+    assert.equal(factReviews, 3)
     assert.equal(worldReviews, 0)
   } finally {
     globalThis.fetch = originalFetch
@@ -399,7 +406,7 @@ test('causal bridge review rejects a change that replaces the authored place', a
   }
   try {
     await assert.rejects(() => projectFutureChoices(base, [{ id: 'author-input', text: '青柠和朋友去游乐园玩。' }], brief, anchors), code('STORY_PREPARATION_QUALITY_FAILED'))
-    assert.equal(calls, 6)
+    assert.equal(calls, 9)
   } finally {
     globalThis.fetch = originalFetch
     if (env.key === undefined) delete process.env.DASHSCOPE_API_KEY; else process.env.DASHSCOPE_API_KEY = env.key
@@ -485,7 +492,7 @@ test('prebuilt causal bridges still receive mainline review before directions ar
   try {
     await assert.rejects(() => generateStoryPreparation(idea, brief), code('STORY_PREPARATION_QUALITY_FAILED'))
     assert.equal(reviews, 1)
-    assert.equal(continuationReviews, 2)
+    assert.equal(continuationReviews, 3)
   } finally {
     globalThis.fetch = originalFetch
     if (env.key === undefined) delete process.env.DASHSCOPE_API_KEY; else process.env.DASHSCOPE_API_KEY = env.key
@@ -937,7 +944,13 @@ test('content rejection gets one model revision and stays distinct from structur
     return new Response(JSON.stringify({ choices: [{ message: { content: modelJson(projectionWire(output), init) } }] }), { status: 200 })
   }
   try {
-    await assert.rejects(() => generateStoryPreparation(source.text, brief), code('STORY_PREPARATION_QUALITY_FAILED'))
+    await assert.rejects(() => generateStoryPreparation(source.text, brief), (error: unknown) => {
+      assert.ok(error instanceof AppError)
+      assert.equal(error.code, 'STORY_PREPARATION_QUALITY_FAILED')
+      assert.deepEqual(error.modelDiagnostic, { stage: 'preparation-directions:content-review',
+        attempt: 2, maxAttempts: 2, reason: 'content-review-rejected' })
+      return true
+    })
     assert.equal(proposals, 2)
     assert.equal(reviews, 2)
   } finally {
@@ -1399,10 +1412,10 @@ test('future choice review requires all causal bridges before directions can be 
     const input = JSON.parse(request.messages[1].content)
     calls++
     if (input.candidates) assert.equal(input.candidates.length, calls >= 4 ? 2 : 3)
-    const content = calls === 1 || calls === 4
+    const content = calls === 1 || calls === 4 || calls === 7
       ? { bridges: input.candidates.map((item: typeof base[number]) => ({ id: item.id, method: item.action, change: item.possibleResult, methodBasisIds: ['m0'], changeBasisIds: ['m1'] })),
           futureChoices: input.candidates.map((item: typeof base[number], index: number) => ({ id: item.id, text: `Future story tradeoff ${index}` })) }
-      : calls === 2 || calls === 5 ? factPass(input.candidates.map((item: typeof base[number]) => item.id))
+      : calls === 2 || calls === 5 || calls === 8 ? factPass(input.candidates.map((item: typeof base[number]) => item.id))
        : { checks: input.proposals.map((item: typeof base[number]) => ({ id: item.id, valid: item.id === base[0]!.id,
            issueType: item.id === base[0]!.id ? 'none' : 'world-implausible',
            reason: item.id !== base[0]!.id ? 'Invented required resource' : 'Distinct future choice' })) }
@@ -1410,11 +1423,11 @@ test('future choice review requires all causal bridges before directions can be 
   }
   try {
     await assert.rejects(() => projectFutureChoices(base, [source], brief), code('STORY_PREPARATION_QUALITY_FAILED'))
-    assert.equal(calls, 6)
+    assert.equal(calls, 9)
     assert.ok(base.every(item => !('futureChoice' in item)))
     const proposals = logs.filter(line => line.startsWith('[preparation] projection '))
       .map(line => JSON.parse(line.slice('[preparation] projection '.length)))
-    assert.deepEqual(proposals.map(proposal => [proposal.attempt, proposal.bridges.length]), [[1, 3], [2, 2]])
+    assert.deepEqual(proposals.map(proposal => [proposal.attempt, proposal.bridges.length]), [[1, 3], [2, 2], [3, 2]])
     const reviewLog = logs.find(line => line.startsWith('[preparation] review '))
     assert.ok(reviewLog)
     const decision = JSON.parse(reviewLog.slice('[preparation] review '.length))
@@ -1498,6 +1511,58 @@ test('future choice repair rewrites only rejected direction and preserves approv
     assert.equal(projected[1]?.causalBridge?.method, 'Ask the park desk to verify the ticket')
     assert.equal(projected[1]?.causalBridge?.change, 'Ticket verification may let her enter the park')
     assert.equal(projected[2]?.causalBridge?.method, `Method ${base[2]!.id}`)
+  } finally {
+    globalThis.fetch = originalFetch
+    if (env.key === undefined) delete process.env.DASHSCOPE_API_KEY; else process.env.DASHSCOPE_API_KEY = env.key
+    if (env.disable === undefined) delete process.env.STORY_DISABLE_MODEL; else process.env.STORY_DISABLE_MODEL = env.disable
+  }
+})
+
+test('third causal review round repairs only the remaining rejection and keeps earlier approvals', async () => {
+  const originalFetch = globalThis.fetch
+  const env = { key: process.env.DASHSCOPE_API_KEY, disable: process.env.STORY_DISABLE_MODEL }
+  process.env.DASHSCOPE_API_KEY = 'stub'; process.env.STORY_DISABLE_MODEL = 'false'
+  const base = directions.map(({ futureChoice, causalBridge, ...rest }) => rest)
+  const original = structuredClone(base)
+  const batches: string[][] = [], reviewBatches: string[][] = []
+  let round = 0
+  globalThis.fetch = async (_url, init) => {
+    const request = JSON.parse(String(init?.body)), input = JSON.parse(request.messages[1].content)
+    const prompt = request.messages[0].content as string
+    let output: unknown
+    if (prompt.startsWith('你是故事大纲编辑')) {
+      round++
+      batches.push(input.candidates.map((c: { id: string }) => c.id))
+      assert.deepEqual(input.candidates, original.filter(c => batches.at(-1)!.includes(c.id))
+        .map(({ id, action, possibleResult, materialIds, resultBasisIds }) => ({ id, action, possibleResult, materialIds, resultBasisIds })))
+      if (round === 3) {
+        assert.deepEqual(input.repairReasons.map((r: { id: string }) => r.id), [base[2]!.id])
+        assert.equal(input.repairReasons[0].issueType, 'mainline-drift')
+        assert.equal(input.previousProjections[0].bridge.method, `Round 2 method ${base[2]!.id}`)
+      }
+      output = { bridges: input.candidates.map((c: { id: string }) => ({ id: c.id,
+        method: `Round ${round} method ${c.id}`, change: `Round ${round} change ${c.id}`,
+        methodBasisIds: ['m0'], changeBasisIds: [] })),
+        futureChoices: input.candidates.map((c: { id: string }) => ({ id: c.id, text: `Round ${round} choice ${c.id}` })) }
+    } else if (prompt.startsWith('核对因果桥是否违背作者已定事实')) {
+      output = factPass(input.candidates.map((c: { id: string }) => c.id))
+    } else {
+      reviewBatches.push(input.proposals.map((c: { id: string }) => c.id))
+      output = { checks: input.proposals.map((c: { id: string }) => {
+        const valid = round === 3 || round === 2 && c.id === base[1]!.id || c.id === base[0]!.id
+        return { id: c.id, valid, issueType: valid ? 'none' : round === 2 ? 'mainline-drift' : 'causal-gap',
+          reason: valid ? 'The consequences still affect the original choice.' : 'The current development loses the original choice.' }
+      }) }
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: modelJson(projectionWire(output), init) } }] }))
+  }
+  try {
+    const result = await projectFutureChoices(base, [source], brief)
+    const expected = [base.map(c => c.id), [base[1]!.id, base[2]!.id], [base[2]!.id]]
+    assert.deepEqual(batches, expected)
+    assert.deepEqual(reviewBatches, expected)
+    assert.deepEqual(result.map(c => c.causalBridge!.method), base.map((c, i) => `Round ${i + 1} method ${c.id}`))
+    assert.deepEqual(base, original)
   } finally {
     globalThis.fetch = originalFetch
     if (env.key === undefined) delete process.env.DASHSCOPE_API_KEY; else process.env.DASHSCOPE_API_KEY = env.key
