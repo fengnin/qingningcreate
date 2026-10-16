@@ -19,6 +19,8 @@ import {
   reviseSessionPreparation,
   parseStoryPreparationSuggestionRequest,
   suggestSessionPreparationGoal,
+  parseStoryPreparationExplanationRequest,
+  suggestSessionPreparationExplanation,
   parseStoryPreparationRevisionRequest,
   parseStoryPreparationAcceptanceRequest,
   parseStoryPreparationSupplementRequest,
@@ -128,6 +130,8 @@ registerStoryStage('/api/story/preparation/revise', parseStoryPreparationRevisio
   (result) => result satisfies StoryCurveMutationResponse)
 registerStoryStage('/api/story/preparation/suggest-goal', parseStoryPreparationSuggestionRequest, suggestSessionPreparationGoal,
   (result) => result satisfies { suggestion: string })
+registerStoryStage('/api/story/preparation/explanation', parseStoryPreparationExplanationRequest, suggestSessionPreparationExplanation,
+  (result) => result)
 registerStoryStage('/api/story/preparation/supplement', parseStoryPreparationSupplementRequest, reviewSessionPreparationSupplement,
   (result) => result satisfies StoryCurveMutationResponse)
 

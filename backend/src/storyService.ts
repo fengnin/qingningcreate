@@ -41,6 +41,8 @@ import {
 } from './storyClarification.js'
 import { randomUUID } from 'node:crypto'
 import { generateStoryPreparation, generateCurveFromPreparation, parsePreparationReview, reviseStoryPreparation } from './storyPreparation.js'
+import { parseExplanationWording, suggestPreparationExplanation } from './storyPreparationExplanation.js'
+import type { StoryPreparationExplanationRequest } from '../../shared/story-preparation-request.js'
 import { selectedExpansionNeeds, storyExpansionGuidance } from './storyBridgeReview.js'
 import type { StoryPreparationAcceptanceRequest, StoryPreparationSupplementRequest, StoryPreparationRevisionRequest } from '../../shared/story-preparation-request.js'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
@@ -3097,6 +3099,29 @@ export async function reviseSessionPreparation(request: StoryPreparationRevision
 export function parseStoryPreparationSuggestionRequest(body: unknown): StorySessionVersion & { curveId: string } {
   const r = parseRequestRecord(body, ['storyId', 'revision', 'curveId'])
   return { ...parseStorySessionReference(r), curveId: readIdentifier(r, 'curveId', '请选择当前草案。', invalidRequestContext) }
+}
+
+export function parseStoryPreparationExplanationRequest(body: unknown): StoryPreparationExplanationRequest {
+  const r = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'candidate'])
+  const c = parseRequestRecord(r.candidate, ['id', 'action', 'possibleResult', 'futureChoice'])
+  const { id, ...wording } = c
+  const parsed = parseExplanationWording(wording)
+  if ([parsed.action, parsed.possibleResult, parsed.futureChoice ?? ''].some(t => t.length > 240)) {
+    throw new AppError('方向文字每项最多240字。', 400, 'INVALID_REQUEST')
+  }
+  return { ...parseStorySessionReference(r), curveId: readIdentifier(r, 'curveId', '请选择当前草案。', invalidRequestContext),
+    candidate: { id: readIdentifier(c, 'id', '请选择当前方向。', invalidRequestContext), ...parsed } }
+}
+
+export async function suggestSessionPreparationExplanation(request: StoryPreparationExplanationRequest) {
+  const session = getStorySession(request.storyId, request.revision)
+  const curve = requireDraftCurve(session, request.curveId)
+  if (!curve.preparation || curve.beats.length || session.confirmedCurve || session.currentTurn || session.history.length) {
+    throw new AppError('当前不在故事方向编辑阶段。', 409, 'STORY_PREPARATION_NOT_PENDING')
+  }
+  const preview = await suggestPreparationExplanation(curve.preparation, request.candidate)
+  assertStorySessionRevision(session, request.revision)
+  return preview
 }
 
 export async function suggestSessionPreparationGoal(request: StorySessionVersion & { curveId: string }): Promise<{ suggestion: string }> {
@@ -9152,7 +9177,7 @@ const storySystemPrompt = `你是一位擅长中文短篇小说的作者和编�
 
 必须严格返回 JSON 对象，不要 Markdown，不要解释，不要代码块。输出内容使用简体中文。正文不要写成大纲；用自然段完成叙事。必须遵循故事种子、用户选择的困境、头尾与已确认路径账本。账本中的每项行动和当下结果都是既成事实，必须按顺序写进正文；账本刻意不含“后续牵引”，不能自行把尚未发生的风险、线索或代价写成已注定的具体行动或结果。锁定目标必须始终是这篇故事的主线；结尾必须由收束回合的实际行动自然兑现预定高潮的语义、已确认的结局结果并回应开头线索。允许在结尾补足不改变关键因果的自然过渡动作，不能借此补写关键资源、权限、关系或外部结果。
 
-写作前先在内部核对：人物、地点、时间、交通工具、座位和道具的状态是否连续；关键事件是否有铺垫或能由人物行动、已有情境合理引出，人物办法是否改变处境并影响选择；结尾是否有足够铺垫。不要求每件事都由上一步直接造成。已选方向中仍被实际路径采用的待展开事项，可以自然补足其必要铺垫、关键动作与回应；不借此推翻明确限制、未知或已确认结果。篇幅按故事路径自然展开，不以固定字数或段落数作为完成条件。不要为制造高潮临时增加关键关系、承诺、交通安排、道具功能或人物身份。`
+写作前先在内部核对：人物、地点、时间、交通工具、座位和道具的状态是否连续；关键事件是否有铺垫或能由人物行动、已有情境合理引出，人物办法是否改变处境并影响选择；结尾是否有足够铺垫。不要求每件事都由上一步直接造成。已选方向中仍被实际路径采用的待展开事项，应自然兑现其重要因果、人物变化、情绪效果、反差或前后呼应；普通细节可自行补足，不能因未标记就省略必要表现；不借此替作者决定未选分支或推翻明确限制、未知及已确认结果，不逐条堆砌说明。篇幅按故事路径自然展开，不以固定字数或段落数作为完成条件。不要为制造高潮临时增加关键关系、承诺、交通安排、道具功能或人物身份。`
 
 const storyBodyConsistencyReviewSystemPrompt = `你是一位严谨但不过度保守的中文故事编辑。你的任务是审核候选正文是否保留了已确认的故事路径，不负责润色或续写。
 
@@ -9161,7 +9186,7 @@ const storyBodyConsistencyReviewSystemPrompt = `你是一位严谨但不过度�
 只报告以下问题：
 1. missing-path-item：账本中的关键行动、即时结果、开场阻碍或实际收束在正文中缺失；
 2. contradiction：正文把账本中已确认的人物、物品、时间、地点、行动或结果写成了不兼容的另一种状态；
-3. unsupported-critical-detail：正文新加的精确时间、资源、权限、他人决定、进入方式、查询结果等内容承担了关键因果，却没有来自账本或最终状态的依据；已选方向的待展开事项若仍被实际路径采用，允许自然补足其中已有提案的铺垫、动作和回应，不因其未逐字出现在账本就拒绝；但不能借此引入新的特殊能力、权限或改变已确认事实。仍采用的关键转折缺少必要铺垫或动作连接，也用此类型具体指出；
+3. unsupported-critical-detail：正文新加的精确时间、资源、权限、他人决定、进入方式、查询结果等内容承担了关键因果，却没有来自账本或最终状态的依据；已选方向的待展开事项若仍被实际路径采用，允许自然表现已有设计的重要因果、人物变化、情绪效果、反差与呼应，不因具体表现未逐字出现在账本就拒绝；但不能借此引入新的特殊能力、权限、未选分支或改变已确认事实。仍采用的关键转折缺少必要铺垫或动作连接，也用此类型具体指出；不能仅因没有逐条照抄标记、普通细节省略、情绪不够强烈或笑点不够好就报一致性错误；
 4. creative-intent-mismatch：作者选择的感觉、戏剧力量或“你更想看到什么”的创作要求，在已确认路径中已有具体事件支撑，但正文只贴标签、插入无关桥段、复述愿望或俏皮对白，没有通过行动与后果体现。只有明确的实质偏离才报告，不能为此要求增添未确认事件；若路径本身缺少兑现要求所需的关键事件，不得让正文凭空补造，也不得把正文审阅通过解释为要求已经兑现。pathId 写 body。
 
 实际收束必须以语义方式兑现预定结尾约束中的 climax、resolution 和 openingClue；若未兑现或相互矛盾，使用 contradiction 或 missing-path-item，并将 pathId 写为 conclusion。

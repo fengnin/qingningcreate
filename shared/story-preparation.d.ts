@@ -34,10 +34,21 @@ export interface StoryCausalBridge {
   methodBasisIds: string[]
   changeBasisIds: string[]
 }
-/** A writing obligation anchored to the current proposal, never a new fact or
- * a reviewer-authored solution. Only relevant while that proposal is retained. */
+/** Editable explanation of a particular draft; never author facts or proof. */
+export interface StoryPreparationExplanation {
+  wording: { action: string; possibleResult: string; futureChoice?: string }
+  method: string
+  change: string
+  issues: string[]
+  /** Optional for older saved explanations; adopted notes travel to prose. */
+  expansionNeeds?: StoryExpansionNeed[]
+  source: 'author' | 'system'
+}
+/** An important story effect to realize in prose, anchored to the adopted design.
+ * Ordinary omitted details do not need notes; undecided plot choices stay with
+ * the author. Never a new fact or a reviewer-authored solution. */
 export interface StoryExpansionNeed {
-  kind: 'setup' | 'action-detail' | 'response-detail'
+  kind: 'setup' | 'action-detail' | 'response-detail' | 'character-detail' | 'emotional-beat' | 'payoff'
   anchors: { field: 'action' | 'possibleResult' | 'method' | 'change' | 'futureChoice'; quote: string }[]
 }
 export interface StoryPreparationCandidate {
@@ -53,12 +64,13 @@ export interface StoryPreparationCandidate {
   unknownIds: string[]
   /** Internal causal bridge; all text remains future design, never execution. */
   causalBridge?: StoryCausalBridge
+  explanation?: StoryPreparationExplanation
   expansionNeeds?: StoryExpansionNeed[]
 }
 /** Author-reviewed wording; accepting a future design is never execution. */
 export interface StoryPreparationReview {
   originalText: string
-  candidates: { id: string; action: string; possibleResult: string; futureChoice?: string; resultBasisIds?: string[] }[]
+  candidates: { id: string; action: string; possibleResult: string; futureChoice?: string; resultBasisIds?: string[]; explanation?: StoryPreparationExplanation }[]
   /** Explicit author revision; originals remain in material for audit. */
   supersededMaterialIds?: string[]
   confirmedQuotes?: string[]

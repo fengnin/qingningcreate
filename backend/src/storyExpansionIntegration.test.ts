@@ -5,7 +5,10 @@ import { generateStory } from './storyService.js'
 
 // Synthetic confirmed path: this test checks propagation and bounded repair,
 // not model story judgment. Real Qwen verification is recorded separately.
-const expansionNeeds = [{ kind: 'setup' as const, anchors: [{ field: 'method' as const, quote: '用随身的戏服伪装，走向出口。' }] }]
+const expansionNeeds = [
+  { kind: 'setup' as const, anchors: [{ field: 'method' as const, quote: '用随身的戏服伪装，走向出口。' }] },
+  { kind: 'payoff' as const, anchors: [{ field: 'change' as const, quote: '仍穿着戏服的阿禾向熟人坦白，躲藏的装扮反倒让这一刻显得坦诚又好笑。' }] },
+]
 const plan: StoryPlan = {
   seed: { subject: '阿禾', activeSituation: '阿禾想悄悄离开后台。', lockedGoal: '离开后台', lockedFacts: [],
     worldMode: 'realistic-default', expansionScope: 'keep-scale', unknowns: [] },
@@ -49,9 +52,12 @@ test('final writing and its consistency review receive expansion needs, and a mi
     } else {
       writing++
       assert.match(user, /不是作者新增限制/)
+      assert.match(user, /人物或关系变化/)
+      assert.match(user, /反差或前后呼应/)
+      assert.match(user, /未确定的主要办法、关键选择和结果仍由创作者/)
       if (writing > 1) assert.match(user, /使用戏服之前缺少自然铺垫/)
       reply = { body: writing === 1 ? '阿禾穿上戏服，被熟人认出后坦白，熟人让开了通道。'
-        : '阿禾原本来后台送洗好的戏服，包里还剩一件。他披上它走向出口，仍被熟人认出。阿禾坦白来意，熟人笑着让开了通道。' }
+        : '阿禾原本来后台送洗好的戏服，包里还剩一件。他披上它走向出口，仍被熟人认出。他扯了扯宽大的戏服，索性挺直身子坦白来意，熟人忍着笑让开了通道。' }
     }
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(reply) } }] }))
   }

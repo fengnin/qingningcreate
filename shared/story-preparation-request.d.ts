@@ -22,3 +22,9 @@ export interface StoryPreparationRevisionRequest {
   candidateId?: string
   authorAction?: string
 }
+export interface StoryPreparationExplanationRequest {
+  storyId: string
+  revision: number
+  curveId: string
+  candidate: { id: string; action: string; possibleResult: string; futureChoice?: string }
+}

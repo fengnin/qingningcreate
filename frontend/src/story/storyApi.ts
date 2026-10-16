@@ -1,4 +1,5 @@
 import type { StoryReasoningProposal } from '../../../shared/story-reasoning-contract.js'
+import type { StoryPreparationExplanation } from '../../../shared/story-preparation.js'
 import type {
   ApiErrorResponse,
   GeneratedStory,
@@ -96,6 +97,39 @@ export function requestPreparationRevision(request: import('../../../shared/stor
 }
 export function requestPreparationGoalSuggestion(request: { storyId: string; revision: number; curveId: string }): Promise<string> {
   return postJson('/api/story/preparation/suggest-goal', request, payload => readText(expectRecord(payload), 'suggestion'))
+}
+export function requestPreparationExplanation(request: import('../../../shared/story-preparation-request.js').StoryPreparationExplanationRequest): Promise<StoryPreparationExplanation> {
+  return postJson('/api/story/preparation/explanation', request, parsePreparationExplanation)
+}
+
+function parsePreparationExplanation(payload: unknown): StoryPreparationExplanation {
+  const r = expectRecord(payload)
+  const wording = expectRecord(r.wording)
+  if (r.source !== 'author' && r.source !== 'system') throw new Error(INVALID_RESPONSE_MESSAGE)
+  if (!Array.isArray(r.issues) || r.issues.length > 3 || r.issues.some(i => typeof i !== 'string' || !i.trim() || i.length > 240)) throw new Error(INVALID_RESPONSE_MESSAGE)
+  if (wording.futureChoice !== undefined && typeof wording.futureChoice !== 'string') throw new Error(INVALID_RESPONSE_MESSAGE)
+  const explanation: StoryPreparationExplanation = { wording: { action: readVerbatimAnswer(wording.action), possibleResult: readVerbatimAnswer(wording.possibleResult),
+    ...(wording.futureChoice === undefined ? {} : { futureChoice: wording.futureChoice as string }) },
+    method: readVerbatimAnswer(r.method), change: readVerbatimAnswer(r.change), issues: r.issues as string[], source: r.source,
+    ...(r.expansionNeeds === undefined ? {} : { expansionNeeds: parsePreparationExpansionNeeds(r.expansionNeeds) }) }
+  const prose = { ...explanation.wording, method: explanation.method, change: explanation.change }
+  if (explanation.expansionNeeds?.some(need => need.anchors.some(a => prose[a.field] !== a.quote))) throwInvalidResponse()
+  return explanation
+}
+
+function parsePreparationExpansionNeeds(value: unknown): import('../../../shared/story-preparation.js').StoryExpansionNeed[] {
+  if (!Array.isArray(value) || value.length > 2) return throwInvalidResponse()
+  return value.map(value => {
+    const need = expectRecord(value)
+    if (!['setup', 'action-detail', 'response-detail', 'character-detail', 'emotional-beat', 'payoff'].includes(String(need.kind))
+      || !Array.isArray(need.anchors) || !need.anchors.length || need.anchors.length > 3) throwInvalidResponse()
+    return { kind: need.kind as import('../../../shared/story-preparation.js').StoryExpansionNeed['kind'],
+      anchors: (need.anchors as unknown[]).map(value => {
+        const anchor = expectRecord(value)
+        if (!['action', 'possibleResult', 'method', 'change', 'futureChoice'].includes(String(anchor.field))) throwInvalidResponse()
+        return { field: anchor.field as import('../../../shared/story-preparation.js').StoryExpansionNeed['anchors'][number]['field'], quote: readVerbatimAnswer(anchor.quote) }
+      }) }
+  })
 }
 
 export function requestCurveBeatUpdate(request: StoryCurveBeatUpdateRequest): Promise<StoryCurveMutationResponse> {
@@ -1369,21 +1403,11 @@ function parsePreparation(value: unknown): import('../../../shared/story-prepara
   const parseCandidates = (items: unknown[]) => items.map(v => {
     const c = expectRecord(v)
     const bridge = c.causalBridge === undefined ? undefined : expectRecord(c.causalBridge)
-    const expansionNeeds = c.expansionNeeds === undefined ? undefined
-      : (Array.isArray(c.expansionNeeds) && c.expansionNeeds.length <= 2 ? c.expansionNeeds : throwInvalidResponse()).map(value => {
-        const need = expectRecord(value)
-        if (!['setup', 'action-detail', 'response-detail'].includes(String(need.kind))
-          || !Array.isArray(need.anchors) || !need.anchors.length || need.anchors.length > 3) throwInvalidResponse()
-        return { kind: need.kind as import('../../../shared/story-preparation.js').StoryExpansionNeed['kind'],
-          anchors: (need.anchors as unknown[]).map(value => {
-            const anchor = expectRecord(value)
-            if (!['action', 'possibleResult', 'method', 'change', 'futureChoice'].includes(String(anchor.field))) throwInvalidResponse()
-            return { field: anchor.field as import('../../../shared/story-preparation.js').StoryExpansionNeed['anchors'][number]['field'], quote: readText(anchor, 'quote') }
-          }) }
-      })
-    return { id: readIdentifier(c, 'id'), action: readText(c, 'action'), possibleResult: readText(c, 'possibleResult'),
+    const expansionNeeds = c.expansionNeeds === undefined ? undefined : parsePreparationExpansionNeeds(c.expansionNeeds)
+    return { id: readIdentifier(c, 'id'), action: readVerbatimAnswer(c.action), possibleResult: readVerbatimAnswer(c.possibleResult),
+      ...(c.explanation === undefined ? {} : { explanation: parsePreparationExplanation(c.explanation) }),
       ...(expansionNeeds ? { expansionNeeds } : {}),
-      ...(c.futureChoice === undefined ? {} : { futureChoice: readText(c, 'futureChoice') }),
+      ...(c.futureChoice === undefined ? {} : { futureChoice: readVerbatimAnswer(c.futureChoice) }),
       ...(bridge === undefined ? {} : { causalBridge: { method: readText(bridge, 'method'), change: readText(bridge, 'change'), methodBasisIds: readIdentifierList(bridge, 'methodBasisIds'), changeBasisIds: readIdentifierList(bridge, 'changeBasisIds') } }),
       materialIds: readIdentifierList(c, 'materialIds'), preconditionIds: readIdentifierList(c, 'preconditionIds'),
       resultBasisIds: readIdentifierList(c, 'resultBasisIds'), unknownIds: readIdentifierList(c, 'unknownIds') }
@@ -1396,7 +1420,8 @@ function parsePreparation(value: unknown): import('../../../shared/story-prepara
     authorReview = { originalText: readText(review, 'originalText'), candidates: review.candidates.map(v => {
       const c = expectRecord(v)
       return { id: readIdentifier(c, 'id'), action: readText(c, 'action'), possibleResult: readText(c, 'possibleResult'),
-        ...(c.futureChoice === undefined ? {} : { futureChoice: readText(c, 'futureChoice') }), ...(c.resultBasisIds === undefined ? {} : { resultBasisIds: readIdentifierList(c, 'resultBasisIds') }) }
+        ...(c.futureChoice === undefined ? {} : { futureChoice: c.futureChoice === '' ? '' : readText(c, 'futureChoice') }), ...(c.resultBasisIds === undefined ? {} : { resultBasisIds: readIdentifierList(c, 'resultBasisIds') }),
+        ...(c.explanation === undefined ? {} : { explanation: parsePreparationExplanation(c.explanation) }) }
     }), ...(review.supersededMaterialIds === undefined ? {} : { supersededMaterialIds: readIdentifierList(review, 'supersededMaterialIds') }),
       ...(review.confirmedQuotes === undefined ? {} : { confirmedQuotes: readIdentifierList(review, 'confirmedQuotes') }) }
   }

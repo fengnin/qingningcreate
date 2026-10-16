@@ -1,9 +1,12 @@
 import { randomUUID } from 'node:crypto'
+import { parsePreparationExplanation } from './storyPreparationExplanation.js'
+import { activePreparationMaterial } from './storyPreparationContext.js'
+export { activePreparationMaterial } from './storyPreparationContext.js'
 import { hasProposalProtocolLeak } from './storyProposalProse.js'
 import { storyCreativeIntentGuidance, storyCreativeFocusGuidance, preparationCreativeFocus } from './storyCreativeIntent.js'
 import { storyDevelopmentGuidance, storyDevelopmentRepairGuidance, storySemanticReviewGuidance, storyTechnicalReviewGuidance } from './storySemanticReview.js'
 import { developmentStateGuidance, developmentStateIssues, type DevelopmentState } from './storyDevelopmentState.js'
-import { bridgeRepairDiagnostic, parseBridgeReviewCheck, bridgeEvidenceCatalog, type BridgeEvidence } from './storyBridgeReview.js'
+import { bridgeRepairDiagnostic, parseBridgeReviewCheck, bridgeEvidenceCatalog, storyDirectionDetailGuidance, type BridgeEvidence } from './storyBridgeReview.js'
 import { generateSceneDraft, sceneAuthorRequirements } from './storySceneDraft.js'
 import { AppError, requestQwenJson, withModelDiagnostic } from './qwen.js'
 import { preparationOutputSchemas as schemas, preparationQualitySchema, projectionOutputSchema, causalReviewOutputSchema, factReviewOutputSchema } from './storyOutputSchemas.js'
@@ -346,15 +349,15 @@ export const causalBridgeReviewPrompt = `审查每条方向的“办法→处境
 按以下顺序判断，不增设检查任务：
 1. 读出这次尝试实际造成或引出的变化，再看变化怎样影响后续选择。处境变化包括失败、恶化、暴露、失去机会、新信息及关系改变；它不等于改善处境或完成原目标。人物的错误办法带来负面后果，再迫使人物取舍，本身就是推进。暂时稳住一次谈话与问题随后加剧可以同时成立，不能把局部效果读成彻底解决。
 2. 按完整提案连接事件，不把字段当成隔离的事实快照。method写尝试，change可以首次写接下来的动作、发现、道具遗失或他人回应，不要求在method预先重复。change已经写出的外显动作、他人观察或回应就是提案内容，不能又以method没写同一动作判缺失。分清设备效果与人物反应：设备未产生声音或信号，不妨碍他人看见使用者的动作、迟疑并开口回应。人物到达场所、接触他人或尝试办法，可以引出相关偶遇和新事件。不要求每件事都由上一步直接造成；只在不断空降无关麻烦、人物办法及其后果不再影响选择时判断裂。
-3. 对可能的缺口先判断能否在正文自然展开。普通动作、对白、携带或学会日常工具的背景、他人观察和合理配合，无须在方向卡上详述。已经提出交谈、请求、试用等可行办法，但用预期效果概括了关键过程、尚未设计具体说法或回应时，判expandable，留给正文表现该尝试如何发生；不要求在大纲中证明一句话必定引起某种心理反应。允许按题材惯例创作新设定，不从未写出的地方推断“必定没有”；尤其不得假定某种魔法、资格或心理反应是唯一途径，再据此拒绝。若只是重要转折的铺垫或过程尚未表现，保留方向，把对应原文标成待展开；若普通细节仍无法使结果成立，必须替换关键办法、结果或推翻明确限制，才是实质问题。
+3. 对可能的缺口先判断能否在正文自然展开。${storyDirectionDetailGuidance}不要求在大纲中证明一句话必定引起某种心理反应。允许按题材惯例创作新设定，不从未写出的地方推断“必定没有”；尤其不得假定某种魔法、资格或心理反应是唯一途径，再据此拒绝。
 4. 最后只拦截实质问题：办法与声称的关键结果没有可用的作用途径；明确否定的状态被当成已成立；核心机制明显不可能或违反该故事明确规则；后续转向与原愿望、关系及代价全无连接。已明确失效的渠道不能悄悄产生输出，存储内容不能在没有读取或传递途径时被解码播放，证据不能直接证明其不包含的信息。关键结果不能仅靠“共振、感应、同步”等名称成立；普通可用工具不要求内部实现，奇幻按其自洽规则判断，不以现实不存在为由拒绝。人物可以猜测、误会或尝试，但未证实不能叙述成已证实，可能发生不能变成成功保证。
 后续选择可以包含尚未执行的新行动或条件分支，也可以由已发生的事触发目标转变、主动牺牲原打算；核对原愿望、风险、关系或承诺是否仍影响取舍的意义和代价，不要求每一步更接近原任务。developmentState只是待核对的生成计划，不能取代正文、证明能力，也不能据它凭空推断正文没写的限制。不同人物、时间、物品与信息状态须按上下文区分。
 ${storyTechnicalReviewGuidance}
 只返回以下三种结论：
 - supported：方向已成立。普通省略不产生待办，不因还有其他发展可能或人物未用最优办法拒绝。
-- expandable：方向可成立，但一处重要铺垫或过程需在正文兑现；不改目标、关键办法、结果或选择。needs最多两项，只选当前提案原文编号与类别：setup=转折前的必要铺垫，action-detail=已有办法的关键尝试过程，response-detail=已有变化对应的回应。不得写具体修改方案、增加认证、秘密能力或设备功能来绕过限制。
+- expandable：方向可成立，同时有值得正文兑现的重要因果支撑、人物变化、情绪效果、反差或前后呼应；不改目标、关键办法、结果或选择。needs最多两项，优先保留影响故事的一两处，只选当前提案原文编号与上述故事作用类别。普通细节交给正文，不为填满配额打标。不得写具体修改方案、增加认证、秘密能力或设备功能来绕过限制。
 - contradictory：存在上述实质问题。issueType为causal-gap（作用途径或状态承接断裂、无关麻烦替代行动）、mainline-drift（与原问题及其选择代价失去联系）、world-implausible（关键机制明显不可能或自相矛盾）。复杂、技术或手续多不是独立判错标准。
-返回紧凑JSON {checks:[{id,verdict,reason,issueType,evidenceIds,needs}]}，每个输入id恰好一次，六个字段全给，不输出valid。supported用issueType:"none",evidenceIds:[],needs:[]。expandable用issueType:"none",evidenceIds:[],needs:[{kind,evidenceIds}]；kind只用setup、action-detail、response-detail，每项选择当前提案1至3个原文编号。contradictory用needs:[]、上述issueType及2至4个不同evidenceIds，至少一个来自当前提案，其余来自当前提案或作者材料。
+返回紧凑JSON {checks:[{id,verdict,reason,issueType,evidenceIds,needs}]}，每个输入id恰好一次，六个字段全给，不输出valid。supported用issueType:"none",evidenceIds:[],needs:[]。expandable用issueType:"none",evidenceIds:[],needs:[{kind,evidenceIds}]；kind只用setup、action-detail、response-detail、character-detail、emotional-beat、payoff，每项选择当前提案1至3个原文编号。contradictory用needs:[]、上述issueType及2至4个不同evidenceIds，至少一个来自当前提案，其余来自当前提案或作者材料。
 evidenceCatalog的id由程序保留原文，不重抄quote、不引用其他方向或内部developmentState。拒绝依据须真正支持所称断裂：状态矛盾选冲突双方，机制断裂选办法与声称结果，偏航选原愿望或已有后果与脱离它的后续。reason不超过180字，只解释实际判断，不建议新情节；不能仅凭未写细节、失败后处境变差、审阅者自定的必要条件拒绝。先作实际判断，再保证verdict、reason及引用一致；重审仍覆盖全部输入id。`
 
 export async function projectFutureChoices(candidates: StoryPreparationCandidate[], sources: StoryPreparation['sources'], brief: CreativeBrief,
@@ -931,9 +934,9 @@ export function parsePreparationReview(value: unknown, acceptedIds: string[]): S
   const candidates = r.candidates.map(v => {
     if (!v || typeof v !== 'object' || Array.isArray(v)) return fail()
     const c = v as Record<string, unknown>
-    if (Object.keys(c).some(k => !['id','action','possibleResult','futureChoice','resultBasisIds'].includes(k)) || typeof c.id !== 'string' || !acceptedIds.includes(c.id) || !validText(c.action) || !validText(c.possibleResult) || (c.futureChoice !== undefined && c.futureChoice !== '' && !validText(c.futureChoice))) return fail()
+    if (Object.keys(c).some(k => !['id','action','possibleResult','futureChoice','resultBasisIds','explanation'].includes(k)) || typeof c.id !== 'string' || !acceptedIds.includes(c.id) || !validText(c.action) || !validText(c.possibleResult) || (c.futureChoice !== undefined && c.futureChoice !== '' && !validText(c.futureChoice))) return fail()
     if (c.resultBasisIds !== undefined && (!Array.isArray(c.resultBasisIds) || c.resultBasisIds.some(id => typeof id !== 'string') || new Set(c.resultBasisIds).size !== c.resultBasisIds.length)) return fail()
-    return { id: c.id, action: c.action, possibleResult: c.possibleResult, ...(c.futureChoice === undefined ? {} : { futureChoice: c.futureChoice as string }), ...(c.resultBasisIds === undefined ? {} : { resultBasisIds: c.resultBasisIds as string[] }) }
+    return { id: c.id, action: c.action, possibleResult: c.possibleResult, ...(c.futureChoice === undefined ? {} : { futureChoice: c.futureChoice as string }), ...(c.resultBasisIds === undefined ? {} : { resultBasisIds: c.resultBasisIds as string[] }), ...(c.explanation === undefined ? {} : { explanation: parsePreparationExplanation(c.explanation) }) }
   })
   if (candidates.length !== acceptedIds.length || new Set(candidates.map(c => c.id)).size !== candidates.length) return fail()
   const supersededMaterialIds = r.supersededMaterialIds === undefined ? undefined : r.supersededMaterialIds
@@ -944,15 +947,6 @@ export function parsePreparationReview(value: unknown, acceptedIds: string[]): S
   return { originalText: r.originalText, candidates,
     ...(supersededMaterialIds === undefined ? {} : { supersededMaterialIds: supersededMaterialIds as string[] }),
     ...(confirmedQuotes === undefined ? {} : { confirmedQuotes: confirmedQuotes as string[] }) }
-}
-
-/** Only explicitly selected quotations are confirmed material. Raw review
- * includes future actions and must never be imported wholesale as facts. */
-export function activePreparationMaterial(p: StoryPreparation): StoryPreparationItem[] {
-  const superseded = new Set(p.authorReview?.supersededMaterialIds ?? [])
-  return [...p.material.filter(m => !superseded.has(m.id)), ...(p.authorReview?.confirmedQuotes ?? []).map((quote, i) => ({
-    id: `author-review-${i + 1}`, role: 'condition' as const, sourceId: 'author-review', quote,
-  }))]
 }
 
 /** Classification is model work, never a server keyword inference. A missing
@@ -982,13 +976,20 @@ export function acceptPreparation(p: StoryPreparation, acceptedCandidateIds: str
     for (const revised of authorReview.candidates) {
       const original = p.candidates.find(candidate => candidate.id === revised.id)
       if (!original) continue
+      const reviewedExplanation = revised.explanation
+        && revised.explanation.wording.action === revised.action
+        && revised.explanation.wording.possibleResult === revised.possibleResult
+        && (revised.explanation.wording.futureChoice ?? '') === (revised.futureChoice ?? original.futureChoice ?? '')
+      if (revised.explanation && !reviewedExplanation) {
+        throw new AppError('卡片已再次修改，请核对当前内容的解释，旧解释仍保留供查看。', 409, 'STORY_PREPARATION_EXPLANATION_STALE')
+      }
       // An edited action invalidates its derived possible result. Do not let a
       // client carry the old prediction forward under the new action; the
       // original candidate remains in originalCandidates for audit/history.
-      if (revised.action !== original.action && revised.possibleResult === original.possibleResult) {
+      if (!reviewedExplanation && revised.action !== original.action && revised.possibleResult === original.possibleResult) {
         throw new AppError('作者改动了行动，但仍沿用旧的可能结果；请重新审阅并明确新的结果或保留未知。', 409, 'STORY_PREPARATION_DERIVED_RESULT_STALE')
       }
-      if ((revised.action !== original.action || revised.possibleResult !== original.possibleResult)
+      if (!reviewedExplanation && (revised.action !== original.action || revised.possibleResult !== original.possibleResult)
         && revised.futureChoice === original.futureChoice && original.futureChoice) {
         throw new AppError('作者改动了方向或可能走向，请修改或清空旧的后续故事取舍。', 409, 'STORY_PREPARATION_DERIVED_RESULT_STALE')
       }
@@ -1001,9 +1002,11 @@ export function acceptPreparation(p: StoryPreparation, acceptedCandidateIds: str
       if (!reviewed) return c
       const merged = { ...c, ...reviewed }
       if (reviewed.futureChoice === '') delete merged.futureChoice
-      if (reviewed.action !== c.action || reviewed.possibleResult !== c.possibleResult) delete merged.causalBridge
       if (reviewed.action !== c.action || reviewed.possibleResult !== c.possibleResult
-        || reviewed.futureChoice !== undefined && reviewed.futureChoice !== c.futureChoice) delete merged.expansionNeeds
+        || reviewed.futureChoice !== undefined && reviewed.futureChoice !== c.futureChoice || reviewed.explanation) delete merged.causalBridge
+      if (reviewed.action !== c.action || reviewed.possibleResult !== c.possibleResult
+        || reviewed.futureChoice !== undefined && reviewed.futureChoice !== c.futureChoice || reviewed.explanation) delete merged.expansionNeeds
+      if (reviewed.explanation?.expansionNeeds?.length) merged.expansionNeeds = structuredClone(reviewed.explanation.expansionNeeds)
       return merged
     }) } : {}) }
   // A revised quote does not automatically prove the old causal claim.
@@ -1050,7 +1053,8 @@ current-state 的 materialIds 非空；所有行动阶段（trigger、escalation
       actionMaterialIds: c.materialIds, resultMaterialIds: c.resultBasisIds })) } },
   // Derived projections remain in the session for review. This stage only
   // arranges exact accepted quotations, so do not offer projections as text.
-  acceptedCandidates: selected.map(({ causalBridge, futureChoice, ...candidate }) => candidate), authorReview: p.authorReview ?? null,
+  acceptedCandidates: selected.map(({ causalBridge, futureChoice, explanation, ...candidate }) => candidate),
+  authorReview: p.authorReview ? { ...p.authorReview, candidates: p.authorReview.candidates.map(({ explanation, ...candidate }) => candidate) } : null,
   ...(omittedOnFirstAttempt ? { coverageReview: { omittedMaterialIds: omittedOnFirstAttempt, instruction: '上一预览遗漏这些作者材料。重新审阅各节点的背景、约束及保留替代路径；只显式引用实际承接的材料，不改写行动或补因果。无法承接的仍留给作者决定，不伪造覆盖。' } } : {}) }), temperature: 0.2, maxTokens: 2400, diagnosticStage: 'preparation-curve-generation', outputSchema: schemas.arrangement }
   const parseArrangement = (output: unknown) => {
   const r = object(output, ['steps', 'supplements']), kinds = ['current-state','trigger','escalation','climax-choice','resolution'] as const

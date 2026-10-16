@@ -5258,6 +5258,20 @@ textarea:focus-visible {
 .preparation-editor label { display: grid; gap: 8px; color: #b7c6b9; font-size: 13px; }
 .preparation-editor textarea { width: 100%; min-height: 112px; padding: 14px; border: 1px solid #52665a; background: #14231f; color: #edf3ec; border-radius: 6px; font: inherit; font-size: 15px; line-height: 1.8; resize: vertical; }
 .preparation-editor .text-action { justify-self: start; }
+.preparation-explanation-status { color: #e8ac83; font-size: 12px; }
+.preparation-explanation-actions { display: flex; flex-wrap: wrap; gap: 12px 20px; margin: 12px 0; }
+.preparation-explanation .is-stale { border-left: 2px solid #8d775b; padding-left: 12px; }
+.preparation-explanation-preview, .preparation-explanation-editor { margin: 16px 0; padding: 16px 0; border-top: 1px solid #52665a; }
+.preparation-explanation-editor { display: grid; gap: 12px; }
+.preparation-explanation-editor label { display: grid; gap: 6px; }
+.preparation-explanation-editor textarea { box-sizing: border-box; width: 100%; min-height: 90px; padding: 12px; border: 1px solid #52665a; background: #14231f; color: #edf3ec; border-radius: 6px; font: inherit; resize: vertical; }
+.preparation-explanation-issues { color: #e8b898; }
+.preparation-explanation-expansion { margin-top: 12px; padding-left: 12px; border-left: 2px solid #89aa98; color: #c1d1c8; }
+.preparation-explanation-expansion p { margin: 6px 0; white-space: pre-wrap; }
+.preparation-expansion-editor { display: grid; gap: 10px; }
+.preparation-expansion-editor select { width: 100%; padding: 8px; border: 1px solid #52665a; border-radius: 6px; background: #14231f; color: #edf3ec; font: inherit; }
+.preparation-explanation-issues p { margin: 6px 0; white-space: pre-wrap; }
+.preparation-explanation > details > section { padding-top: 12px; border-top: 1px solid #36483e; }
 .preparation-question { padding: 24px 0; border-top: 1px solid #c6cec1; line-height: 1.8; }
 .preparation-question h2 { font-size: 20px; font-weight: 500; }
 .preparation-question .text-action { margin-right: 16px; }

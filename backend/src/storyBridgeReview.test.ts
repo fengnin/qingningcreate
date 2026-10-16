@@ -49,6 +49,20 @@ test('expansion notes contain only current proposal excerpts and a category, nev
   assert.deepEqual(rejected.expansionNeeds, [])
 })
 
+test('story-effect categories retain canonical anchors and cannot smuggle new plot decisions', () => {
+  for (const kind of ['character-detail', 'emotional-beat', 'payoff']) {
+    const decision = { id: 'd0', verdict: 'expandable', reason: '保留已选设计的故事作用。', issueType: 'none', evidenceIds: [],
+      needs: [{ kind, evidenceIds: ['p0-action'] }] }
+    assert.deepEqual(parseBridgeReviewCheck(decision, catalog).expansionNeeds,
+      [{ kind, anchors: [{ field: 'action', quote: proposal.action }] }])
+    for (const need of [
+      { kind, evidenceIds: ['p1-action'] },
+      { kind, evidenceIds: ['a0'] },
+      { kind, evidenceIds: ['p0-action'], solution: '最终选择另一条路线。' },
+    ]) assert.throws(() => parseBridgeReviewCheck({ ...decision, needs: [need] }, catalog))
+  }
+})
+
 test('expansion is non-blocking, preserved across unrelated repairs and never forwarded as a new repair', async () => {
   let generations = 0, reviews = 0
   await withModel((stage, input) => {
