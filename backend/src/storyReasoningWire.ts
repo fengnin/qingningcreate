@@ -18,17 +18,36 @@ export function parseStoryReasoningWire(value: unknown, context: StoryReasoningV
   const r = object(value, 'output')
   if (r.protocol !== 2) invalid('protocol')
   if ('designReview' in r) invalid('designReview（仅服务器记录作者审阅）')
+  const sourceReference = (sourceId: unknown, path: string) => {
+    const source = context.sources.find(source => source.id === sourceId)
+    if (!source || !source.text.trim() || source.text.length > 240) return invalid(path)
+    return { sourceId: source.id, quote: source.text }
+  }
+  const evidence = (value: unknown, path: string) => {
+    if (!Array.isArray(value)) return invalid(path)
+    return value.map((entry, index) => {
+      const ref = object(entry, `${path}[${index}]`)
+      if ('quote' in ref) { exact(ref, ['sourceId', 'quote'], path); return ref }
+      exact(ref, ['sourceId'], path)
+      return sourceReference(ref.sourceId, path)
+    })
+  }
   const node = (value: unknown, path: string, extra: string[] = []) => {
     const n = object(value, path); exact(n, ['id', 'content', ...extra], path)
     const c = object(n.content, `${path}.content`)
     const { content: _content, ...rest } = n
+    if (c.kind === 'source') {
+      exact(c, ['kind', 'sourceId'], `${path}.content`)
+      const ref = sourceReference(c.sourceId, `${path}.content`)
+      return { ...rest, text: ref.quote, basis: { kind: 'author-text', evidence: [ref] } }
+    }
     if (c.kind === 'quote') {
       exact(c, ['kind', 'sourceId', 'quote'], `${path}.content`)
       return { ...rest, text: c.quote, basis: { kind: 'author-text', evidence: [{ sourceId: c.sourceId, quote: c.quote }] } }
     }
     if (c.kind === 'proposal') {
       exact(c, ['kind', 'text', 'evidence', 'unknownIds'], `${path}.content`)
-      return { ...rest, text: c.text, basis: { kind: 'design-proposal', evidence: c.evidence, unknownIds: c.unknownIds } }
+      return { ...rest, text: c.text, basis: { kind: 'design-proposal', evidence: evidence(c.evidence, `${path}.content.evidence`), unknownIds: c.unknownIds } }
     }
     if (c.kind === 'unknown') {
       exact(c, ['kind', 'text', 'unknownIds'], `${path}.content`)

@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { outputShapeErrors, type OutputSchema } from './modelOutputSchema.js'
 import type {
   StoryConflictCoreContextPrefill,
   StoryConflictCoreSystemDraft,
@@ -58,7 +59,7 @@ export function withModelDiagnostic(
   diagnostic: ModelFailureDiagnostic,
 ): AppError {
   if (error instanceof AppError) {
-    const modelDiagnostic = error.code === 'QWEN_REQUEST_BUDGET_EXHAUSTED'
+    const modelDiagnostic = ['QWEN_REQUEST_BUDGET_EXHAUSTED', 'QWEN_OUTPUT_SCHEMA_FAILED', 'QWEN_OUTPUT_SCHEMA_UNSUPPORTED'].includes(error.code)
       ? {
           ...diagnostic,
           ...error.modelDiagnostic,
@@ -127,7 +128,7 @@ interface QwenRequest {
   messages: QwenMessage[]
   temperature: number
   max_tokens?: number
-  response_format?: { type: 'json_object' }
+  response_format?: { type: 'json_object' } | { type: 'json_schema'; json_schema: { name: string; strict: true; schema: OutputSchema } }
   enable_thinking?: boolean
 }
 
@@ -137,6 +138,7 @@ interface QwenCompletionOptions {
   temperature?: number
   maxTokens?: number | null
   diagnosticStage?: string
+  outputSchema?: OutputSchema
 }
 
 export async function requestQwenJson({
@@ -145,6 +147,7 @@ export async function requestQwenJson({
   temperature = 0.8,
   maxTokens = 2_500,
   diagnosticStage = 'qwen-json',
+  outputSchema,
 }: QwenCompletionOptions): Promise<unknown> {
   // Keep local contract and end-to-end checks deterministic without requiring
   // network access. Production behavior is unchanged unless this explicit
@@ -166,7 +169,9 @@ export async function requestQwenJson({
     ],
     temperature,
     ...(maxTokens === null ? {} : { max_tokens: maxTokens }),
-    response_format: { type: 'json_object' },
+    response_format: outputSchema ? { type: 'json_schema', json_schema: {
+      name: diagnosticStage.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64), strict: true, schema: outputSchema,
+    } } : { type: 'json_object' },
   }
   // qwen-plus JSON Object mode is documented for non-thinking generation.
   // Do not silently change mode while the workflow expects parseable JSON.
@@ -174,9 +179,38 @@ export async function requestQwenJson({
   const requestAttempts = defaultQwenRequestAttempts
 
   try {
-    return await sendRequestWithRetry(request, apiKey, diagnosticStage, requestAttempts)
+    let output = await sendRequestWithRetry(request, apiKey, diagnosticStage, requestAttempts)
+    if (!outputSchema) return output
+    // A compatible gateway may accept a schema without actually enforcing it.
+    // Validate here as well; one format repair never becomes a story verdict.
+    for (let pass = 0; pass < 2; pass++) {
+      const errors = outputShapeErrors(output, outputSchema)
+      if (!errors.length) return output
+      if (pass) throw new AppError('千问输出仍不符合当前步骤的字段结构，请重试；这不是作者资料不足或因果不成立。',
+        502, 'QWEN_OUTPUT_SCHEMA_FAILED', undefined, undefined, undefined,
+        { stage: `${diagnosticStage}:response-schema`, attempt: 2, maxAttempts: 2, reason: errors.join('；') })
+      let originalTask: Record<string, unknown>
+      try {
+        const parsed: unknown = JSON.parse(userPrompt)
+        originalTask = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+          ? parsed as Record<string, unknown> : { originalTask: userPrompt }
+      } catch { originalTask = { originalTask: userPrompt } }
+      output = await sendRequestWithRetry({ ...request, temperature: 0.1,
+        messages: [request.messages[0]!, { role: 'user', content: JSON.stringify({ ...originalTask,
+          previousOutput: output, validationFailure: errors.join('；'),
+          formatRepair: { instruction: '只纠正当前步骤的输出结构，返回完整JSON。字段须独立，数组不是字符串，保留结构正确部分，不补作者事实、引用或故事条件。',
+            outputSchema } }) }],
+      }, apiKey, `${diagnosticStage}:format-repair`, requestAttempts)
+    }
+    return output
   } catch (error) {
+    if (outputSchema && error instanceof AppError && error.code === 'QWEN_REQUEST_ERROR'
+      && /schema|response[_\s-]?format/i.test(error.message)) {
+      throw new AppError('当前千问模型或网关不支持本步骤的结构化输出约束；未降级为无结构生成。',
+        502, 'QWEN_OUTPUT_SCHEMA_UNSUPPORTED', undefined, undefined, undefined, error.modelDiagnostic)
+    }
     if (
+      !outputSchema &&
       !isQwenResponseFormatFallbackDisabled()
       &&
       error instanceof AppError

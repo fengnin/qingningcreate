@@ -11,7 +11,10 @@ import { getAuthorDecisionMaterial } from './storyDecision.js'
 import { createStoryProposalContext, validateProposalFactReferences, validateContinuationBasis } from './storyProposalContext.js'
 import { decideContinuation, composeContinuation, auditContinuation, type ContinuationPlan } from './storyContinuationPlan.js'
 import { hasProposalProtocolLeak } from './storyProposalProse.js'
-import { storyCreativeIntentGuidance } from './storyCreativeIntent.js'
+import { storyCreativeIntentGuidance, storyCreativeFocusGuidance, preparationCreativeFocus } from './storyCreativeIntent.js'
+import { storySemanticReviewGuidance } from './storySemanticReview.js'
+import { preparationOutputSchemas, headTailReviewSchema, openingContinuationReviewSchema } from './storyOutputSchemas.js'
+import type { OutputSchema } from './modelOutputSchema.js'
 import {
   confirmProvisionalCurve,
   generateProvisionalCurve,
@@ -38,6 +41,7 @@ import {
 } from './storyClarification.js'
 import { randomUUID } from 'node:crypto'
 import { generateStoryPreparation, generateCurveFromPreparation, parsePreparationReview, reviseStoryPreparation } from './storyPreparation.js'
+import { selectedExpansionNeeds, storyExpansionGuidance } from './storyBridgeReview.js'
 import type { StoryPreparationAcceptanceRequest, StoryPreparationSupplementRequest, StoryPreparationRevisionRequest } from '../../shared/story-preparation-request.js'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
@@ -3104,7 +3108,7 @@ export async function suggestSessionPreparationGoal(request: StorySessionVersion
   const output = await requestQwenJson({
     systemPrompt: `你是故事共创助手。只返回 JSON {"suggestion":"..."}。根据作者原始想法，建议一句可修改的故事起点，补充一个人物想做的具体事情。建议不是作者事实，也不是已经发生的行动；不得改变原文已有的人物、目标、否定、关系或期限。原文若已经写明人物目标，只在原文基础上具体化，不换成寻人、解谜等另一件事。不要加入必须取得的许可、设备、流程或验收标准。建议不超过100字，不包含“作者必须”或要求作者证明现实条件。`,
     userPrompt: JSON.stringify({ sources: curve.preparation.sources, questions: curve.preparation.questions }),
-    temperature: 0.45, maxTokens: 300, diagnosticStage: 'preparation-goal-suggestion',
+    temperature: 0.45, maxTokens: 300, diagnosticStage: 'preparation-goal-suggestion', outputSchema: preparationOutputSchemas.suggestion,
   })
   if (!output || typeof output !== 'object' || Array.isArray(output) || Object.keys(output).some(key => key !== 'suggestion')
     || typeof (output as Record<string, unknown>).suggestion !== 'string'
@@ -6487,7 +6491,7 @@ async function reviewConfirmedOpeningContinuation(request: StoryTurnRequest, tur
       authorDecision: getOpeningContinuationDecision(request),
       allowedDecisions: getOpeningContinuationDecisions(request),
       selectedFocus: request.history[0]!.selectedOption, claims }),
-    temperature: 0, maxTokens: 1_600, diagnosticStage: 'opening-continuation-review',
+    temperature: 0, maxTokens: 1_600, diagnosticStage: 'opening-continuation-review', outputSchema: openingContinuationReviewSchema,
   }, '第二回合的事实核对没有返回有效结果。')
   if (typeof review.continuesSelectedFocus !== 'boolean'
     || typeof review.distinctChoices !== 'boolean' || !Array.isArray(review.checks) || review.checks.length !== claims.length
@@ -8313,6 +8317,8 @@ export async function generateSessionStory(
       headTail,
       turnHistory: session.history,
       conclusion,
+      expansionNeeds: selectedExpansionNeeds(session.confirmedCurve?.preparation),
+      creativeFocus: preparationCreativeFocus(session.confirmedCurve?.preparation, session.confirmedCurve?.design?.sourceFacts.filter(f => f.disposition === 'parked').map(f => f.id)),
     },
   })
   assertStorySessionRevision(session, request.revision)
@@ -8701,6 +8707,7 @@ async function reviewHeadTailGoal(
     userPrompt: buildHeadTailGoalReviewPrompt(request, options),
     temperature: 0.1,
     maxTokens: 620,
+    diagnosticStage: 'head-tail-goal-review', outputSchema: headTailReviewSchema,
   }, '模型没有完成故事两端的目标连续性检查，请重试。')
 
   return parseHeadTailGoalReviews(record.reviews, options)
@@ -8769,6 +8776,7 @@ interface ModelRequestOptions {
   temperature: number
   maxTokens: number
   diagnosticStage?: string
+  outputSchema?: OutputSchema
 }
 
 async function requestModelRecord(
@@ -8990,6 +8998,7 @@ const conflictCoreReviewSupplement = `审稿时不要把模型的布尔值当作
 const conflictCoreReviewEvidenceSupplement = `mechanismEvidenceGrounded 只在以下条件同时成立时为 true：mechanismType 准确分类 mechanism；mechanism 准确概括 obstacle 的因果来源；evidence 的每项逐字出现在当前候选允许的事实源中；核心没有借这些前提补出新的关键事实。若任一条件不成立，填 false。`
 
 const conflictCoreContractReviewSystemPrompt = `你是一位严格的中文故事编辑审稿人。请判断每个候选冲突核心是否真的能驱动故事，而不是只制造一个看似有戏的插曲。
+${storySemanticReviewGuidance}
 
 必须严格返回 JSON 对象，不要 Markdown，不要解释，不要代码块。storyHook 只是帮助读者比较的短句，不能把它当作已确认的当前场景或额外事实。核心障碍只有在不处理它会让原始目标延后、失败、被迫改变，或使一个决定无法继续保持原有意义时才算成立；对于“决定是否/如何行动”这类目标，直接相关的信息未明或已建立边界带来的真实取舍可以构成阻碍，但单纯尴尬、麻烦、额外请求，或者主角仍能无代价地照常完成原目标，都必须判 obstacleThreatensGoal 为 false。requiresTradeoff 只有在继续目标必然会面对真实的损失、风险或取舍时才为 true，即使代价不会在第一层展示。hasSingleMechanism 只有在没有叠加第二个独立阻碍、完整场景、解法或结果时才为 true。sharesCommonGoal 只有在三条 preservedGoal 语义相同，且都保留用户明确目标或同一个最小可行动目标时才为 true。hasActionableGoal 只有在 preservedGoal 描述主角可完成或作出的动作/决定，并且明确引用原始 activeSituation 的对象、事件或动作，而不是“眼前事件”“下一步”“自然应对”“维持体面”“处理好关系”等抽象状态时才为 true。goalForm 必须分类为 explicit-goal、action、decision 或 event-or-state；只是在复述已经发生、正在发生或客观存在的事件，而没有主角要完成的动作/决定时，必须填 event-or-state 且 hasActionableGoal 为 false。goalAnchoredToSeed 只有在目标能让读者指出它对应 activeSituation 或 lockedFacts 中的具体对象、事件或动作时才为 true；仅有“完成应对、解决问题、维持体面”这类抽象意图，即使语法上像一个动作，也必须为 false。
 
@@ -9143,7 +9152,7 @@ const storySystemPrompt = `你是一位擅长中文短篇小说的作者和编�
 
 必须严格返回 JSON 对象，不要 Markdown，不要解释，不要代码块。输出内容使用简体中文。正文不要写成大纲；用自然段完成叙事。必须遵循故事种子、用户选择的困境、头尾与已确认路径账本。账本中的每项行动和当下结果都是既成事实，必须按顺序写进正文；账本刻意不含“后续牵引”，不能自行把尚未发生的风险、线索或代价写成已注定的具体行动或结果。锁定目标必须始终是这篇故事的主线；结尾必须由收束回合的实际行动自然兑现预定高潮的语义、已确认的结局结果并回应开头线索。允许在结尾补足不改变关键因果的自然过渡动作，不能借此补写关键资源、权限、关系或外部结果。
 
-写作前先在内部核对：人物、地点、时间、交通工具、座位和道具的状态是否连续；每个关键结果是否由前一行动直接造成；结尾是否有足够铺垫。篇幅按故事路径自然展开，不以固定字数或段落数作为完成条件。不要为制造高潮临时增加关键关系、承诺、交通安排、道具功能或人物身份。`
+写作前先在内部核对：人物、地点、时间、交通工具、座位和道具的状态是否连续；关键事件是否有铺垫或能由人物行动、已有情境合理引出，人物办法是否改变处境并影响选择；结尾是否有足够铺垫。不要求每件事都由上一步直接造成。已选方向中仍被实际路径采用的待展开事项，可以自然补足其必要铺垫、关键动作与回应；不借此推翻明确限制、未知或已确认结果。篇幅按故事路径自然展开，不以固定字数或段落数作为完成条件。不要为制造高潮临时增加关键关系、承诺、交通安排、道具功能或人物身份。`
 
 const storyBodyConsistencyReviewSystemPrompt = `你是一位严谨但不过度保守的中文故事编辑。你的任务是审核候选正文是否保留了已确认的故事路径，不负责润色或续写。
 
@@ -9152,7 +9161,7 @@ const storyBodyConsistencyReviewSystemPrompt = `你是一位严谨但不过度�
 只报告以下问题：
 1. missing-path-item：账本中的关键行动、即时结果、开场阻碍或实际收束在正文中缺失；
 2. contradiction：正文把账本中已确认的人物、物品、时间、地点、行动或结果写成了不兼容的另一种状态；
-3. unsupported-critical-detail：正文新加的精确时间、资源、权限、他人决定、进入方式、查询结果等内容承担了关键因果，却没有来自账本或最终状态的依据；
+3. unsupported-critical-detail：正文新加的精确时间、资源、权限、他人决定、进入方式、查询结果等内容承担了关键因果，却没有来自账本或最终状态的依据；已选方向的待展开事项若仍被实际路径采用，允许自然补足其中已有提案的铺垫、动作和回应，不因其未逐字出现在账本就拒绝；但不能借此引入新的特殊能力、权限或改变已确认事实。仍采用的关键转折缺少必要铺垫或动作连接，也用此类型具体指出；
 4. creative-intent-mismatch：作者选择的感觉、戏剧力量或“你更想看到什么”的创作要求，在已确认路径中已有具体事件支撑，但正文只贴标签、插入无关桥段、复述愿望或俏皮对白，没有通过行动与后果体现。只有明确的实质偏离才报告，不能为此要求增添未确认事件；若路径本身缺少兑现要求所需的关键事件，不得让正文凭空补造，也不得把正文审阅通过解释为要求已经兑现。pathId 写 body。
 
 实际收束必须以语义方式兑现预定结尾约束中的 climax、resolution 和 openingClue；若未兑现或相互矛盾，使用 contradiction 或 missing-path-item，并将 pathId 写为 conclusion。
@@ -9851,6 +9860,8 @@ ${idea}
 
 故事种子中的锁定目标与锁定事实，均是用户原文摘录或用户后续补充并确认的事实；它们与原始念头同样可以作为事实基础，不能补全或扩大。${systemDraftContext} 当前处境只用于定位原始事件，仍未知项不得作为关键因果依据。
 
+${storySemanticReviewGuidance}
+
 故事种子：
 ${formatStorySeed(seed)}
 
@@ -10242,6 +10253,8 @@ function buildHeadTailGoalReviewPrompt(
 待审查的头尾方案：
 ${JSON.stringify(options)}
 
+${storySemanticReviewGuidance}
+
 逐条判断：keepsConfirmedGoal 只有在 opening、climax 和 resolution 都围绕主线目标时才能为 true；主线目标优先使用锁定目标，若其为空则使用确认困境的 preservedGoal。followsSelectedApproach 只有在 opening 和后续关键行动确实从用户已选方向开始，且没有改用另一条未选方向作为主线时才能为 true。climaxIsProtagonistAction 只有在 climax 是主角亲自完成的关键行动时才能为 true；resolutionFulfillsPlan 只有在 resolution 是 climax 的直接结果，明确改变目标结果并回应 openingClue 时才能为 true。允许合理的同义改写，不要以是否逐字复述作为判断标准。
 
 optionId 必须照抄输入，恰好审查全部三条。严格使用以下 JSON 结构：
@@ -10511,7 +10524,9 @@ ${JSON.stringify(state)}
 待审查的候选回合：
 ${JSON.stringify(turn)}
 
-situationIsGrounded 只在 node、conflict 和收束结果都直接承接当前状态及已确认行动时为 true；它独立于任意 option 是否成立。每个 option 的 isGrounded 只有在 action 确实是主角凭已有事实能够正当完成的行动，preconditions/effects/transition 与文字后果一致，且没有把未知信息、假定授权或临时场景细节当成关键因果、没有绕过 fixed 限制或凭空制造关键结果时才为 true。
+${storySemanticReviewGuidance}
+
+situationIsGrounded 只在 node、conflict 和收束结果都直接承接当前状态及已确认行动时为 true；它独立于任意 option 是否成立。每个 option 的 isGrounded 只有在 action 确实是主角凭已有事实能够尝试的行动，preconditions/effects/transition 与文字后果一致，且没有把未知信息、假定授权或临时场景细节当成关键因果、没有绕过 fixed 限制或凭空制造关键结果时才为 true。
 
 若候选为收束回合，conclusionFulfillsHeadTail 只有在最后一项已确认选择先发生，随后由候选 narrativeAction 及必要的普通桥接自然走到 headTail.climax、headTail.resolution 并回应 headTail.openingClue 时才为 true。不要要求候选 narrativeAction 的 ID 或字面措辞等于 headTail.climaxActionId；只判断实际因果与结局语义。若桥接暗中创造关键资源、权限、关系、信息或外部结果，必须为 false。非收束回合的 conclusionFulfillsHeadTail 必须为 null。
 
@@ -10602,6 +10617,8 @@ function buildStoryPrompt(
   return `${buildStoryFoundationContext(idea, plan.seed, plan.predicament, plan.approach, '用户逐步确认的故事困境')}
 
 ${storyCreativeIntentGuidance(plan.seed.creativeBrief ?? { tones: [], dramaticForces: [], allowSystemNamedCharacters: false }, 'story')}
+${storyCreativeFocusGuidance}
+原想法的创作参考：${JSON.stringify(plan.creativeFocus ?? null)}
 
 用户确认的故事两端约束：
 ${JSON.stringify({
@@ -10616,6 +10633,10 @@ ${JSON.stringify(confirmedPath)}
 
 最终叙事状态与已应用变更：
 ${JSON.stringify(state)}
+
+已选方向的待展开事项（仅与实际路径仍采用的情节有关时兑现）：
+${JSON.stringify(plan.expansionNeeds ?? [])}
+${storyExpansionGuidance}
 
 请写一篇完整短篇。确认路径账本与实际收束是用户已经确认的事实：不得删改、调换或把用户未选的选项写成实际行动。正文必须按“前一选择的当下结果 → 新局面 → 下一次选择”的因果顺序推进，明确写出每个关键行动为什么会发生；锁定目标持续驱动行动，结局必须由实际收束中的主角行动达成，并兑现预定结局、回应开场线索。账本没有列出后续牵引，不能把任何先前的预测、风险或线索写成必然发生的具体事件。不能用新的人设、历史或事件替换已经确认的故事路径。${getStoryGenerationRepairInstruction(repairMessage)}
 
@@ -10641,6 +10662,8 @@ function buildStoryBodyConsistencyReviewPrompt(
   return `${buildStoryFoundationContext(idea, plan.seed, plan.predicament, plan.approach, '用户逐步确认的故事困境')}
 
 ${storyCreativeIntentGuidance(plan.seed.creativeBrief ?? { tones: [], dramaticForces: [], allowSystemNamedCharacters: false }, 'story')}
+${storyCreativeFocusGuidance}
+原想法的创作参考：${JSON.stringify(plan.creativeFocus ?? null)}
 
 预定结尾约束：
 ${JSON.stringify({
@@ -10655,10 +10678,17 @@ ${JSON.stringify(confirmedPath)}
 最终叙事状态：
 ${JSON.stringify(state)}
 
+已选方向的待展开事项：
+${JSON.stringify(plan.expansionNeeds ?? [])}
+${storyExpansionGuidance}
+这是完整正文审阅：若实际路径仍采用所引情节，核对必要铺垫、关键动作或回应是否已在相关结果之前或当时自然交代；有实质遗漏时以unsupported-critical-detail指出正文具体转折及缺少的连接。不要求逐字复述事项、不强制单独写一段；已被作者后续改换或放弃的情节不要求兑现。事项不是新规则，不以未写资格、内部原理或完整操作教程拒绝。
+
 候选正文：
 ---
 ${story.body}
 ---
+
+${storySemanticReviewGuidance}
 
 按路径账本逐项检查：每项的 situation、obstacle、selectedAction、immediateResult 都要按语义保留；selectedAction 和 immediateResult 必须保持顺序。issues.pathId 只能是 ${[...confirmedPath.map((item) => item.id), 'body'].join('、')} 之一。严格使用以下 JSON 结构：
 {

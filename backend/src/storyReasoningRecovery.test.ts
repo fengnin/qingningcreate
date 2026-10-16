@@ -102,7 +102,7 @@ test('malformed output and in-flight revision changes leave session intact; pers
  model();const s=await service.startStoryCoCreation({idea,brief,operationId:'failure'})
  let edited=await service.updateSessionCurveBeat({storyId:s.storyId,revision:s.revision,curveId:s.curve.id,beatId:'beat-trigger',detail:'作者编辑：保留图纸。'})
  let before=service.getStorySessionSnapshot(s.storyId);malformed=true
- await assert.rejects(()=>service.regenerateSessionCurveDependencies({storyId:s.storyId,revision:edited.revision,curveId:s.curve.id}),code('STORY_REASONING_PREVIEW_FAILED'))
+ await assert.rejects(()=>service.regenerateSessionCurveDependencies({storyId:s.storyId,revision:edited.revision,curveId:s.curve.id}),code('QWEN_OUTPUT_SCHEMA_FAILED'))
  assert.deepEqual(service.getStorySessionSnapshot(s.storyId),before);malformed=false
  let signal!:()=>void;const seen=new Promise<void>(r=>{signal=r});entered=signal
  const pending=service.regenerateSessionCurveDependencies({storyId:s.storyId,revision:edited.revision,curveId:s.curve.id});const rejected=assert.rejects(pending,code('STORY_SESSION_CONFLICT'))

@@ -2,6 +2,9 @@ import type { ConfirmedCurve, StorySeed, StoryTurnHistoryItem } from '../../shar
 import { activePreparationMaterial } from './storyPreparation.js'
 import { AppError } from './qwen.js'
 import { hasProposalProtocolLeak } from './storyProposalProse.js'
+import { storySemanticReviewGuidance } from './storySemanticReview.js'
+import { selectedExpansionNeeds, storyExpansionGuidance } from './storyBridgeReview.js'
+import { preparationCreativeFocus } from './storyCreativeIntent.js'
 
 export function validateProposalFactReferences(value: unknown, sourceIds: readonly string[], path: string): string[] {
   if (!Array.isArray(value) || value.length > sourceIds.length || value.some(id => typeof id !== 'string') || new Set(value).size !== value.length) {
@@ -95,6 +98,8 @@ export function createStoryProposalContext(
   return {
     subject: seed.subject, goal: seed.lockedGoal, sourceFacts,
     authorEdits, designBeats, unresolvedQuestions, selectedFocus,
+    expansionNeeds: selectedExpansionNeeds(curve.preparation),
+    creativeFocus: preparationCreativeFocus(curve.preparation, curve.design?.sourceFacts.filter(f => f.disposition === 'parked').map(f => f.id)),
     executedHistory,
     lastAuthorConfirmedResult: executedHistory.at(-1) ?? null,
     chronology: { initialMaterial: '行动前作者材料，保留原文；其中的尚未执行描述不能覆盖之后的明确执行结果。',
@@ -132,11 +137,14 @@ export function validateContinuationQualityReview(value: unknown): void {
     if (typeof issue !== 'string' || !issue.trim() || issue.length > 400) invalid('续推内容审阅问题不合法。')
     return issue as string
   })
+  if (checks.every(c => c.passed) && issues.length) invalid('审阅各项均通过却仍列出内容缺陷。请只重审原提案，使checks和issues一致；不改写故事，也不为保留问题列表编造失败项。')
   for (const check of checks.filter(c => !c.passed)) issues.push(`${check.criterion}：${check.evidence}`)
   if (issues.length) throw new AppError(`续推内容审阅未通过：${issues.join('；')}`, 502, 'STORY_TURN_QUALITY_FAILED')
 }
 
 export const continuationQualityInstruction = `独立审查中文故事续推提案。严格返回 JSON {checks:[{criterion,passed,evidence}],issues:[具体问题]}，四项 criterion 为 continuity,causality,requirements,author-control，每项恰好一次，passed 是布尔值，evidence 引用具体待审措辞说明原因（不超过180字）。issues 只列实质缺陷，最多四项。
+${storySemanticReviewGuidance}
+${storyExpansionGuidance}
 先按reviewMode检查出口：closure只核对作者完成结果和是否遗漏明确未解决事项，不要求新动作或因果链，causality记为通过且说明“收束无新增行动”；question/design只核对问题是否必要且不执行角色动作。不能用行动出口的要求否决合理收束或补充。action才检查具体行动与可能后果，不为了四项维度制造缺陷。
 continuity：先逐字引用最新确认结果里与 unresolved 有关的状态，再引用 proposal.basis 的对应断言，逐一比较；不能仅说‘承接了’就判通过。提案是否承接最近作者确认结果，保留原目标、编辑和条件；过去的初始状态不得覆盖后来的结果，不得重复已完成事项。basis.reason 和 unresolved.text 描述的是当前状态，其中原文没有的观察、故障、身体状态或时间安排不能借提议标签豁免。叶片仍绿不代表必须证明直立，目标未完成不等于缺少测量结果。依据引用ID本身不证明语义正确。此前的预测结果不能成为当前状态，即使它在主线设计中获接受。
 causality：行动是否处理当前具体未解决事项，可能后果是否由行动引发且符合日常常识。多个方向须有不同的实际后果，不以装饰性细节、巧合或无关线索替代进展。仅未确认目标完成不等于存在需要证明完成的技术缺口。提案应继续故事中的问题，不能继续审核故事。说明用叙事语言，不应泄露内部字段、ID或合同术语。

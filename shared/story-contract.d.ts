@@ -555,6 +555,9 @@ export interface StoryPlan {
   headTail: StoryHeadTailOption
   turnHistory: StoryTurnHistoryItem[]
   conclusion: StoryTurn
+  /** Reviewed design details to develop only if retained by the actual path. */
+  expansionNeeds?: import('./story-preparation.js').StoryExpansionNeed[]
+  creativeFocus?: import('./story-preparation.js').StoryCreativeFocus
 }
 
 export interface StoryReviewItem {

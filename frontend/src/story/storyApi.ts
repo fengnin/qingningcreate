@@ -1369,7 +1369,20 @@ function parsePreparation(value: unknown): import('../../../shared/story-prepara
   const parseCandidates = (items: unknown[]) => items.map(v => {
     const c = expectRecord(v)
     const bridge = c.causalBridge === undefined ? undefined : expectRecord(c.causalBridge)
+    const expansionNeeds = c.expansionNeeds === undefined ? undefined
+      : (Array.isArray(c.expansionNeeds) && c.expansionNeeds.length <= 2 ? c.expansionNeeds : throwInvalidResponse()).map(value => {
+        const need = expectRecord(value)
+        if (!['setup', 'action-detail', 'response-detail'].includes(String(need.kind))
+          || !Array.isArray(need.anchors) || !need.anchors.length || need.anchors.length > 3) throwInvalidResponse()
+        return { kind: need.kind as import('../../../shared/story-preparation.js').StoryExpansionNeed['kind'],
+          anchors: (need.anchors as unknown[]).map(value => {
+            const anchor = expectRecord(value)
+            if (!['action', 'possibleResult', 'method', 'change', 'futureChoice'].includes(String(anchor.field))) throwInvalidResponse()
+            return { field: anchor.field as import('../../../shared/story-preparation.js').StoryExpansionNeed['anchors'][number]['field'], quote: readText(anchor, 'quote') }
+          }) }
+      })
     return { id: readIdentifier(c, 'id'), action: readText(c, 'action'), possibleResult: readText(c, 'possibleResult'),
+      ...(expansionNeeds ? { expansionNeeds } : {}),
       ...(c.futureChoice === undefined ? {} : { futureChoice: readText(c, 'futureChoice') }),
       ...(bridge === undefined ? {} : { causalBridge: { method: readText(bridge, 'method'), change: readText(bridge, 'change'), methodBasisIds: readIdentifierList(bridge, 'methodBasisIds'), changeBasisIds: readIdentifierList(bridge, 'changeBasisIds') } }),
       materialIds: readIdentifierList(c, 'materialIds'), preconditionIds: readIdentifierList(c, 'preconditionIds'),
@@ -1394,7 +1407,24 @@ function parsePreparation(value: unknown): import('../../../shared/story-prepara
   })
   const originalCandidates = p.originalCandidates === undefined ? undefined : parseCandidates(Array.isArray(p.originalCandidates) ? p.originalCandidates : throwInvalidResponse())
   const rejectedCandidates = p.rejectedCandidates === undefined ? undefined : parseCandidates(Array.isArray(p.rejectedCandidates) ? p.rejectedCandidates : throwInvalidResponse())
+  const parseMainlineQuote = (value: unknown) => {
+    const item = expectRecord(value)
+    const sourceId = readIdentifier(item, 'sourceId'), quote = readText(item, 'quote')
+    if (!sources.some(source => source.id === sourceId && source.text.includes(quote))) throwInvalidResponse()
+    return { id: readIdentifier(item, 'id'), sourceId, quote }
+  }
+  const mainlineGoals = p.mainlineGoals === undefined ? undefined
+    : (Array.isArray(p.mainlineGoals) ? p.mainlineGoals : throwInvalidResponse()).map(parseMainlineQuote)
+  const mainlineAnchors = p.mainlineAnchors === undefined ? undefined
+    : (Array.isArray(p.mainlineAnchors) ? p.mainlineAnchors : throwInvalidResponse()).map(value => {
+      const item = expectRecord(value)
+      if (!['character', 'relationship', 'place', 'action', 'object', 'constraint'].includes(String(item.kind))) throwInvalidResponse()
+      return { ...parseMainlineQuote(item), kind: item.kind as import('../../../shared/story-preparation.js').StoryMainlineAnchor['kind'] }
+    })
+  const appealMaterialIds = p.appealMaterialIds === undefined ? undefined : readIdentifierList(p, 'appealMaterialIds')
   return { protocol: 1, status: p.status as 'needs-review' | 'accepted-design', executed: false,
+    ...(mainlineGoals === undefined ? {} : { mainlineGoals }), ...(mainlineAnchors === undefined ? {} : { mainlineAnchors }),
+    ...(appealMaterialIds === undefined ? {} : { appealMaterialIds }),
     sources, material, questions, candidates, acceptedCandidateIds: readIdentifierList(p, 'acceptedCandidateIds'), ...(authorReview ? { authorReview } : {}), ...(supplements ? { supplements } : {}), ...(originalCandidates ? { originalCandidates } : {}), ...(rejectedCandidates ? { rejectedCandidates } : {}) }
 }
 

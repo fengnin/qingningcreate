@@ -4,6 +4,7 @@ import type { ConfirmedCurve, StorySeed, StoryTurnHistoryItem, StoryPredicament 
 import { createStoryProposalContext, validateProposalFactReferences, validateContinuationBasis, validateContinuationQualityReview } from './storyProposalContext.js'
 import { generateStoryTurn } from './storyService.js'
 import { AppError } from './qwen.js'
+import type { StoryPreparation } from '../../shared/story-preparation.js'
 
 const seed: StorySeed = { subject: '许沅', activeSituation: '修复陶碗', lockedGoal: '修复陶碗',
   lockedFacts: ['陶碗裂口缺一块', '邻居提供同色碎片'], worldMode: 'realistic-default', expansionScope: 'keep-scale', unknowns: [] }
@@ -57,6 +58,22 @@ test('continuation references cannot promote reviewed design or unknown question
   }
   assert.deepEqual(validateProposalFactReferences(['result'], context.referenceContract.sourceFactIds, path), ['result'])
   assert.deepEqual(validateProposalFactReferences([], context.referenceContract.sourceFactIds, path), [])
+})
+
+test('selected expansion obligations travel as design, never fact evidence or a new unresolved task', () => {
+  const expansionNeeds = [{ kind: 'setup' as const, anchors: [{ field: 'method' as const, quote: '用随身的戏服伪装。' }] }]
+  const preparation: StoryPreparation = { protocol: 1, status: 'accepted-design', executed: false,
+    sources: [{ id: 'author-input', text: '主角想离开。' }], appealMaterialIds: ['m0'],
+    material: [{ id: 'm0', sourceId: 'author-input', role: 'goal', quote: '主角想离开。' }], questions: [], acceptedCandidateIds: ['d0'],
+    candidates: [{ id: 'd0', action: '主角尝试伪装后离开。', possibleResult: '可能接近出口。', futureChoice: '继续离开还是回去帮人？',
+      materialIds: ['m0'], resultBasisIds: [], preconditionIds: [], unknownIds: [], expansionNeeds,
+      causalBridge: { method: '用随身的戏服伪装。', change: '可能接近出口。', methodBasisIds: ['m0'], changeBasisIds: [] } }] }
+  const input = createStoryProposalContext(seed, { ...curve, preparation }, [], [])
+  assert.deepEqual(input.expansionNeeds, expansionNeeds)
+  assert.deepEqual(input.creativeFocus, { authority: 'creative-reference', excerpts: ['主角想离开。'] })
+  assert.deepEqual(input.sourceFacts.map(f => f.text), ['主角想离开。'])
+  assert.doesNotMatch(JSON.stringify(input.sourceFacts), /戏服/)
+  assert.deepEqual(input.referenceContract.sourceFactIds, ['author-1'])
 })
 
 test('continuation basis carries the latest receipt and separates optional design from existing obligations', () => {

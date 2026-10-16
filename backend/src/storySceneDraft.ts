@@ -1,11 +1,15 @@
 import { AppError, requestQwenJson } from './qwen.js'
+import { sceneOutputSchemas as schemas } from './storyOutputSchemas.js'
 import { hasProposalProtocolLeak } from './storyProposalProse.js'
-import type { StoryPreparation, StoryPreparationCandidate, StoryPreparationItem } from '../../shared/story-preparation.js'
+import { storyDevelopmentGuidance, storyDevelopmentRepairGuidance, storySemanticReviewGuidance } from './storySemanticReview.js'
+import { storyCreativeFocusGuidance } from './storyCreativeIntent.js'
+import type { StoryPreparation, StoryPreparationCandidate, StoryPreparationItem, StoryCreativeFocus } from '../../shared/story-preparation.js'
 import type { CreativeBrief } from '../../shared/story-contract.js'
 
 type SceneInput = {
   sources: StoryPreparation['sources']; material: StoryPreparationItem[]; brief: CreativeBrief
   rejectedCandidates: StoryPreparationCandidate[]; authorAction?: string
+  creativeFocus?: StoryCreativeFocus
 }
 export type SceneAttempt = { action: string; materialIds: string[]; preconditionIds: string[] }
 export type SceneDevelopment = { change: string; response: string; resultBasisIds: string[] }
@@ -87,6 +91,7 @@ export function parseSceneReview(value: unknown): DraftIssue[] {
     return issue as DraftIssue
   })
   if (checks.some(c => !c.passed) && !issues.length) fail('未通过的骨架审阅必须指出局部修复位置，不能当成通过。')
+  if (checks.every(c => c.passed) && issues.length) fail('审阅各项均通过却仍列出内容缺陷。请只重审原骨架，使checks和issues一致；不改写故事，也不为保留问题列表编造失败项。')
   return issues
 }
 
@@ -96,6 +101,7 @@ authorGoals与authorConstraints由程序保留，整理不能改写它们。作�
 样例：两位室友都要搬走，只有一辆手推车且不能遗失各自纪念物，目标是让两人完成搬离，困境是有限运力怎样兼顾两人；不能缩成“给箱子贴装饰”。样例只示范理解方法，不能复制人物与道具。
 若作者明确保留的关键未知使独立提案无法构思，只输出JSON {questions:[{id,question,materialIds}]}；一个容易回答的创作问题，materialIds只引用unknown。不要询问新增虚构的现实许可。`
 const scenePrompt = `完整小场景构思：围绕intent及作者完整原文，一起设计人物尝试、直接变化和具体回应，不先锁定一个动作再补后果。
+${storyDevelopmentGuidance}
 authorRequirements分别给出已定设定、明确边界、发展期望和作者未知；authorUnknownContexts给出未知片段所在的完整原句，用来识别“暂不选”指向的对象，不表示整句每个事实都未知。原文条件同样有效。先在这些边界内选择行动，再写正文。不要通过换名称、换物件部位或改为间接操作绕过禁止。人物可以请求协作，但不能替别人决定删改来规避自己的承诺；别人自主改变不等于作者授权修改原始要求。没有要求时不要自造禁止或强制条件。
 输出JSON {attempt:{action,materialIds,preconditionIds},development:{change,response,resultBasisIds}}。不要输出进度、目标完成状态或证明方案有效的分析。
 action最多120字，change与response各最多110字；写能演出来的一次尝试→直接变化或人物回应→针对变化的下一动作。正文里体现如何兼顾相关人物、期限、承诺和否定，不必当场解决全部问题；暂未解决的目标不能写成已达成。期望的发展不等于已发生的结果，也不能替代人物当前目标。
@@ -104,9 +110,10 @@ action最多120字，change与response各最多110字；写能演出来的一次
 有authorAction时attempt不能输出action，程序保留作者原文；一起构思后果与回应，不改变作者已给的道具和位置。局部修复若只有development问题，attempt必须完整保持；若attempt有问题，可一起改动其后果。
 跨题材示范：想找人一起玩，尝试邀请对方玩同一个游戏→对方提出不同玩法→人物把两种玩法组合，推动共同参与。赶期限送物，尝试改变携带或路线→遇到具体取舍→采取仍服务于送达的补救。合作边界冲突，尝试给对方实际选择权→对方选择→按选择调整自己的配合，而非再次替对方分配。示范是因果方法，不照搬情节。`
 const reviewPrompt = `独立核对短场景骨架，不润色，不续写。输出精确JSON {checks:[{criterion,passed,evidence}],issues:[{part,evidence}]}。
+${storySemanticReviewGuidance}
 checks四项criterion恰好为boundaries,causality,state,scope。passed布尔值，evidence引用骨架具体措辞说明判断，不超过240字。issues最多4项，part只能是attempt或development，定位错误所在步骤并引用具体措辞。未通过必须有issue；没实质错误issues=[]。
 boundaries：逐项对照authorRequirements与原文。directionPreferences 是最终故事的创作要求：检查骨架是否与之相容，并有具体可发展的因果台阶；不要求单场景提前完成结局，不能把愿望当成已发生事实，也不能以相同题材或一句承诺代替承接。authorUnknownContexts只是完整原句，用于判断未知指向的对象；原句中的独立已知事实仍有效。禁止动作不能通过改名称、只触碰组成部分或替别人决定来规避。依据实际动作判断，不因对白声称“没有改动”就通过。保留作者目标、期限、否定和人物边界，不确定明确未知，不复用拒绝机制，编辑动作完全保留，命名权限遵守。
-causality：在evidence里写原目标是什么、回应具体怎样改变实现路径。意外不必由上一步行动造成，也不必提前预告；但人物须有机会发现它，意外应带出选择，之后的变化要主要来自人物尝试或可理解的回应，而非再空降无关麻烦或巧合。尝试→变化→具体回应是否相连并推动原任务？请求引来对方回应、临时合作、失败后调整都可以成立，无需必然反应，也无需开场就完成目标或解决全部矛盾。只缺精细动作描写不能判失败；问题是无关线索、象征替代或把任务退回“要想办法”。
+causality：在evidence里写原目标是什么、回应具体怎样改变实现路径或引出有代价的目标转变。意外不必由上一步行动造成，也不必提前预告；但人物须有机会发现它，意外应带出选择，之后的变化要主要来自人物尝试或可理解的回应，而非再空降无关麻烦或巧合。尝试→变化→具体回应是否相连，让原愿望、风险或关系继续影响取舍？请求引来对方回应、临时合作、失败后调整或为更在意的事放弃原打算都可以成立，无需必然反应，也无需开场就完成目标或解决全部矛盾。只缺精细动作描写不能判失败；问题是无关线索、象征替代或把任务退回“要想办法”。
 state：从作者已定设定开始，按attempt→change→response核对物件位置、持有人、时间和知识变化。没有交代转移，不能把手里的物件写成从别处取出。不用额外假设替骨架圆场，不要求现实证明虚构；未完成的目标可以继续发展，不能说已验证或达成。只能依据正文事件判断，不能用引用ID或构思意图证明条件满足。
 scope：判断新增设定与关键结果是否可信，不按“作者是否逐项提供”一刀切。人物提议、自愿约定、有来由的期限，以及符合故事世界常识的日常服务都可创作；遗失门票后询问能否补票可以通过。若结果依赖机构批准、特殊设备能力或他人配合，核对正文是否给出足以理解的条件与回应；不能把“询问”直接写成“已获批准”。默认现实游乐园无合理设定却要求首次入园必须先玩旋转木马，或凭拼贴假票获得闭园后游玩资格，不能通过。保留作者明确设定的架空规则。未来发展尚未执行，不为了显得严格而新增限制。`
 
@@ -137,7 +144,7 @@ export async function generateSceneDraft(input: SceneInput, revision?: { draft: 
     authorGoals: input.material.filter(m => m.role === 'goal'), authorConstraints: input.material.filter(m => m.role === 'condition' && m.sourceId !== 'author-direction'),
     authorRequirements: sceneAuthorRequirements(input) }
   const understood = revision?.draft.intent ?? await requestStep({ systemPrompt: intentPrompt,
-    userPrompt: JSON.stringify(context), temperature: 0.1, maxTokens: 1000, diagnosticStage: 'preparation-scene-intent' }, value => {
+    userPrompt: JSON.stringify(context), temperature: 0.1, maxTokens: 1000, diagnosticStage: 'preparation-scene-intent', outputSchema: schemas.intent }, value => {
     if (value && typeof value === 'object' && 'questions' in value) return parseAttemptStep(value, input) as SceneQuestions
     const r = record(value, ['goal', 'tension', 'focusIds']), focusIds = refs(r.focusIds, input)
     if (!focusIds.length) fail('故事理解必须定位原文任务。')
@@ -151,18 +158,18 @@ export async function generateSceneDraft(input: SceneInput, revision?: { draft: 
     const preserveAttempt = previous && repair.length > 0 && repair.every(i => i.part === 'development')
     const compositionContext = { ...context, intent: understood, ...(previous ? { previousDraft: previous, repair,
       ...(preserveAttempt ? { fixedAttempt: previous.attempt } : {}) } : {}) }
-    draft = await requestStep({ systemPrompt: scenePrompt,
+    draft = await requestStep({ systemPrompt: `${scenePrompt}\n${storyCreativeFocusGuidance}${repair.length ? `\n${storyDevelopmentRepairGuidance}` : ''}`,
       userPrompt: JSON.stringify(compositionContext), temperature: 0.65, maxTokens: 2200,
-      diagnosticStage: 'preparation-scene-composition' }, value => {
+      diagnosticStage: 'preparation-scene-composition', outputSchema: schemas.composition(!!input.authorAction) }, value => {
       const r = record(value, ['attempt', 'development'])
       const attempt = parseSceneAttempt(r.attempt, input), development = parseSceneDevelopment(r.development, input)
       if (preserveAttempt && JSON.stringify(attempt) !== JSON.stringify(previous!.attempt)) fail('只修复发展时不能更换已保留的尝试或依据。')
       return { attempt, development, intent: understood }
     })
-    repair = await requestStep({ systemPrompt: reviewPrompt,
+    repair = await requestStep({ systemPrompt: `${reviewPrompt}\n${storyCreativeFocusGuidance}`,
       userPrompt: JSON.stringify({ ...context, draft: { action: draft.attempt.action,
         change: draft.development.change, response: draft.development.response } }),
-      temperature: 0.1, maxTokens: 1500, diagnosticStage: 'preparation-scene-review' }, parseSceneReview)
+      temperature: 0.1, maxTokens: 1500, diagnosticStage: 'preparation-scene-review', outputSchema: schemas.review }, parseSceneReview)
     if (!repair.length) return draft
   }
   throw new AppError(`场景骨架内容未通过：${repair.map(i => `${i.part}：${i.evidence}`).join('；')}`, 502, 'STORY_PREPARATION_QUALITY_FAILED')

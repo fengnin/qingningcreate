@@ -55,6 +55,41 @@ test('closure never invokes action generation; reviewer is explicitly told not t
     assert.match(calls[1].prompt, /不要求新动作/)
   }, prompt => prompt.includes('续推出口判断') ? { ...route, route: 'closure', sourceIds: [], unresolved: '作者已经确认完成，等待收束。' } : audit)
 })
+
+test('expansion notes reach writing and review but cannot invent a routing obligation', async () => {
+  const expansionNeeds = [{ kind: 'action-detail' as const, anchors: [{ field: 'method' as const, quote: '示范握姿。' }] }]
+  const creativeFocus = { authority: 'creative-reference' as const, excerpts: ['小岚想教奶奶自拍'] }
+  const expanded = { ...context, expansionNeeds, creativeFocus }
+  await mock(async calls => {
+    const decision = await decideContinuation(expanded)
+    const plan = await composeContinuation(expanded, decision)
+    await auditContinuation(expanded, decision, plan)
+    assert.equal(calls[0].body.task.expansionNeeds, undefined)
+    assert.equal(calls[0].body.task.creativeFocus, undefined)
+    assert.deepEqual(calls[1].body.task.expansionNeeds, expansionNeeds)
+    assert.deepEqual(calls[1].body.task.creativeFocus, creativeFocus)
+    assert.deepEqual(calls[2].body.expansionNeeds, expansionNeeds)
+    assert.deepEqual(calls[2].body.creativeFocus, creativeFocus)
+    assert.match(calls[1].prompt, /不是作者新增限制/)
+    assert.match(calls[2].prompt, /正文阶段/)
+  }, prompt => prompt.includes('续推出口判断') ? route : prompt.includes('共创提案编辑') ? { options: [option] } : audit)
+})
+for (const persistent of [false, true]) test(`inconsistent continuation review retries review without composing again (persistent=${persistent})`, async () => {
+  let reviews = 0
+  await mock(async calls => {
+    const decision = await decideContinuation(context), plan = await composeContinuation(context, decision)
+    const before = structuredClone(plan)
+    if (persistent) await assert.rejects(() => auditContinuation(context, decision, plan),
+      (e: unknown) => e instanceof AppError && e.code === 'INVALID_MODEL_OUTPUT')
+    else await auditContinuation(context, decision, plan)
+    assert.equal(calls.length, 4)
+    assert.deepEqual(calls[2].body.proposal, calls[3].body.proposal)
+    assert.match(calls[3].body.validationFailure, /只重审原提案/)
+    assert.deepEqual(plan, before)
+  }, prompt => prompt.includes('续推出口判断') ? route : prompt.includes('共创提案编辑') ? { options: [option] }
+    : { ...audit, issues: persistent || ++reviews === 1 ? ['测试矛盾问题列表。'] : [] })
+})
+
 test('question remains separate from role options and has only one easy author question', async () => {
   await mock(async calls => {
     const plan = await composeContinuation(context, await decideContinuation(context))

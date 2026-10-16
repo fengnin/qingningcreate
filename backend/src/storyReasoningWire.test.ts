@@ -46,3 +46,26 @@ test('relations need explicit reviewable content; a graph edge is not causal evi
   p.relations[0].content = { kind: 'proposal', text: '提案：分类时保持照片完整。', evidence: [], unknownIds: [] }
   assert.equal(parseStoryReasoningWire(p, context).relations[0]!.basis.kind, 'design-proposal')
 })
+
+test('source references recover exact author and edit text without transcription or authority changes', () => {
+  const { output, context } = reasoningEncodingExample
+  const wire = storyReasoningWireExample(output, context) as any
+  wire.constraints[0].content = { kind: 'source', sourceId: 'example-material' }
+  wire.actions[0].content.evidence = [{ sourceId: 'example-material' }]
+  const before = structuredClone(wire)
+  const parsed = parseStoryReasoningWire(wire, context)
+  assert.equal(parsed.constraints[0]!.text, context.sources[0]!.text)
+  assert.equal(parsed.actions[0]!.basis.kind, 'design-proposal')
+  assert.deepEqual(parsed.actions[0]!.basis.kind === 'design-proposal' && parsed.actions[0]!.basis.evidence,
+    [{ sourceId: 'example-material', quote: context.sources[0]!.text }])
+  assert.deepEqual(wire, before)
+  for (const change of ['missing', 'unknown', 'design', 'long', 'injected']) {
+    const input = structuredClone(wire), sources = structuredClone(context.sources)
+    if (change === 'missing') input.constraints[0].content.sourceId = 'absent'
+    if (change === 'unknown') sources[0]!.authority = 'unknown' as any
+    if (change === 'design') sources[0]!.authority = 'author-design' as any
+    if (change === 'long') sources[0]!.text = '原'.repeat(241)
+    if (change === 'injected') input.constraints[0].content.text = '没有授权也已获准。'
+    assert.throws(() => parseStoryReasoningWire(input, { ...context, sources }), invalid, change)
+  }
+})

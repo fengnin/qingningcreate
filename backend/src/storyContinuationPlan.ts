@@ -1,5 +1,10 @@
 import { AppError, requestQwenJson } from './qwen.js'
+import { continuationOutputSchemas as schemas } from './storyOutputSchemas.js'
+import type { OutputSchema } from './modelOutputSchema.js'
 import { hasProposalProtocolLeak } from './storyProposalProse.js'
+import { storyDevelopmentGuidance, storyDevelopmentRepairGuidance } from './storySemanticReview.js'
+import { storyExpansionGuidance } from './storyBridgeReview.js'
+import { storyCreativeFocusGuidance } from './storyCreativeIntent.js'
 import { createStoryProposalContext, validateContinuationBasis, continuationQualityInstruction, validateContinuationQualityReview } from './storyProposalContext.js'
 
 type Context = ReturnType<typeof createStoryProposalContext>
@@ -50,18 +55,21 @@ closure：最新结果已明确完成当前任务，或没有已知未解决事�
 design：只能是作者自愿审阅的新方向，不能伪装成必须解决的问题；sourceIds=[]。
 例：照片已拍到且作者说满意→closure；拇指已移开但手机朝向天花板→action，事项是朝向而非遮挡；作者说是否见面仍未知且要求围绕它写→question。只学判断方法，不复制示例事实。`
 const actionPrompt = `共创提案编辑：本步只围绕已确定的未解决事项构思一至三项完整小场景，不重新判断出口或当前事实。
-输出JSON {options:[{label,action,proposedConsequence}]}。label最多32字，action最多180字，proposedConsequence最多180字。一起考虑人物的具体尝试、直接变化及针对变化的回应；明确怎样推进原目标。无需凑三项，多项须做法与实际发展都有差异。
+${storyDevelopmentGuidance}
+${storyCreativeFocusGuidance}
+${storyExpansionGuidance}
+输出JSON {options:[{label,action,proposedConsequence}]}。label最多32字，action最多180字，proposedConsequence最多180字。一起考虑人物的具体尝试、直接变化及针对变化的回应；明确怎样改变原问题的处境与代价，目标转变须有事件与人物反应承接。无需凑三项，多项须做法与实际发展都有差异。
 label用简短自然名称。action和proposedConsequence只写人物会怎样做、看见什么、说什么以及事情可能怎样变化；不要解释“确认权”“可追溯”“物证支撑”“机制”“事项闭环”等方案价值，不把一句普通回应扩写成评论。选择普通、可演出的发展，不为表现创意添加奇怪姿势或没有作用的小动作。
-所有新内容只是可拒绝的未来设计。保留作者完整目标、期限、关系边界、编辑和未解决部分；不新增完成原任务必需的许可、设备、检查或标准。不把作者回答和设计核对写成角色行动。不用技术术语或象征细节代替因果。
+所有新内容只是可拒绝的未来设计。保留作者完整愿望、期限、关系边界、编辑和未解决部分；不凭空追加完成原任务必需的许可、设备、检查或标准来替代人物应对。已有情境中的手续、技术问题可以构成冲突，须由人物行动改变其实际后果。不把作者回答和设计核对写成角色行动。不用技术术语或象征细节代替因果。
 例：手指挡镜头，可示范挪开手指或改变握法；语音快门只改变触发方式，不能解决遮挡。合作冲突应给对方实际选择空间，不能换台词后仍替对方决定。例只示范方法，不套用题材。`
 const questionPrompt = `作者创作补充：出口已确定，本步只问一个必要、具体、容易回答的创作问题。输出JSON {questions:[一句问题]}，最多140字。不生成角色行动，不索取未知结果的证明；可以提示作者保留未知或选独立替代。新增方向是可拒绝设计，不是现实核查。`
 
-async function step<T>(prompt: string, input: unknown, stage: string, parse: (value: unknown) => T, temperature: number): Promise<T> {
+async function step<T>(prompt: string, input: unknown, stage: string, parse: (value: unknown) => T, temperature: number, outputSchema: OutputSchema): Promise<T> {
   let previousOutput: unknown, validationFailure: string | undefined
   for (let pass = 0; pass < 2; pass++) {
     previousOutput = await requestQwenJson({ systemPrompt: prompt,
       userPrompt: JSON.stringify({ task: input, ...(validationFailure ? { previousOutput, validationFailure } : {}) }),
-      temperature, maxTokens: 2400, diagnosticStage: stage })
+      temperature, maxTokens: 2400, diagnosticStage: stage, outputSchema })
     try { return parse(previousOutput) } catch (error) {
       if (pass || !(error instanceof AppError) || error.code !== 'INVALID_MODEL_OUTPUT') throw error
       validationFailure = error.message
@@ -83,7 +91,7 @@ export async function decideContinuation(context: Context): Promise<Continuation
     const basis = { ...validateContinuationBasis(rawBasis, context), latestResultFactId: rawBasis.latestResultFactId }
     if (basis.contradictions.length && route !== 'question') invalid('真正矛盾的作者依据应交给作者补充，不自动执行或收束。')
     return { route, basis }
-  }, 0.1)
+  }, 0.1, schemas.routing)
 }
 export async function composeContinuation(context: Context, decision: ContinuationDecision, repair?: { issues: string; previousPlan: ContinuationPlan }): Promise<ContinuationPlan> {
   const { route, basis } = decision
@@ -92,16 +100,18 @@ export async function composeContinuation(context: Context, decision: Continuati
   // Keep those aliases exclusively in the routing step.
   const { evidence: _selectors, authorMaterial, ...narrative } = readingContext(context)
   const task = { ...narrative, authorMaterial: authorMaterial.map(f => f.text), unresolved: basis.unresolved.text,
+    expansionNeeds: context.expansionNeeds,
+    creativeFocus: context.creativeFocus,
     ...(repair ? { repair: repair.issues, previousOptions: repair.previousPlan.options.map(({ label, action, proposedConsequence }) => ({ label, action, proposedConsequence })) } : {}) }
   if (route !== 'action') {
     const questions = await step(questionPrompt, task, 'continuation-question', value => {
       const r = record(value, ['questions'])
       if (!Array.isArray(r.questions) || r.questions.length !== 1) invalid('只问一个必要的作者问题。')
       return (r.questions as unknown[]).map((q: unknown) => prose(q, context, 140))
-    }, 0.2)
+    }, 0.2, schemas.question)
     return { basis, options: [], authorReview: { summary: basis.unresolved.text, questions } }
   }
-  const options = await step(actionPrompt, task, 'continuation-composition', value => {
+  const options = await step(repair ? `${actionPrompt}\n${storyDevelopmentRepairGuidance}` : actionPrompt, task, 'continuation-composition', value => {
     const r = record(value, ['options'])
     if (!Array.isArray(r.options) || r.options.length < 1 || r.options.length > 3) invalid('提供一至三项实际不同的提案。')
     const options = (r.options as unknown[]).map((v: unknown) => {
@@ -111,7 +121,7 @@ export async function composeContinuation(context: Context, decision: Continuati
     })
     if (new Set(options.map(o => o.action)).size !== options.length) invalid('候选行动不能逐字重复。')
     return options
-  }, 0.65)
+  }, 0.65, schemas.composition)
   return { basis, options, authorReview: null }
 }
 
@@ -120,14 +130,15 @@ export async function auditContinuation(context: Context, decision: Continuation
   const input = { latestConfirmedResult: latest ? { actionText: latest.actionText, resultText: latest.resultText } : null,
     earlierConfirmedResults: context.executedHistory.slice(0, -1).map(h => ({ actionText: h.actionText, resultText: h.resultText })),
     originalAuthorMaterial: context.sourceFacts.filter(f => f.authority === 'author-material').map(f => f.text),
-    authorDesignIntent: context.authorEdits.map(e => e.text), goal: context.goal, reviewMode: decision.route,
+    authorDesignIntent: context.authorEdits.map(e => e.text), expansionNeeds: context.expansionNeeds, goal: context.goal, reviewMode: decision.route,
+    creativeFocus: context.creativeFocus,
     proposal: { basis: { reason: plan.basis.reason, unresolved: { kind: plan.basis.unresolved.kind, text: plan.basis.unresolved.text } },
       options: plan.options.map(({ label, action, proposedConsequence }) => ({ label, action, proposedConsequence })), authorReview: plan.authorReview } }
   let previousOutput: unknown, validationFailure: string | undefined
   for (let pass = 0; pass < 2; pass++) {
-    previousOutput = await requestQwenJson({ systemPrompt: continuationQualityInstruction,
+    previousOutput = await requestQwenJson({ systemPrompt: `${continuationQualityInstruction}\n${storyCreativeFocusGuidance}`,
       userPrompt: JSON.stringify({ ...input, ...(validationFailure ? { previousOutput, validationFailure } : {}) }),
-      temperature: 0.1, maxTokens: 2400, diagnosticStage: 'candidate-action-quality-review' })
+      temperature: 0.1, maxTokens: 2400, diagnosticStage: 'candidate-action-quality-review', outputSchema: schemas.review })
     try { validateContinuationQualityReview(previousOutput); return } catch (error) {
       // A content defect goes back to its owner, never to format regeneration.
       if (pass || !(error instanceof AppError) || error.code !== 'INVALID_MODEL_OUTPUT') throw error

@@ -1,11 +1,16 @@
 import { randomUUID } from 'node:crypto'
 import { hasProposalProtocolLeak } from './storyProposalProse.js'
-import { storyCreativeIntentGuidance } from './storyCreativeIntent.js'
+import { storyCreativeIntentGuidance, storyCreativeFocusGuidance, preparationCreativeFocus } from './storyCreativeIntent.js'
+import { storyDevelopmentGuidance, storyDevelopmentRepairGuidance, storySemanticReviewGuidance, storyTechnicalReviewGuidance } from './storySemanticReview.js'
+import { developmentStateGuidance, developmentStateIssues, type DevelopmentState } from './storyDevelopmentState.js'
+import { bridgeRepairDiagnostic, parseBridgeReviewCheck, bridgeEvidenceCatalog, type BridgeEvidence } from './storyBridgeReview.js'
 import { generateSceneDraft, sceneAuthorRequirements } from './storySceneDraft.js'
-import { AppError, requestQwenJson } from './qwen.js'
+import { AppError, requestQwenJson, withModelDiagnostic } from './qwen.js'
+import { preparationOutputSchemas as schemas, preparationQualitySchema, projectionOutputSchema, causalReviewOutputSchema, factReviewOutputSchema } from './storyOutputSchemas.js'
+import { parseFactReviewChecks } from './storyFactReview.js'
 import { mapInitialReasoningProposal } from './storyInitialReasoning.js'
 import { validateStoryReasoningProposal } from './storyReasoningContract.js'
-import type { StoryCausalBridge, StoryPreparation, StoryPreparationCandidate, StoryPreparationItem, StoryPreparationReview } from '../../shared/story-preparation.js'
+import type { StoryCausalBridge, StoryMainlineAnchor, StoryMainlineGoal, StoryPreparation, StoryPreparationCandidate, StoryPreparationItem, StoryPreparationReview, StoryExpansionNeed, StoryCreativeFocus } from '../../shared/story-preparation.js'
 import type { StoryReasoningProposal } from '../../shared/story-reasoning-contract.js'
 import type { CreativeBrief, ProvisionalCurve, StoryDesignRecord } from '../../shared/story-contract.js'
 
@@ -26,20 +31,25 @@ class PreparationMaterialIdError extends AppError {
   }
 }
 class PreparationQualityError extends AppError {
-  constructor(readonly issues: string[]) {
+  constructor(readonly issues: string[], readonly origin: 'directions' | 'causal-bridge' = 'directions') {
     super('这个方向的内容审阅未通过，请换一个提案或调整想法；尚未生成故事曲线。', 502, 'STORY_PREPARATION_QUALITY_FAILED')
   }
 }
 const preparationQualityCriteria = ['facts', 'causality', 'requirements', 'author-control', 'questions'] as const
+const futureChoiceIssueTypes = ['none', 'author-conflict', 'world-implausible', 'causal-gap', 'mainline-drift'] as const
+const generatedProposalTextMax = 240
 function logPreparationReview(stage: string, attempt: number, candidateIds: string[], decision: object): void {
   if (process.env.STORY_PREPARATION_DIAGNOSTICS !== 'true') return
   // Model judgments may quote the author's text; keep them in opt-in local server logs only.
   console.warn('[preparation] review', JSON.stringify({ stage, attempt, candidateIds, decision }))
 }
-function object(value: unknown, keys: string[]): Record<string, unknown> {
+function object(value: unknown, keys: string[], optionalKeys: string[] = []): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) invalid('输出必须是对象。')
   const r = value as Record<string, unknown>
-  if (Object.keys(r).length !== keys.length || keys.some(k => !(k in r))) invalid('输出字段不符合当前阶段，禁止夹带事实更新或确认状态。')
+  if (Object.keys(r).some(key => !keys.includes(key) && !optionalKeys.includes(key)) || keys.some(k => !(k in r))) {
+    if (process.env.STORY_PREPARATION_DIAGNOSTICS === 'true') console.warn('[preparation] unexpected output keys', { expected: keys, actual: Object.keys(r) })
+    invalid('输出字段不符合当前阶段，禁止夹带事实更新或确认状态。')
+  }
   return r
 }
 function list(value: unknown, max = 24): unknown[] {
@@ -60,6 +70,61 @@ function ids(value: unknown, allowed: Set<string>, path = '引用'): string[] {
 }
 function unique(items: { id: string }[]) {
   if (new Set(items.map(i => i.id)).size !== items.length) invalid('ID 重复。')
+}
+
+/** Compress only generated prose before content review. References, author
+ * text and every already valid field remain byte-for-byte unchanged. */
+async function repairGeneratedTextLengths(output: unknown, sources: StoryPreparation['sources'], stage: string): Promise<unknown> {
+  if (!output || typeof output !== 'object' || Array.isArray(output)) return output
+  const repaired = structuredClone(output) as Record<string, unknown>
+  const fields: { id: string; path: string; text: string; maxLength: number; targetLength: number; record: Record<string, unknown>; key: string }[] = []
+  const collect = (value: unknown, path: string, limits: Record<string, number>) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return
+    const record = value as Record<string, unknown>
+    for (const [key, targetLength] of Object.entries(limits)) {
+      const value = record[key]
+      if (typeof value === 'string' && value.length > generatedProposalTextMax) fields.push({
+        id: `t${fields.length}`, path: `${path}.${key}`, text: value, maxLength: generatedProposalTextMax, targetLength, record, key,
+      })
+    }
+  }
+  if (Array.isArray(repaired.candidates) && repaired.candidates.length <= 3) repaired.candidates.forEach((value, i) => {
+    collect(value, `candidates[${i}]`, { action: 110, possibleResult: 80, futureChoice: 80 })
+    if (value && typeof value === 'object') collect(value.causalBridge, `candidates[${i}].causalBridge`, { method: 100, change: 100 })
+  })
+  if (Array.isArray(repaired.bridges) && repaired.bridges.length <= 3) repaired.bridges.forEach((value, i) => collect(value, `bridges[${i}]`, { method: 100, change: 100 }))
+  if (Array.isArray(repaired.futureChoices) && repaired.futureChoices.length <= 3) repaired.futureChoices.forEach((value, i) => collect(value, `futureChoices[${i}]`, { text: 80 }))
+  if (Array.isArray(repaired.developments) && repaired.developments.length <= 3) repaired.developments.forEach((value, i) => {
+    if (value && typeof value === 'object') {
+      collect(value.attempt, `developments[${i}].attempt`, { text: 100 })
+      collect(value.change, `developments[${i}].change`, { text: 100 })
+      collect(value.futureChoice, `developments[${i}].futureChoice`, { text: 80 })
+    }
+  })
+  if (!fields.length) return output
+  try {
+    const raw = await requestQwenJson({
+      systemPrompt: `只压缩系统提案中超长的文字字段，不重新构思故事。返回精确 JSON {texts:[{id,text}]}，fields 中每个 id 恰好一项，不输出其他字段。sources 是不可改写的作者原文，proposal 是上下文。
+每项按 targetLength 压缩，maxLength 是硬上限。长度按程序的字符串长度统计，标点、空格和英文也计入，部分表情占两位；actualLength 是程序已测长度。不要贴着上限写，也不要自报字数。
+保留原有事件、人物应对、选择、代价、否定、条件和不确定性，删解释、修饰及重复内容；action 保留“遇到的难处”和“眼前的选择”。不新增事件、设备、规则或结果，不把可能改成已发生。只返回所列字段的压缩文本，其余内容由程序原样保留。`,
+      userPrompt: JSON.stringify({ sources, proposal: output, fields: fields.map(({ record, key, ...field }) => ({ ...field, actualLength: field.text.length })) }),
+      temperature: 0.1, maxTokens: Math.min(3600, 300 + fields.reduce((n, field) => n + field.targetLength * 2, 0)), diagnosticStage: stage,
+      outputSchema: schemas.compression,
+    })
+    const result = object(raw, ['texts'])
+    const replacements = list(result.texts, fields.length).map(value => {
+      const item = object(value, ['id', 'text'])
+      const field = fields.find(field => field.id === item.id)
+      if (!field) return invalid('压缩结果引用了未请求的文字字段。')
+      return { id: field.id, field, value: text(item.text, field.maxLength, field.path) }
+    })
+    unique(replacements)
+    if (replacements.length !== fields.length) invalid('压缩结果遗漏超长字段。')
+    for (const { field, value } of replacements) field.record[field.key] = value
+    return repaired
+  } catch (error) {
+    throw withModelDiagnostic(error, { stage, attempt: 1, maxAttempts: 1 })
+  }
 }
 
 export const preparationExtractionPrompt = `先整理作者材料，只分类固定原文片段，不设计曲线或行动，不补事实。
@@ -114,9 +179,13 @@ const preparationQuestionsPrompt = `你是第一次写作的作者的故事搭�
 保留原文已定风格、场景及结尾期待；不能把结尾期待当人物当前愿望。不要设计角色行动或结果，不进行现实事实核查。materialIds 仅取 referenceContract.questionMaterialIds 中相关的原文ID，不能新增来源。`
 
 const preparationDirectionsPrompt = `你是一位中文短篇故事编辑。从作者的想法提出恰好三种可以继续展开的故事困境，供作者选择；此时不写场景、对白或人物已经做出的具体动作。
+${storyDevelopmentGuidance}
 严格输出JSON {candidates:[{id,action,materialIds,preconditionIds,possibleResult,resultBasisIds,unknownIds}],questions:[]}。每条 action 用50至110字，必须使用两段明确标记：“遇到的难处：……”和“眼前的选择：……”。前一段说明人物原本想完成什么、未来可能遇到的一个阻碍；后一段说明由该阻碍造成的眼前取舍。不要把阻碍写成已经发现、已被告知或已被要求的事实。possibleResult 用30至80字写不同选择可能让原目标怎样变化，不宣称结果已经发生。不写“提议：”“可能发展：”前缀。
-三条共享原始目标，只在阻碍及取舍的因果机制上分化；删去人物、物件和地点后，阻碍若仍相同就重新构思。作者希望看到的结局是共同终点，不是三条都要重复使用的阻碍或转折；分别设计不同的起因和关键选择，让选定的任一方向都能合理通向该终点。每条只保留一个主要阻碍和一个取舍，不要在同一条里列三个以上方案。短输入可以创作目标、代价、期限、人物、道具或往事，但每条卡围绕一个有意义的新事件发展，不用多个互不相干的新设定层层解释。新增内容是尚未发生、可拒绝的故事提案，不是作者已经提供的事实或必须补证的现实条件。意外不必由人物造成，也不必在卡片里解释完整来历；但人物应能在已有情境中遇见它，它须改变眼前目标并带出具体取舍。可能走向应由人物的不同应对打开，不靠下一次巧合自动兑现结果；具体发现过程和期限来由可在后续曲线中展开。允许创作符合故事世界常识的场所服务与日常流程，不因作者没写就否定：例如遗失门票后向游客中心询问能否补票可以提议；具体核验方式、费用和能否代办若决定结果，不能未经交代就保证成功。人物提议先陪朋友玩旋转木马是可拒绝的办法；“园区规定第一次来必须先玩旋转木马”若无合理世界设定，只是为了制造障碍，不应采用。关键新规则、资源或设备能力要符合当前故事世界，并有可理解的运作方式；不能靠拼贴假票突然获得扫码入园或闭园后游玩资格。作者明确给出的架空规则应保留，不套用现实规则限制。不要靠未经建立的设备特性、医学状态、技术故障或连续巧合自动兑现结果。保留原文期限、承诺、否定、关系、结局期望和明确未知；若只说双方有分歧，不要替他们确定各自立场；人物拒绝、沉默或尚未回应，不等于同意。人物亲自推进原目标：求职者找自己的工作，想游玩的人可以进入游玩。
-每条id唯一，用d0、d1、d2。materialIds至少引用原始目标；preconditionIds只引用行动确实依赖的已知原文条件。resultBasisIds只在可能结果明确承接已知原文条件时引用，否则返回空数组；不能为系统新创作的结果硬填原始目标充当证明。短输入允许提出新结果，但仍须与原目标、明确条件和人物选择构成可信因果。unknownIds为空。rejectedCandidates只用于避开作者拒绝过的方向，不是故事事实。不要附加解释。`
+ 三条从同一原始愿望出发，在事件、人物应对及取舍上分化；删去专有名词后若仍是同一阻碍，就重新构思。mainlineGoals 是作者的完整主线，mainlineAnchors 是原文指定的要素。每条只围绕一个主要阻碍和一个眼前取舍，不在短卡里写完多轮过程。先利用人物性格、相处方式、行动对象和已有场景产生变化；确实需要新人物、道具或条件时再补，交代其怎样影响选择即可。
+ 人物可以在遇见新情况后改变打算，甚至主动承担原先回避的代价；写清为何改变，以及原愿望、风险或关系如何继续影响取舍。不能仅在开头重提原目标、随后转去无关任务。作者已定结局是选定方向应能走向的终点，不必让三条使用同一个转折。保留作者期限、承诺、否定、关系、结局期望和明确未知；只说双方有分歧时，不替他们确定立场。
+ 意外可以从已有情境中自然遇见，不必全由人物造成，也不必在卡片里解释完整来历；之后的可能发展须与人物不同应对有关，不靠再一次巧合自动解题。新内容都是尚未发生、可拒绝的提案。能力与限制按故事世界判断：日常互动不必补证明流程，奇幻能力不必补科学原理；关键结果仍须有相应行动或能力支撑，不把询问写成必然获准，不凭空越过作者限制。
+ 每条id唯一，用d0、d1、d2。引用字段只能使用 referenceContract 中对应字段允许的材料 ID；mainlineAnchors 和 mainlineGoals 只用于理解主线，不是引用来源。materialIds至少引用原始目标；preconditionIds只能从 referenceContract.preconditionMaterialIds 选取行动确实依赖的作者已定事实或条件，没有额外前提就返回空数组，不得把人物目标当作前提。resultBasisIds只在可能结果明确承接已知原文条件时引用，否则返回空数组；不能为系统新创作的结果硬填原始目标充当证明。短输入允许提出新结果，但仍须与原目标、明确条件和人物选择构成可信因果。unknownIds为空。rejectedCandidates只用于避开作者拒绝过的方向，不是故事事实。
+输出结构：每条候选必须有七个独立字段，不能把 possibleResult、materialIds 等键名及其内容写进 action 字符串。单条编码示例（只示范字段，文字和ID必须按本次输入构思与选择）：{"id":"d0","action":"遇到的难处：人物面临的一个具体问题。眼前的选择：两种可能的应对。","materialIds":["本次允许的目标材料ID"],"preconditionIds":[],"possibleResult":"人物不同应对可能带来的变化。","resultBasisIds":[],"unknownIds":[]}。最终顶层为 {"candidates":[三条完整候选],"questions":[]}。即使重试也须返回完整JSON，不只给修订的句子或部分字段。不要附加解释。`
 
 export function parsePreparationMaterial(value: unknown, sources: StoryPreparation['sources']): StoryPreparationItem[] {
   const r = object(value, ['material'])
@@ -150,12 +219,15 @@ export function parsePreparationMaterial(value: unknown, sources: StoryPreparati
 
 export function preparationReferenceContract(material: StoryPreparationItem[]) {
   return { knownMaterialIds: material.filter(m => m.role !== 'unknown').map(m => m.id),
+    preconditionMaterialIds: material.filter(m => m.role === 'fact' || m.role === 'condition').map(m => m.id),
     questionMaterialIds: material.map(m => m.id), unknownDependencyIds: 'questions[].id' }
 }
 
 export function parsePreparationCandidates(value: unknown, material: StoryPreparationItem[]): Pick<StoryPreparation, 'candidates' | 'questions'> {
   const r = object(value, ['candidates', 'questions'])
-  const materialIds = new Set(material.map(m => m.id)), known = new Set(material.filter(m => m.role !== 'unknown').map(m => m.id))
+  const referenceContract = preparationReferenceContract(material)
+  const materialIds = new Set(material.map(m => m.id)), known = new Set(referenceContract.knownMaterialIds)
+  const allowedPreconditions = new Set(referenceContract.preconditionMaterialIds)
   const questions = list(r.questions, 8).map((v, i) => {
     const q = object(v, ['id', 'question', 'materialIds'])
     const question = text(q.question)
@@ -175,13 +247,14 @@ export function parsePreparationCandidates(value: unknown, material: StoryPrepar
       const bridge = object(c.causalBridge, ['method', 'change', 'methodBasisIds', 'changeBasisIds'])
       const methodBasisIds = ids(bridge.methodBasisIds, known, `candidates[${i}].causalBridge.methodBasisIds`)
       const changeBasisIds = ids(bridge.changeBasisIds, known, `candidates[${i}].causalBridge.changeBasisIds`)
-      const method = text(bridge.method, 240), change = text(bridge.change, 240)
+      const method = text(bridge.method, generatedProposalTextMax, `candidates[${i}].causalBridge.method`)
+      const change = text(bridge.change, generatedProposalTextMax, `candidates[${i}].causalBridge.change`)
       if (!method || !change || method === change || !methodBasisIds.length) invalid('因果桥必须包含办法、处境变化和办法的目标来源。')
       causalBridge = { method, change, methodBasisIds, changeBasisIds }
     }
-    const item: StoryPreparationCandidate = { id: text(c.id, 80), action: text(c.action), materialIds: candidateMaterialIds,
-      preconditionIds: ids(c.preconditionIds, known, `candidates[${i}].preconditionIds`), possibleResult: text(c.possibleResult), resultBasisIds, unknownIds: ids(c.unknownIds, questionIds, `candidates[${i}].unknownIds`),
-      ...(c.futureChoice === undefined ? {} : { futureChoice: text(c.futureChoice, 240, `candidates[${i}].futureChoice`) }), ...(causalBridge ? { causalBridge } : {}) }
+    const item: StoryPreparationCandidate = { id: text(c.id, 80), action: text(c.action, generatedProposalTextMax, `candidates[${i}].action`), materialIds: candidateMaterialIds,
+      preconditionIds: ids(c.preconditionIds, allowedPreconditions, `candidates[${i}].preconditionIds`), possibleResult: text(c.possibleResult, generatedProposalTextMax, `candidates[${i}].possibleResult`), resultBasisIds, unknownIds: ids(c.unknownIds, questionIds, `candidates[${i}].unknownIds`),
+      ...(c.futureChoice === undefined ? {} : { futureChoice: text(c.futureChoice, generatedProposalTextMax, `candidates[${i}].futureChoice`) }), ...(causalBridge ? { causalBridge } : {}) }
     for (const prose of [item.action, item.possibleResult, item.futureChoice].filter((value): value is string => !!value)) {
       if (hasProposalProtocolLeak(prose, material.map(m => m.quote))) invalid('故事提案不能包含内部引用字段或材料 ID；引用只放在引用数组。')
     }
@@ -202,47 +275,138 @@ function coversCandidates(items: { id: string }[], candidates: StoryPreparationC
 }
 
 function parseFutureChoiceProjection(raw: unknown, candidates: StoryPreparationCandidate[]) {
-  const output = object(raw, ['bridges', 'futureChoices'])
-  const bridges = list(output.bridges, candidates.length).map(value => {
-    const item = object(value, ['id', 'method', 'change', 'methodBasisIds', 'changeBasisIds'])
+  const output = object(raw, ['developments'])
+  const developments = list(output.developments, candidates.length).map((value, index) => {
+    const entry = object(value, ['id', 'attempt', 'change', 'futureChoice'])
+    const attempt = object(entry.attempt, ['means', 'methodUses', 'text', 'materialIds'])
+    const change = object(entry.change, ['outcome', 'states', 'text', 'materialIds'])
+    const item = { id: entry.id, means: attempt.means, methodUses: attempt.methodUses, method: attempt.text, change: change.text, methodBasisIds: attempt.materialIds,
+      changeBasisIds: change.materialIds, outcome: change.outcome, states: change.states, futureChoice: entry.futureChoice }
     if (!Array.isArray(item.methodBasisIds) || !Array.isArray(item.changeBasisIds)
       || item.methodBasisIds.some(id => typeof id !== 'string') || item.changeBasisIds.some(id => typeof id !== 'string')) invalid('因果桥来源 ID 格式不合法。')
-    return { id: text(item.id, 80), method: text(item.method, 240), change: text(item.change, 240),
-      methodBasisIds: item.methodBasisIds as string[], changeBasisIds: item.changeBasisIds as string[] }
+    const means = list(item.means, 3).map(value => {
+      const entry = object(value, ['id', 'capability', 'status'])
+      if (!['available', 'unavailable', 'uncertain'].includes(String(entry.status))) invalid('能力状态不合法。')
+      return { id: text(entry.id, 80), capability: text(entry.capability, 140), status: entry.status as DevelopmentState['means'][number]['status'] }
+    })
+    unique(means)
+    if (!means.length) invalid('每条办法至少记录一项实际手段或条件。')
+    const methodUses = list(item.methodUses, 3).map(value => {
+      const use = object(value, ['meansId', 'mode'])
+      if (!means.some(means => means.id === use.meansId) || !['rely', 'test'].includes(String(use.mode))) invalid('办法的能力依赖不存在或模式不合法。')
+      return { meansId: text(use.meansId, 80), mode: use.mode as 'rely' | 'test' }
+    })
+    if (!methodUses.length) invalid('办法缺少实际依赖的手段。')
+    if (new Set(methodUses.map(use => use.meansId)).size !== methodUses.length) invalid('办法的能力依赖重复。')
+    const states = list(item.states, 5).map(value => {
+      const entry = object(value, ['id', 'statement', 'status'])
+      if (!['holds', 'absent', 'uncertain'].includes(String(entry.status))) invalid('结果状态不合法。')
+      return { id: text(entry.id, 80), statement: text(entry.statement, 140), status: entry.status as DevelopmentState['states'][number]['status'] }
+    })
+    unique(states)
+    if (!states.length || !['success', 'partial', 'failure', 'uncertain'].includes(String(item.outcome))) invalid('结果状态或成败缺失。')
+    const choice = object(item.futureChoice, ['text', 'requires'])
+    const choiceRequires = list(choice.requires, 5).map(value => {
+      const requirement = object(value, ['stateId', 'status'])
+      if (!states.some(state => state.id === requirement.stateId) || !['holds', 'absent', 'uncertain'].includes(String(requirement.status))) invalid('后续选择引用的结果状态不存在或状态不合法。')
+      return { stateId: text(requirement.stateId, 80), status: requirement.status as DevelopmentState['choiceRequires'][number]['status'] }
+    })
+    if (new Set(choiceRequires.map(requirement => requirement.stateId)).size !== choiceRequires.length) invalid('后续选择的状态依赖重复。')
+    return { id: text(item.id, 80), method: text(item.method, generatedProposalTextMax, `developments[${index}].attempt.text`), change: text(item.change, generatedProposalTextMax, `developments[${index}].change.text`),
+      methodBasisIds: item.methodBasisIds as string[], changeBasisIds: item.changeBasisIds as string[],
+      choice: text(choice.text, generatedProposalTextMax, `developments[${index}].futureChoice.text`),
+      plan: { means, methodUses, states, choiceRequires, outcome: item.outcome as DevelopmentState['outcome'] } }
   })
+  const bridges = developments.map(({ id, method, change, methodBasisIds, changeBasisIds }) => ({ id, method, change, methodBasisIds, changeBasisIds }))
   if (!coversCandidates(bridges, candidates)) invalid('因果桥没有覆盖全部方向。')
-  const choices = list(output.futureChoices, candidates.length).map(value => {
-    const item = object(value, ['id', 'text'])
-    return { id: text(item.id, 80), value: text(item.text, 240, 'futureChoices[].text') }
-  })
-  if (!coversCandidates(choices, candidates)) invalid('后续故事取舍没有覆盖全部方向。')
-  return { bridges, choices }
+  return { bridges, choices: developments.map(({ id, choice }) => ({ id, value: choice })),
+    plans: developments.map(({ id, plan }) => ({ id, plan })) }
 }
 
-export async function projectFutureChoices(candidates: StoryPreparationCandidate[], sources: StoryPreparation['sources'], brief: CreativeBrief): Promise<StoryPreparationCandidate[]> {
+// A malformed response is not a failed story judgment. Repair only this
+// response; keep the semantic repair budget and previous approvals intact.
+async function requestPreparationResponse<T>(options: Parameters<typeof requestQwenJson>[0], parse: (raw: unknown) => T | Promise<T>): Promise<T> {
+  let previousOutput: unknown
+  let validationFailure: string | undefined
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const output = await requestQwenJson({ ...options, ...(attempt ? {
+      userPrompt: JSON.stringify({ ...JSON.parse(options.userPrompt), previousOutput, validationFailure }),
+    } : {}) })
+    try { return await parse(output) } catch (error) {
+      if (!(error instanceof AppError) || error.code !== 'STORY_PREPARATION_INVALID_OUTPUT' || error.modelDiagnostic) throw error
+      if (attempt) throw withModelDiagnostic(error, { stage: `${options.diagnosticStage}:response-schema`, attempt: 2, maxAttempts: 2 })
+      previousOutput = output
+      validationFailure = error.message
+    }
+  }
+  return invalid('模型审阅未完成。')
+}
+
+export const causalBridgeReviewPrompt = `审查每条方向的“办法→处境变化→故事将推向”因果桥。你审阅的是供作者选择的故事方向大纲，不是已写完的小说。职责只限当前因果桥是否成立；作者已定事实另有核对。按整条 action、possibleResult、method、change、futureChoice 的实际含义判断，不按是否逐字复述判断。所有新内容都是尚未发生、可拒绝的创意。
+按以下顺序判断，不增设检查任务：
+1. 读出这次尝试实际造成或引出的变化，再看变化怎样影响后续选择。处境变化包括失败、恶化、暴露、失去机会、新信息及关系改变；它不等于改善处境或完成原目标。人物的错误办法带来负面后果，再迫使人物取舍，本身就是推进。暂时稳住一次谈话与问题随后加剧可以同时成立，不能把局部效果读成彻底解决。
+2. 按完整提案连接事件，不把字段当成隔离的事实快照。method写尝试，change可以首次写接下来的动作、发现、道具遗失或他人回应，不要求在method预先重复。change已经写出的外显动作、他人观察或回应就是提案内容，不能又以method没写同一动作判缺失。分清设备效果与人物反应：设备未产生声音或信号，不妨碍他人看见使用者的动作、迟疑并开口回应。人物到达场所、接触他人或尝试办法，可以引出相关偶遇和新事件。不要求每件事都由上一步直接造成；只在不断空降无关麻烦、人物办法及其后果不再影响选择时判断裂。
+3. 对可能的缺口先判断能否在正文自然展开。普通动作、对白、携带或学会日常工具的背景、他人观察和合理配合，无须在方向卡上详述。已经提出交谈、请求、试用等可行办法，但用预期效果概括了关键过程、尚未设计具体说法或回应时，判expandable，留给正文表现该尝试如何发生；不要求在大纲中证明一句话必定引起某种心理反应。允许按题材惯例创作新设定，不从未写出的地方推断“必定没有”；尤其不得假定某种魔法、资格或心理反应是唯一途径，再据此拒绝。若只是重要转折的铺垫或过程尚未表现，保留方向，把对应原文标成待展开；若普通细节仍无法使结果成立，必须替换关键办法、结果或推翻明确限制，才是实质问题。
+4. 最后只拦截实质问题：办法与声称的关键结果没有可用的作用途径；明确否定的状态被当成已成立；核心机制明显不可能或违反该故事明确规则；后续转向与原愿望、关系及代价全无连接。已明确失效的渠道不能悄悄产生输出，存储内容不能在没有读取或传递途径时被解码播放，证据不能直接证明其不包含的信息。关键结果不能仅靠“共振、感应、同步”等名称成立；普通可用工具不要求内部实现，奇幻按其自洽规则判断，不以现实不存在为由拒绝。人物可以猜测、误会或尝试，但未证实不能叙述成已证实，可能发生不能变成成功保证。
+后续选择可以包含尚未执行的新行动或条件分支，也可以由已发生的事触发目标转变、主动牺牲原打算；核对原愿望、风险、关系或承诺是否仍影响取舍的意义和代价，不要求每一步更接近原任务。developmentState只是待核对的生成计划，不能取代正文、证明能力，也不能据它凭空推断正文没写的限制。不同人物、时间、物品与信息状态须按上下文区分。
+${storyTechnicalReviewGuidance}
+只返回以下三种结论：
+- supported：方向已成立。普通省略不产生待办，不因还有其他发展可能或人物未用最优办法拒绝。
+- expandable：方向可成立，但一处重要铺垫或过程需在正文兑现；不改目标、关键办法、结果或选择。needs最多两项，只选当前提案原文编号与类别：setup=转折前的必要铺垫，action-detail=已有办法的关键尝试过程，response-detail=已有变化对应的回应。不得写具体修改方案、增加认证、秘密能力或设备功能来绕过限制。
+- contradictory：存在上述实质问题。issueType为causal-gap（作用途径或状态承接断裂、无关麻烦替代行动）、mainline-drift（与原问题及其选择代价失去联系）、world-implausible（关键机制明显不可能或自相矛盾）。复杂、技术或手续多不是独立判错标准。
+返回紧凑JSON {checks:[{id,verdict,reason,issueType,evidenceIds,needs}]}，每个输入id恰好一次，六个字段全给，不输出valid。supported用issueType:"none",evidenceIds:[],needs:[]。expandable用issueType:"none",evidenceIds:[],needs:[{kind,evidenceIds}]；kind只用setup、action-detail、response-detail，每项选择当前提案1至3个原文编号。contradictory用needs:[]、上述issueType及2至4个不同evidenceIds，至少一个来自当前提案，其余来自当前提案或作者材料。
+evidenceCatalog的id由程序保留原文，不重抄quote、不引用其他方向或内部developmentState。拒绝依据须真正支持所称断裂：状态矛盾选冲突双方，机制断裂选办法与声称结果，偏航选原愿望或已有后果与脱离它的后续。reason不超过180字，只解释实际判断，不建议新情节；不能仅凭未写细节、失败后处境变差、审阅者自定的必要条件拒绝。先作实际判断，再保证verdict、reason及引用一致；重审仍覆盖全部输入id。`
+
+export async function projectFutureChoices(candidates: StoryPreparationCandidate[], sources: StoryPreparation['sources'], brief: CreativeBrief,
+  mainlineAnchors: StoryMainlineAnchor[] = [], mainlineGoals: StoryMainlineGoal[] = [], creativeFocus?: StoryCreativeFocus): Promise<StoryPreparationCandidate[]> {
   if (!candidates.length) return candidates
-  if (candidates.every(candidate => candidate.futureChoice && candidate.causalBridge)) return candidates
-  const prompt = `你是故事大纲编辑。输入包含已审阅的方向卡。为每条方向补人物可能采取的办法、由此可能发生的处境变化和下一层故事取舍，不写完整剧情。返回精确 JSON {bridges:[{id,method,change,methodBasisIds,changeBasisIds}],futureChoices:[{id,text}]}，每个输入 id 在两组中恰好一项。
-method 是人物在方向卡眼前取舍中可能采取的办法，change 是办法后可能出现的新局面，使原目标更近、更远，或改变已建立的人物关系；不要把它写成已经发生。methodBasisIds 只能引用该方向的 materialIds；changeBasisIds 只在变化确实承接作者原文条件时引用该方向的 resultBasisIds，否则为空。引用表示承接作者材料，不证明新结果已经发生或因果成立。来源 ID 不写入文字。
-每条 text 30至80字，一句话写“如果眼前办法奏效或失败，处境会怎样改变；人物因此还要在什么两种故事走向间取舍”。新取舍必须改变原目标的推进方式、作品归属或人物间的协作关系，不得只是再修一次、再等片刻、再核对一次、换项目或换路线。可以补充人物、期限、道具、往事或可信的日常服务作为可拒绝的未来创意；若成为下一层选择的关键条件，须能从已选方向或人物行动中合理接出，不把“可以询问”直接写成“已获批准”。新增机构规则或特殊能力若决定结果，要符合故事世界并交代其运作；不能靠突然生效的设备功能、无来由的特权或他人默认同意直接解决问题。写故事规划，不写角色下一秒做什么；不要对白、微动作、物件位置、秘密、确定结局或“学会成长”式感悟。
-粒度示范 A：若她解决入园问题，同行者可能已先走；她要独自游玩，还是追上对方说明自己希望一起玩？
-粒度示范 B：若她修好妹妹被淋湿的画，画面可能已不是妹妹原作；她要替妹妹决定照常送展，还是坦白修改并让妹妹参与决定？
-示范只说明“新局面改变选择对象”的结构，不能复制其中的人物、物件和情节。所有内容仍是可拒绝、尚未发生的系统提案。`
-  const input = { sources, brief, candidates: candidates.map(({ id, action, possibleResult, materialIds, resultBasisIds }) => ({ id, action, possibleResult, materialIds, resultBasisIds })) }
+  const hasCompleteProjection = candidates.every(candidate => candidate.futureChoice && candidate.causalBridge)
+  const prompt = `你是故事大纲编辑。输入包含已审阅的方向卡。为每条方向补人物可能采取的办法、由此可能发生的处境变化和下一层故事取舍，不写完整剧情。返回精确 JSON {developments:[{attempt:{means,methodUses,text,materialIds},change:{outcome,states,text,materialIds},futureChoice:{requires,text},id}]}，每个输入 id 恰好一项。每条按attempt→change→futureChoice连续写完整后再写下一条，不把办法与后续选择分成两组独立构思。
+${storyDevelopmentGuidance}
+${storyCreativeFocusGuidance}
+${developmentStateGuidance}
+method 是人物在方向卡眼前取舍中可能采取的办法，change 是办法后可能出现的新局面，使原目标更近、更远，或改变已建立的人物关系；两项各用40至100字，简明写清机制，不要把它写成已经发生。methodBasisIds 只能引用该方向的 materialIds；changeBasisIds 只在变化确实承接作者原文条件时引用该方向的 resultBasisIds，否则为空。引用表示承接作者材料，不证明新结果已经发生或因果成立。来源 ID 不写入文字。
+以上办法编码为attempt.text、methodBasisIds编码为attempt.materialIds；处境变化编码为change.text、changeBasisIds编码为change.materialIds；后续取舍编码为futureChoice.text。不要输出旧的bridges或futureChoices顶层数组。
+本步写故事大纲，不写操作指南。办法用一个可理解的行动说清，不展开拆装、接线、材料用量或参数实验。题材确实关注技术时，保留直接决定取舍的关键条件即可。若阻力来自人与人的关系，让尝试与回应落在相处中，不凭空增加必须先解决的技术难题。
+ 每条 text 30至80字，写明办法奏效或失败后，人物面对哪两种后续走向。新取舍须影响原愿望的机会、代价或已有关系，也可以让人物在保住原打算与回应更在意的事情之间选择；等待、核对、调整做法或路线也可成立，但这次办法必须带来新信息、条件或后果，不能原地重复。先沿方向卡已有人物、目标和情境寻找办法；新事件可以偶然出现，不要求由上一步直接造成，但人物须有自然理由遇见它，且它须影响原目标和选择，不能连续空降无关麻烦代替人物行动改变处境。
+ 可以创作新人物、道具、往事、服务或规则，无须作者原文或方向卡预先写明；新内容应能从人物正在做的事或已有场所情境自然遇见。能力与代价按作者的世界设定和题材判断，新设定须自洽并保留已有的限制。普通询问、登记、协商及他人合理配合可以带出可能变化，无须另编整套手续、权限或背景；有必要条件时用条件式说明，不保证必然获准。关键结果须有办法能提供的信息、资源或能力支撑；线索可以引出调查，不能无依据地变成定论。
+ method 只写人物选用的办法；change 写办法成败、他人回应或相关发现带来的信息、机会、限制、代价或关系变化，不用心理感悟代替处境变化。futureChoices.text 写变化后尚待决定的两种走向，不必写出结局。写故事规划，不写对白、微动作、身体感受、隐藏经历或完整场景。不为增强戏剧性再空降一轮麻烦；先让这次办法产生后果。所有内容仍是可拒绝、尚未发生的系统提案。`
+  const input = { sources, brief, mainlineAnchors, mainlineGoals, creativeFocus, candidates: candidates.map(({ id, action, possibleResult, materialIds, resultBasisIds }) => ({ id, action, possibleResult, materialIds, resultBasisIds })) }
   const projectedBridges = new Map<string, ReturnType<typeof parseFutureChoiceProjection>['bridges'][number]>()
   const projectedChoices = new Map<string, string>()
-  let repairReasons: { id: string; reason: string }[] = []
+  const projectedStates = new Map<string, DevelopmentState>()
+  const projectedNeeds = new Map<string, StoryExpansionNeed[]>()
+  const approved = new Set<string>()
+  const factMaterial = framePreparationSources(sources)
+  let repairReasons: { id: string; issueType: string; reason: string; evidence?: BridgeEvidence[] }[] = []
+  let projectionValidationFailure: string | undefined
+  let previousProjectionOutput: unknown
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const pending = attempt && repairReasons.length ? candidates.filter(candidate => repairReasons.some(issue => issue.id === candidate.id)) : candidates
       const pendingInput = { ...input, candidates: input.candidates.filter(candidate => pending.some(item => item.id === candidate.id)),
-        ...(repairReasons.length ? { repairReasons } : {}) }
-      const rawOutput = await requestQwenJson({ systemPrompt: `${prompt}
-关键设定若决定结果，写清它为何在此情境可信；不要用凭空新增的机构互通、专用设备或特权来代替人物办法。若输入含 repairReasons，仅重写所列方向的因果桥和取舍，不改方向卡。`, userPrompt: JSON.stringify(pendingInput), temperature: attempt ? 0.15 : 0.35,
-         maxTokens: 1200, diagnosticStage: 'preparation-future-choice' })
-      const { bridges: generatedBridges, choices: generatedChoices } = parseFutureChoiceProjection(rawOutput, pending)
+        referenceContract: pending.map(candidate => ({ id: candidate.id, attemptMaterialIds: candidate.materialIds, changeMaterialIds: candidate.resultBasisIds })),
+        ...(repairReasons.length ? { repairReasons, previousProjections: repairReasons.map(({ id }) => ({
+          id, bridge: projectedBridges.get(id), futureChoice: projectedChoices.get(id), developmentState: projectedStates.get(id),
+        })) } : {}), ...(projectionValidationFailure ? { validationFailure: projectionValidationFailure, previousOutput: previousProjectionOutput } : {}) }
+      const { bridges: generatedBridges, choices: generatedChoices, plans: generatedPlans } = hasCompleteProjection && !attempt
+        ? { bridges: candidates.map(candidate => ({ ...candidate.causalBridge!, id: candidate.id })),
+          choices: candidates.map(candidate => ({ id: candidate.id, value: candidate.futureChoice! })), plans: [] }
+        : await requestPreparationResponse({ systemPrompt: `${prompt}
+每个attempt.text、change.text和futureChoice.text均不得超过240字。若输入含validationFailure，只改正超限或不合法字段，保留其他方向的内容及引用。若输入含repairReasons，只修复列出的方向，不改方向卡。对照previousProjections找出失败机制：world-implausible 时改掉不可信的规则、能力或权限；causal-gap 时让人物办法实际改变处境；mainline-drift 时恢复原愿望、风险或关系与新选择代价的联系，不把合理的目标转变改回原任务；author-conflict 时保留作者已定事实。失败桥中尚未接受的办法、变化与后续取舍可以一起简化或替换，不必靠补设定保住旧写法；仍须承接固定方向卡的眼前选择。修复后仍须同时满足故事连接和世界可信度。
+${repairReasons.length ? storyDevelopmentRepairGuidance : ''}
+developments 必须恰好 ${pending.length} 项，id 只能为 ${pending.map(candidate => candidate.id).join('、')}，每个id各出现一次。futureChoice.text 内写该人物面临的两种走向，不能把两个选项拆成两条记录或另编 c1/c2 等ID。修复时同步更新本条状态和依赖，不能只把状态标签改成通过而保留矛盾正文。`, userPrompt: JSON.stringify(pendingInput), temperature: attempt ? 0.15 : 0.35,
+          maxTokens: Math.max(1300, pending.length * 1100), diagnosticStage: 'preparation-future-choice', outputSchema: projectionOutputSchema(pending) }, async rawOutput => {
+          previousProjectionOutput = rawOutput
+          return parseFutureChoiceProjection(await repairGeneratedTextLengths(rawOutput, sources, 'preparation-future-choice-text-length'), pending)
+        })
+      if (process.env.STORY_PREPARATION_DIAGNOSTICS === 'true') {
+        console.warn('[preparation] projection', JSON.stringify({ attempt: attempt + 1,
+          bridges: generatedBridges, futureChoices: generatedChoices }))
+      }
       for (const bridge of generatedBridges) projectedBridges.set(bridge.id, bridge)
       for (const choice of generatedChoices) projectedChoices.set(choice.id, choice.value)
+      for (const { id, plan } of generatedPlans) projectedStates.set(id, plan)
       const bridges = candidates.map(candidate => projectedBridges.get(candidate.id)!)
       const choices = candidates.map(candidate => ({ id: candidate.id, value: projectedChoices.get(candidate.id)! }))
       for (const candidate of candidates) {
@@ -251,37 +415,90 @@ method 是人物在方向卡眼前取舍中可能采取的办法，change 是办
           || bridge.methodBasisIds.some(id => !candidate.materialIds.includes(id))
           || bridge.changeBasisIds.some(id => !candidate.resultBasisIds.includes(id))) invalid(`${candidate.id} 因果桥引用或内容不合法。`)
       }
-      const review = object(await requestQwenJson({
-        systemPrompt: `审查每条方向的“办法→处境变化→故事将推向”因果桥，不修改原困境。返回精确 JSON {checks:[{id,valid,reason}]}，每个 id 恰好一项，valid 为布尔值，reason 点明关键证据与修复方向，尽量控制在 250 字内。
- 逐条核对两个断点：一，决定结果的关键设定（机构间数据互通、专用资源、审批或设备能力等）在原文、方向或通常世界中是否有可信来由；普通服务、合理偶然和可拒绝的创作细节不因作者未写就拒绝。二，办法后的变化如何让人物更接近或远离原目标，或改变已经建立的关系；取舍不能转向与之无关的新任务。若不通过，reason 必须指出具体设定或偏航处及可修复方向，不能只说“缺少作者依据”。
- 来源层级必须分清：sources 是作者材料；candidates 是系统已审、但仍可拒绝的方向；bridges 和 futureChoices 是本轮新设计。新设计中的一句“该通道为研学备案机制预留”不能反过来证明这个通道可信；具体、可验证、带数字的细节也不等于现实可信。若方向只提出“去询问能否人工核验”，桥却保证出现教育专用通道、跨机构自动同步、特殊权限或语音识别设备，且没有作者设定或方向内可信铺垫，应拒绝桥，不要把它夸成合理升级。另核对方向内已写明的限制：若人物只记得证件号后四位，不能靠“准确说出完整号码”作为解决办法。不要用后续取舍仍提到游乐园，就掩盖实际主冲突已转成学校数据或设备审批。
- 其他条件：办法是眼前选择的自然发展，不是下一秒微动作；故事将推向的取舍比眼前操作更重要，仍是可拒绝的未来设计；不是重复修补、再等片刻、抽象说教或确定结局。新事件可以偶然出现，不要求它由上一行动造成，也不要求短方向卡交代完整来历；但办法后的变化不能再靠无关巧合、突然生效的设备功能或他人默认同意来完成。遗失门票后询问游客中心能否补办是可信的提案，不因作者未写补票流程就拒绝；但不能未经交代就保证凭他人身份证号代办成功。作者明确给出的架空规则应保留。可以留待曲线展开具体细节，不能仅因卡片尚未解释完毕就判失败。不能让作者或角色替另一人物接受改动。判断具体文本，不要因为它没有完整结局就拒绝。`,
-        userPrompt: JSON.stringify({ sources, candidates: input.candidates, bridges, futureChoices: choices.map(choice => ({ id: choice.id, text: choice.value })) }),
-        temperature: 0.1, maxTokens: null, diagnosticStage: 'preparation-future-choice-review',
-      }), ['checks'])
-      const checks = list(review.checks, candidates.length).map(value => {
-        const item = object(value, ['id', 'valid', 'reason'])
-        if (typeof item.valid !== 'boolean') invalid('后续取舍审阅判断不合法。')
-        const id = text(item.id, 80)
-        return { id, valid: item.valid, reason: text(item.reason, 500, `checks[${id}].reason`) }
+      const reviewCandidates = candidates.filter(candidate => !approved.has(candidate.id))
+      const stateChecks = new Map(reviewCandidates.flatMap(candidate => {
+        const plan = projectedStates.get(candidate.id)
+        const issue = plan && developmentStateIssues(plan)[0]
+        return issue ? [[candidate.id, { id: candidate.id, valid: false, ...issue }] as const] : []
+      }))
+      const reviewableCandidates = reviewCandidates.filter(candidate => !stateChecks.has(candidate.id))
+      const factProposals = reviewableCandidates.map(candidate => ({ id: candidate.id, action: candidate.action,
+        possibleResult: candidate.possibleResult, method: projectedBridges.get(candidate.id)!.method,
+        change: projectedBridges.get(candidate.id)!.change, futureChoice: projectedChoices.get(candidate.id)! }))
+      const factEvidence = bridgeEvidenceCatalog(factProposals, [])
+      const factChecks = reviewableCandidates.length ? await requestPreparationResponse({
+        systemPrompt: `核对因果桥是否违背作者已定事实。只做来源与事实冲突核对，不评价新设定是否可信、人物办法是否有效或故事是否精彩。返回紧凑JSON {checks:[{id,verdict,conflictMaterialIds,proposalEvidenceIds,reason}]}，每个id恰好一项。verdict只能为compatible或contradictory，是唯一判定；引用只是冲突证据，不能代替判定。不输出valid、materialIds、sourceId或quote。
+没有直接冲突时verdict="compatible"，conflictMaterialIds=[]、proposalEvidenceIds=[]，reason简写为“无冲突”。不要引用相容或支持提案的材料。只有提案明确否定、替换或越过作者已经写明的事实、限制或保留的未知时，才给contradictory；此时conflictMaterialIds从material选择至少一条被违背的作者原条件，proposalEvidenceIds从evidenceCatalog选择至少一条当前方向中与其冲突的提案原文，reason具体说明双方哪里矛盾。理由、判定与冲突依据须一致。不重新抄写引文。新规则、服务、设备或人物首次出现在提案中，本身绝不是事实冲突；不得因作者没写过而拒绝，也不把数量上限扩大成使用者资格或操控方式限制。若输入有validationFailure，只改正当前审阅，不重写故事，不为保留旧结论编造冲突。
+${storySemanticReviewGuidance}`,
+        userPrompt: JSON.stringify({ sources, material: factMaterial, candidates: input.candidates.filter(candidate => reviewableCandidates.some(item => item.id === candidate.id)),
+          bridges: bridges.filter(bridge => reviewableCandidates.some(item => item.id === bridge.id)),
+          futureChoices: choices.filter(choice => reviewableCandidates.some(item => item.id === choice.id)).map(choice => ({ id: choice.id, text: choice.value })),
+          evidenceCatalog: factEvidence }),
+        temperature: 0.1, maxTokens: 1100, diagnosticStage: 'preparation-future-choice-fact-review',
+        outputSchema: factReviewOutputSchema(reviewableCandidates.map(c => c.id), factMaterial.map(m => m.id), factEvidence.map(e => e.id)),
+      }, raw => parseFactReviewChecks(raw, reviewableCandidates.map(c => c.id), factMaterial, factEvidence)) : []
+      const worldCandidates = reviewableCandidates.filter(candidate => factChecks.find(check => check.id === candidate.id)?.valid)
+      let worldChecks: { id: string; valid: boolean; verdict: 'supported' | 'expandable' | 'contradictory'; issueType: typeof futureChoiceIssueTypes[number]; reason: string; evidence: BridgeEvidence[]; expansionNeeds: StoryExpansionNeed[] }[] = []
+      if (worldCandidates.length) {
+        const proposals = worldCandidates.map(candidate => ({ id: candidate.id, action: candidate.action,
+          possibleResult: candidate.possibleResult, method: projectedBridges.get(candidate.id)!.method,
+          change: projectedBridges.get(candidate.id)!.change, futureChoice: projectedChoices.get(candidate.id)!,
+          ...(projectedStates.has(candidate.id) ? { developmentState: projectedStates.get(candidate.id) } : {}) }))
+        const evidenceCatalog = bridgeEvidenceCatalog(proposals, sources.map(source => source.text))
+        worldChecks = await requestPreparationResponse({
+          systemPrompt: `${causalBridgeReviewPrompt}\n${storyCreativeFocusGuidance}`,
+          userPrompt: JSON.stringify({ storyContext: sources.map(source => source.text),
+            mainlineGoals: mainlineGoals.map(goal => goal.quote),
+            mainlineAnchors: mainlineAnchors.map(anchor => ({ kind: anchor.kind, quote: anchor.quote })),
+            creativeFocus,
+            proposals, evidenceCatalog }),
+          temperature: 0.1, maxTokens: 1800, diagnosticStage: 'preparation-future-choice-world-review', outputSchema: causalReviewOutputSchema(worldCandidates.length, evidenceCatalog.map(e => e.id)),
+        }, raw => {
+          const worldReview = object(raw, ['checks'])
+          const checks = list(worldReview.checks, worldCandidates.length).map(value => {
+            const id = typeof value === 'object' && value && 'id' in value ? String((value as Record<string, unknown>).id) : ''
+            const candidate = worldCandidates.find(candidate => candidate.id === id)
+            if (!candidate) return invalid('审阅引用了本次未审查的方向。')
+            const check = parseBridgeReviewCheck(value, evidenceCatalog)
+            if (check.id !== id) return invalid('审阅方向编号不一致。')
+            return check
+          })
+          if (!coversCandidates(checks, worldCandidates)) invalid('世界与因果审阅没有覆盖全部方向。')
+          return checks
+        })
+        for (const check of worldChecks) projectedNeeds.set(check.id, check.expansionNeeds)
+      }
+      const checks = reviewCandidates.map(candidate => {
+        const stateCheck = stateChecks.get(candidate.id)
+        if (stateCheck) return stateCheck
+        const fact = factChecks.find(check => check.id === candidate.id)!
+        return fact.valid ? worldChecks.find(check => check.id === candidate.id)! : fact
       })
-      if (!coversCandidates(checks, candidates)) invalid('后续取舍审阅没有覆盖全部方向。')
-      logPreparationReview('future-choice', attempt + 1, candidates.map(candidate => candidate.id), { checks })
+      for (const check of checks) if (check.valid) approved.add(check.id)
+      logPreparationReview('future-choice', attempt + 1, reviewCandidates.map(candidate => candidate.id), { checks })
       const rejected = checks.filter(check => !check.valid)
       if (rejected.length) {
-        if (!attempt) { repairReasons = rejected.map(({ id, reason }) => ({ id, reason })); continue }
-        throw new PreparationQualityError(rejected.map(check => `${check.id} 因果桥：${check.reason}`))
+        if (!attempt) {
+          repairReasons = rejected.map(check => stateChecks.has(check.id)
+            ? { id: check.id, issueType: check.issueType, reason: check.reason } : bridgeRepairDiagnostic(check))
+          continue
+        }
+        throw new PreparationQualityError(rejected.map(check => `${check.id} 因果桥：${check.reason}`), 'causal-bridge')
       }
       const bridgeById = new Map(bridges.map(bridge => [bridge.id, bridge]))
       const choiceById = new Map(choices.map(choice => [choice.id, choice.value]))
       return candidates.map(candidate => {
         const usableBridge = bridgeById.get(candidate.id)!
         const futureChoice = choiceById.get(candidate.id)!
-        return { ...candidate, futureChoice,
+        const { expansionNeeds: _staleNeeds, ...current } = candidate
+        const expansionNeeds = projectedNeeds.get(candidate.id)
+        return { ...current, futureChoice,
+          ...(expansionNeeds?.length ? { expansionNeeds } : {}),
           causalBridge: { method: usableBridge.method, change: usableBridge.change, methodBasisIds: usableBridge.methodBasisIds, changeBasisIds: usableBridge.changeBasisIds } }
       })
     } catch (error) {
-      if (attempt || !(error instanceof AppError) || error.code !== 'STORY_PREPARATION_INVALID_OUTPUT') throw error
+      if (attempt || !(error instanceof AppError) || error.code !== 'STORY_PREPARATION_INVALID_OUTPUT' || error.modelDiagnostic) throw error
+      projectionValidationFailure = error.message
     }
   }
   return invalid('因果桥生成未完成。')
@@ -295,14 +512,153 @@ export function preparationSources(idea: string, brief: CreativeBrief): StoryPre
     }), ...(brief.note?.trim() ? [{ id: 'author-note', text: brief.note.trim() }] : [])]
 }
 
+export function parseMainlineAnchors(value: unknown, sources: StoryPreparation['sources'], hasGoal: boolean,
+  frames: ReturnType<typeof framePreparationSources> = []): StoryMainlineAnchor[] {
+  const anchors = splitReferenceEntries(value, frames, 'mainlineAnchors', 16, ['kind']).map((entry, index) => {
+    const item = object(entry, ['id', 'kind', ...(entry && typeof entry === 'object' && 'materialIds' in entry ? ['materialIds'] : ['sourceId', 'quote'])])
+    const suppliedKind = String(item.kind)
+    const kind = suppliedKind === 'condition' || suppliedKind === 'time' ? 'constraint' : suppliedKind
+    if (!['character', 'relationship', 'place', 'action', 'object', 'constraint'].includes(kind)) invalid(`mainlineAnchors[${index}].kind 不合法。`)
+    const reference = resolvePreparationReference(item, sources, frames, `mainlineAnchors[${index}]`)
+    return { id: text(item.id, 80), kind: isAuthorRequirementSource(reference.sourceId) ? 'constraint' as const : kind as StoryMainlineAnchor['kind'], ...reference }
+  })
+  unique(anchors)
+  if (hasGoal && (!anchors.length || !anchors.some(anchor => anchor.kind === 'action'))) invalid('人物目标缺少可核对的主线行动。')
+  return anchors
+}
+
+/**
+ * A semantic mainline element may be supported by excerpts in several author
+ * fields. Stored references are deliberately stricter: each quote must remain
+ * a contiguous span from one source. Split cross-source ID groups into
+ * source-local nodes before resolving them, instead of fabricating a sentence
+ * that never appeared in any input field.
+ */
+function splitReferenceEntries(value: unknown, frames: ReturnType<typeof framePreparationSources>, path: string, maxItems: number, extraKeys: string[] = []): Record<string, unknown>[] {
+  const entries = list(value, maxItems)
+  const originalIds = entries.map(entry => ({ id: text(object(entry, ['id'], [...extraKeys, 'materialIds', 'sourceId', 'quote']).id, 80) }))
+  unique(originalIds)
+  const reservedIds = new Set(originalIds.map(item => item.id))
+  const result: Record<string, unknown>[] = []
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index]
+    const item = object(entry, ['id', ...extraKeys, ...(entry && typeof entry === 'object' && 'materialIds' in entry ? ['materialIds'] : ['sourceId', 'quote'])])
+    if (!('materialIds' in item)) {
+      result.push(item)
+      continue
+    }
+    const refs = ids(item.materialIds, new Set(frames.map(frame => frame.id)), `${path}[${index}].materialIds`)
+    const bySource = new Map<string, string[]>()
+    for (const ref of refs) {
+      const sourceId = frames.find(frame => frame.id === ref)?.sourceId ?? invalid(`${path}[${index}].materialIds：引用的材料来源不存在。`)
+      const sourceRefs = bySource.get(sourceId) ?? []
+      sourceRefs.push(ref)
+      bySource.set(sourceId, sourceRefs)
+    }
+    const groups = [...bySource.values()]
+    if (groups.length <= 1) {
+      result.push(item)
+      continue
+    }
+    const baseId = text(item.id, 80, `${path}[${index}].id`)
+    groups.forEach((group, part) => {
+      const prefix = `${baseId.slice(0, 55)}-source-${part + 1}`
+      let id = prefix, suffix = 1
+      while (reservedIds.has(id)) id = `${prefix}-${suffix++}`
+      reservedIds.add(id)
+      result.push({ ...item, id, materialIds: group })
+    })
+  }
+  return result
+}
+
+/** Select immutable source spans instead of asking a model to transcribe them.
+ * A span includes intervening clauses so a condition/negation cannot be dropped.
+ * Legacy quotations remain exact, but a frame boundary is not a source boundary. */
+function resolvePreparationReference(item: Record<string, unknown>, sources: StoryPreparation['sources'],
+  frames: ReturnType<typeof framePreparationSources>, path: string): { sourceId: string; quote: string } {
+  if ('materialIds' in item) {
+    const refs = ids(item.materialIds, new Set(frames.map(frame => frame.id)), `${path}.materialIds`)
+    if (!refs.length) invalid(`${path} 缺少原文片段。`)
+    const selected = frames.filter(frame => refs.includes(frame.id))
+    const sourceId = selected[0]!.sourceId
+    if (selected.some(frame => frame.sourceId !== sourceId)) invalid(`${path} 不能把不同来源拼成一条原文。`)
+    const source = sources.find(source => source.id === sourceId)
+    if (!source) return invalid(`${path} 引用的原文来源不存在。`)
+    // Resolve positions in source order so repeated clauses and whitespace
+    // between frames stay exactly as authored, including intervening limits.
+    let cursor = 0, start = -1, end = -1
+    for (const frame of frames.filter(frame => frame.sourceId === sourceId)) {
+      const offset = source.text.indexOf(frame.quote, cursor)
+      if (offset < 0) invalid(`${path} 原文片段与来源不对应。`)
+      cursor = offset + frame.quote.length
+      if (frame.id === selected[0]!.id) start = offset
+      if (frame.id === selected.at(-1)!.id) end = cursor
+    }
+    if (start < 0 || end <= start) invalid(`${path} 原文片段不连续。`)
+    return { sourceId, quote: text(source.text.slice(start, end), source.text.length, path) }
+  }
+  const suppliedId = text(item.sourceId, 80)
+  const frame = frames.find(frame => frame.id === suppliedId)
+  const source = sources.find(source => source.id === (frame?.sourceId ?? suppliedId))
+  if (!source) return invalid(`${path} 引用的原文来源不存在。`)
+  const quote = text(item.quote, source.text.length, path)
+  if (!source.text.includes(quote)) invalid(`${path} 必须逐字引用作者原文。`)
+  if (frame) {
+    const sourceFrames = frames.filter(item => item.sourceId === source.id)
+    const start = sourceFrames.slice(0, sourceFrames.indexOf(frame)).reduce((offset, item) => offset + item.quote.length, 0)
+    let overlaps = false
+    for (let pos = source.text.indexOf(quote); pos >= 0; pos = source.text.indexOf(quote, pos + 1)) {
+      if (pos < start + frame.quote.length && pos + quote.length > start) overlaps = true
+    }
+    if (!overlaps) invalid(`${path} 引文与所选片段不对应。`)
+  }
+  return { sourceId: source.id, quote }
+}
+
+function parseMainlineGoals(value: unknown, sources: StoryPreparation['sources'], frames: ReturnType<typeof framePreparationSources>, hasGoal: boolean): StoryMainlineGoal[] {
+  const goals = splitReferenceEntries(value, frames, 'mainlineGoals', 8).map((entry, index) => {
+    const item = object(entry, ['id', ...(entry && typeof entry === 'object' && 'materialIds' in entry ? ['materialIds'] : ['sourceId', 'quote'])])
+    return { id: text(item.id, 80), ...resolvePreparationReference(item, sources, frames, `mainlineGoals[${index}]`) }
+  }).filter(goal => !isAuthorRequirementSource(goal.sourceId))
+  unique(goals)
+  if (hasGoal && !goals.length) invalid('人物目标缺少完整主线陈述。')
+  return goals
+}
+
 /** Labels never override an author's explicit uncertainty. */
+function isAuthorRequirementSource(sourceId: string): boolean {
+  return ['author-direction', 'author-boundaries', 'author-note'].includes(sourceId)
+}
+
 export function preserveRequirementRoles(material: StoryPreparationItem[]): StoryPreparationItem[] {
   return material.map(m => {
-    if (['author-direction', 'author-boundaries', 'author-note'].includes(m.sourceId) && m.role !== 'unknown') {
+    if (isAuthorRequirementSource(m.sourceId) && m.role !== 'unknown') {
       return { ...m, role: 'condition' as const }
     }
     return m
   })
+}
+
+/** Source authority is determined by the author's field, never by a second
+ * model relabeling an expected ending as a character's present intention. */
+export function parsePreparationIntent(output: unknown, sources: StoryPreparation['sources'], material: StoryPreparationItem[]) {
+  const intent = object(output, ['characterGoalIds', 'mainlineGoals', 'mainlineAnchors', 'appealMaterialIds'])
+  const allowedIds = new Set(material.map(frame => frame.id))
+  const goalIds = new Set(ids(intent.characterGoalIds, allowedIds, 'characterGoalIds').filter(id => {
+    const frame = material.find(frame => frame.id === id)!
+    return frame.role !== 'unknown' && !isAuthorRequirementSource(frame.sourceId)
+  }))
+  const appealIds = ids(intent.appealMaterialIds, allowedIds, 'appealMaterialIds')
+  if (appealIds.length > 3) invalid('appealMaterialIds 最多选择三个原文片段。')
+  const anchors = parseMainlineAnchors(intent.mainlineAnchors, sources, goalIds.size > 0, material)
+  const goals = parseMainlineGoals(intent.mainlineGoals, sources, material, false).filter(goal =>
+    material.some(frame => goalIds.has(frame.id) && frame.sourceId === goal.sourceId && goal.quote.includes(frame.quote)))
+  if ([...goalIds].some(id => {
+    const frame = material.find(frame => frame.id === id)!
+    return !goals.some(goal => goal.sourceId === frame.sourceId && goal.quote.includes(frame.quote))
+  })) invalid('mainlineGoals 必须逐项保留 characterGoalIds 对应的完整人物目标；不能以作者发展期待或其他来源替代。')
+  return { goalIds, appealIds, anchors, goals }
 }
 
 export const preparationUncertaintyPrompt = `核对作者未知范围，不创作故事，不补答案。输出精确JSON {decisions:[{id,role,evidenceIds}]}。
@@ -351,7 +707,7 @@ export async function reviewPreparationUncertainty(sources: StoryPreparation['so
   }
   const options = { systemPrompt: preparationUncertaintyPrompt,
     userPrompt: JSON.stringify({ sources, material: material.map(({ role: _role, ...quote }) => quote), disputedIds, disputedContexts, reviewIds }), temperature: 0, maxTokens: 2400,
-    diagnosticStage: 'preparation-uncertainty-review' }
+    diagnosticStage: 'preparation-uncertainty-review', outputSchema: schemas.uncertainty }
   const output = await requestQwenJson(options)
   try { return parse(output) } catch (error) {
     if (!(error instanceof AppError) || error.code !== 'STORY_PREPARATION_INVALID_OUTPUT') throw error
@@ -362,7 +718,7 @@ export async function reviewPreparationUncertainty(sources: StoryPreparation['so
 export async function generateStoryPreparation(idea: string, brief: CreativeBrief): Promise<ProvisionalCurve> {
   const sources = preparationSources(idea, brief)
   const frames = framePreparationSources(sources)
-  let extracted = await requestQwenJson({ systemPrompt: preparationExtractionPrompt, userPrompt: JSON.stringify({ sources, material: frames }), temperature: 0.1, maxTokens: 2400, diagnosticStage: 'preparation-extraction' })
+  let extracted = await requestQwenJson({ systemPrompt: preparationExtractionPrompt, userPrompt: JSON.stringify({ sources, material: frames }), temperature: 0.1, maxTokens: 2400, diagnosticStage: 'preparation-extraction', outputSchema: schemas.classification })
   let material: StoryPreparationItem[]
   try {
     material = classifyPreparationMaterial(extracted, frames, sources)
@@ -372,37 +728,66 @@ export async function generateStoryPreparation(idea: string, brief: CreativeBrie
       systemPrompt: `${preparationExtractionPrompt}\n上一份分类未通过校验。请返回全部输入 ID 的分类，只输出 id、role。`,
       userPrompt: JSON.stringify({ sources, material: frames, previousOutput: extracted, validationFailure: error.message }),
       temperature: 0.1, maxTokens: 2400, diagnosticStage: 'preparation-extraction-retry',
+      outputSchema: schemas.classification,
     })
     material = classifyPreparationMaterial(extracted, frames, sources)
   }
   // Explicit author expectations cannot become character goals.
   material = preserveRequirementRoles(await reviewPreparationUncertainty(sources, material))
+  let mainlineAnchors: StoryMainlineAnchor[] = []
+  let mainlineGoals: StoryMainlineGoal[] = []
+  let appealMaterialIds: string[] = []
   // Independently identify who wants what. Do not show the first classifier's
   // labels: its interpretation must not become the evidence for this check.
   {
-    const intent = object(await requestQwenJson({
-      systemPrompt: `核对人物当下意图，而非作者的创作期待。返回精确 JSON {characterGoalIds:[原文片段ID]}。选择原文明确赋予所有故事人物的当前愿望、任务、承诺，包括配角、相互冲突的目标；不能只选主角或可兼容的目标。主题、希望的结尾、关系走向和人物成长是作者约束，不选择。若原文只说作者想让人物最后发生什么，而没有人物本人想做什么，返回空数组。不能把你的建议作为原文意图。不看先前分类，依据完整原文判断主体和语境。`,
-      userPrompt: JSON.stringify({ sources, material: frames }), temperature: 0, maxTokens: 600, diagnosticStage: 'preparation-character-intent',
-    }), ['characterGoalIds'])
-    const goalIds = new Set(ids(intent.characterGoalIds, new Set(frames.map(f => f.id)), 'characterGoalIds'))
-    material = material.map(m => m.role === 'unknown' ? m
+    const systemPrompt = `核对人物当下意图，而非作者的创作期待。返回精确 JSON {characterGoalIds:[原文片段ID],mainlineGoals:[{id,materialIds}],mainlineAnchors:[{id,kind,materialIds}],appealMaterialIds:[原文片段ID]}。四个字段都必需，无内容用空数组。只选择输入 material 的 ID，不输出 quote、sourceId 或重写原文；程序按 ID 保存完整原文。每个 mainlineGoals 或 mainlineAnchors 项的 materialIds 必须全部来自同一个 sourceId；如果一个语义要素涉及多个输入框，拆成多个同 kind 项，不能把不同来源的 ID 放在同一项。mainlineGoals 每项选择能保留完整主线的一个或多个同来源片段，保留主体、目标活动、关系、地点、对象及限制，不能只选动词片段而漏掉相邻否定或条件。同一来源的跨片段语句可以一起选择，标点切片不代表语义边界。选择原文明确赋予所有故事人物的当前愿望、任务、承诺，包括配角、相互冲突的目标；不能只选主角或可兼容的目标。主题、希望的结尾、关系走向和人物成长是作者约束，不选择为人物目标。若原文只有作者创作期待，characterGoalIds 返回空数组，但仍可列出原文明确的主线陈述。mainlineAnchors 逐项选取包含已明确人物、人物关系、地点、目标行动、行动对象及不可更改条件的原文片段；kind 仅 character,relationship,place,action,object,constraint，时间和其他条件归 constraint。同一片段可用于不同 kind，不需从中再摘词。id 用 a0 等唯一标识。人物目标存在时必须有 action；目标未定时只列原文已确定的要素。结合完整 sources 理解，不凭措辞或单个关键词分类。`
+    const parseIntent = (output: unknown) => parsePreparationIntent(output, sources, material)
+    const referenceContract = {
+      characterGoalMaterialIds: material.filter(m => m.role !== 'unknown' && !isAuthorRequirementSource(m.sourceId)).map(m => m.id),
+      sourceGroups: sources.map(source => ({ sourceId: source.id, materialIds: frames.filter(frame => frame.sourceId === source.id).map(frame => frame.id) })),
+    }
+    const options = { systemPrompt: `${systemPrompt}\nauthor-direction、author-boundaries、author-note 都是作者创作要求，只能作为 constraint，不能写入 characterGoalIds 或 mainlineGoals。referenceContract.characterGoalMaterialIds 只是允许选择的范围，不表示这些片段已经是目标；仍须按语义判断。sourceGroups 列出同来源片段，目标及要素引用按组分项。\n输出另含 appealMaterialIds 数组：从原文选择零至三个最值得继续发展的人物互动、不同期待、习惯、反差或活动本身的片段 ID，保留原想法的看点。不编写解释、结局或人物成长要求；没有明确线索就给空数组。这只是创作参考，不是事实分类、人物目标或作者强制要求，不能影响前述分类。`, userPrompt: JSON.stringify({ sources, material: frames, referenceContract }), temperature: 0, maxTokens: 1600,
+      diagnosticStage: 'preparation-character-intent', outputSchema: schemas.intent }
+    let output = await requestQwenJson(options)
+    let parsed: ReturnType<typeof parseIntent>
+    try { parsed = parseIntent(output) } catch (error) {
+      if (!(error instanceof AppError) || error.code !== 'STORY_PREPARATION_INVALID_OUTPUT') throw error
+      output = await requestQwenJson({ ...options,
+        userPrompt: JSON.stringify({ sources, material: frames, referenceContract, previousOutput: output, validationFailure: error.message }),
+        diagnosticStage: 'preparation-character-intent-retry' })
+      parsed = parseIntent(output)
+    }
+    const { goalIds } = parsed
+    material = preserveRequirementRoles(material.map(m => m.role === 'unknown' ? m
       : goalIds.has(m.id) ? { ...m, role: 'goal' as const }
-      : m.role === 'goal' ? { ...m, role: 'condition' as const } : m)
+      : m.role === 'goal' ? { ...m, role: 'condition' as const } : m))
+    mainlineAnchors = parsed.anchors
+    mainlineGoals = parsed.goals
+    appealMaterialIds = parsed.appealIds
+    if (process.env.STORY_PREPARATION_DIAGNOSTICS === 'true') {
+      console.warn('[preparation] extracted mainline goals', JSON.stringify(mainlineGoals))
+    }
   }
-  const candidates = await generatePreparationCandidates(sources, material, brief)
+  const candidates = await generatePreparationCandidates(sources, material, brief, mainlineAnchors, [], undefined, mainlineGoals, appealMaterialIds)
   const now = Date.now()
   return { id: `curve-${randomUUID()}`, title: '一起选择故事方向', status: 'draft', brief, beats: [], instructions: [],
-    preparation: { protocol: 1, status: 'needs-review', sources, material, ...candidates, acceptedCandidateIds: [], executed: false }, createdAt: now, updatedAt: now,
+    preparation: { protocol: 1, status: 'needs-review', sources, material, mainlineAnchors, mainlineGoals, appealMaterialIds, ...candidates, acceptedCandidateIds: [], executed: false }, createdAt: now, updatedAt: now,
     generation: { origin: 'model', dramaticMechanism: '原文整理与三种故事困境分开生成；尚未生成曲线，也未确认事实' } }
 }
 
 async function generatePreparationCandidates(sources: StoryPreparation['sources'], material: StoryPreparationItem[], brief: CreativeBrief,
-  rejectedCandidates: StoryPreparationCandidate[] = [], authorAction?: string): Promise<Pick<StoryPreparation, 'candidates' | 'questions'>> {
-  const input = { sources, material, brief, referenceContract: preparationReferenceContract(material), rejectedCandidates, ...(authorAction ? { authorAction } : {}) }
+  mainlineAnchors: StoryMainlineAnchor[] = [], rejectedCandidates: StoryPreparationCandidate[] = [], authorAction?: string,
+  mainlineGoals: StoryMainlineGoal[] = [], appealMaterialIds: string[] = []): Promise<Pick<StoryPreparation, 'candidates' | 'questions'>> {
+  const creativeFocus = preparationCreativeFocus({ sources, material, appealMaterialIds })
+  const input = { sources, material,
+    creativeFocus,
+    mainlineAnchors: mainlineAnchors.map(({ kind, quote }) => ({ kind, quote })),
+    mainlineGoals: mainlineGoals.map(({ quote }) => quote),
+    brief, referenceContract: preparationReferenceContract(material), rejectedCandidates, ...(authorAction ? { authorAction } : {}) }
   let needsGoalChoice = !authorAction && !material.some(m => m.role === 'goal')
   // Undecided author intent stays in the question path. Never manufacture a
   // character goal to make the staged scene pipeline run.
-  const sceneStep = needsGoalChoice || !authorAction ? undefined : await generateSceneDraft({ sources, material, brief, rejectedCandidates, authorAction })
+  const sceneStep = needsGoalChoice || !authorAction ? undefined : await generateSceneDraft({ sources, material, brief, rejectedCandidates, authorAction, creativeFocus })
   let sceneDraft = sceneStep && 'attempt' in sceneStep ? sceneStep : undefined
   const unknownQuestions = sceneStep && 'questions' in sceneStep ? sceneStep.questions : undefined
   if (unknownQuestions) needsGoalChoice = true
@@ -416,9 +801,10 @@ async function generatePreparationCandidates(sources: StoryPreparation['sources'
       materialIds: sceneDraft.attempt.materialIds, preconditionIds: sceneDraft.attempt.preconditionIds,
       possibleResult: `可能发展：${sceneDraft.development.change}${sceneDraft.development.response}`,
       resultBasisIds: sceneDraft.development.resultBasisIds, unknownIds: [] }], questions: [] }
-       : await requestQwenJson({ systemPrompt: needsGoalChoice ? preparationQuestionsPrompt : `${preparationDirectionsPrompt}\n${storyCreativeIntentGuidance(brief, 'directions')}`,
+       : await requestQwenJson({ systemPrompt: needsGoalChoice ? preparationQuestionsPrompt : `${validationFailure?.startsWith('内容审阅：') ? `${storyDevelopmentRepairGuidance}\n` : ''}${preparationDirectionsPrompt}\n${storyCreativeIntentGuidance(brief, 'directions')}\n${storyCreativeFocusGuidance}`,
       userPrompt: JSON.stringify({ ...input, ...(sceneDraft ? { sceneDraft } : {}), ...(needsGoalChoice ? { requiredResponse: unknownQuestions ? 'candidates=[]；围绕suggestedQuestions对应的明确未知，只问一个必要问题，不替作者决定未知。' : 'candidates=[]；原文尚无人物目标，请只问一个人物或目标的创作选择，不设计角色行动。', ...(unknownQuestions ? { suggestedQuestions: unknownQuestions } : {}) } : {}), ...(validationFailure ? { previousOutput, validationFailure } : {}) }),
-      temperature: needsGoalChoice ? 0.2 : 0.45, maxTokens: needsGoalChoice ? 1200 : 3000, diagnosticStage: needsGoalChoice ? 'preparation-candidates' : 'preparation-directions' })
+      temperature: needsGoalChoice ? 0.2 : 0.45, maxTokens: needsGoalChoice ? 1200 : 3000, diagnosticStage: needsGoalChoice ? 'preparation-candidates' : 'preparation-directions',
+      outputSchema: needsGoalChoice ? schemas.questions : schemas.directions })
     try {
       // In edit mode the model generates only a result, never another action.
       // A conflicting action remains a visible error; do not splice it away.
@@ -431,7 +817,8 @@ async function generatePreparationCandidates(sources: StoryPreparation['sources'
           candidate.action = authorAction
         }
       }
-      const result = parsePreparationCandidates(output, material)
+      const result = parsePreparationCandidates(!authorAction && !needsGoalChoice
+        ? await repairGeneratedTextLengths(output, sources, 'preparation-directions-text-length') : output, material)
       if (sceneDraft && !authorAction && (result.candidates.length !== 1
           || ![sceneDraft.attempt.action, `提议：${sceneDraft.attempt.action}`].includes(result.candidates[0]!.action))) invalid('文字表达不能更换已审阅的尝试。')
       if (sceneDraft && result.candidates.length === 1) {
@@ -448,45 +835,57 @@ async function generatePreparationCandidates(sources: StoryPreparation['sources'
       if (authorAction && (result.candidates.length !== 1 || result.candidates[0]!.action !== authorAction)) invalid('重推必须完整保留作者编辑的行动。')
       if (result.candidates.some(c => rejectedCandidates.some(old => old.action === c.action))) invalid('新提案重复了已拒绝的行动。')
       if (new Set(result.candidates.map(c => `${c.action.replace(/\s/gu, '')}|${c.possibleResult.replace(/\s/gu, '')}`)).size !== result.candidates.length) invalid('故事方向重复。')
-      const audit = object(await requestQwenJson({
-          systemPrompt: `审查故事提案质量，核对文字是否忠实于作者材料与创作边界。返回精确JSON {checks:[{criterion,passed,evidence}],issues:[具体问题]}。五项criterion为facts,causality,requirements,author-control,questions，每项一次；passed布尔值，evidence引用具体措辞、不超过140字。issues最多三项、每项不超过200字，只有实质缺陷才列；不得补写缺失解释替提案圆场。
+      const issues = await requestPreparationResponse({
+          systemPrompt: `审查故事提案质量，核对文字是否忠实于作者材料与创作边界。返回精确JSON {checks:[{criterion,passed,evidence}],issues:[具体问题]}。五项criterion为facts,causality,requirements,author-control,questions，每项一次；passed布尔值，evidence引用具体措辞、不超过140字。issues最多三项、每项不超过200字，只有实质缺陷才列；不得补写缺失解释替提案圆场。结合 mainlineGoals 的完整原目标和 mainlineAnchors，对每张方向卡的 action 与 possibleResult 整体判断是否仍服务原故事；若某张卡转向与原愿望、人物关系和取舍代价失去联系的任务，令 causality 失败并在 issues 写明候选 id 和偏航处。不逐要素输出判断，也不在此阶段审阅因果桥的下一步。允许人物因有来由的发现或回应改变目标、牺牲原打算；原活动、关系或风险须继续影响选择的意义与代价。
+${storySemanticReviewGuidance}
 facts：逐条保留原目标、行动主体、明确事实、期限、承诺、关系、否定以及命名权限。作者事实是初始状态，可在未来发展中变化；不能把求职者写成招聘人员，不能把假装或象征动作当成实际目标。
-  causality：有sceneDraft时比较骨架与提案，不能新增或更换尝试、变化、回应。没有sceneDraft时，只检查每条新事件是否能在已有情境中被人物遇见、是否改变原目标并带出值得继续发展的选择；可能走向是否与人物的不同应对有关，而非下一次巧合自动完成。意外不必由上一行动造成，卡片不必解释完整事件来历或写完故事曲线；不要以缺少后续细节判失败。不同方向须有实质不同的主要阻碍或关键选择，换道具、场地或措辞不算不同。作者要求的共同结局不算机制差异：若三条都是同一种认知错误、同一种物件线索或同一种误会，只换了表面细节，必须指出重复。
- requirements：允许系统创作新目标、人物、道具、往事、代价、时间压力，以及符合故事世界常识的场所服务或日常流程；作者原文没有提供，本身不构成失败。检查关键新设定是否可信、是否服务人物选择，不能把几项互不相关的设定叠成唯一解决路径。新增事件的完整来历可在曲线补足，但若结果已经依赖某项规则、设备能力、机构批准或他人配合，卡片必须给出足以理解的因果，不能只宣称成功。遗失门票后询问游客中心能否补办可以通过；未交代核验条件就断言凭朋友身份证号代办成功，不应通过。人物提议先陪朋友玩旋转木马可以通过；默认现实游乐园无合理设定却规定首次入园必须先玩旋转木马，或拼贴可扫码假票换取闭园后游玩资格，必须指出不可信的具体原因。作者明确设定的架空规则不在此列。他人沉默或拒绝不等于授权。
-author-control：所有新增内容是尚未执行、可拒绝的未来设计，不能决定作者明确保留的未知。保留authorAction，拒绝后改变机制。骨架本身也是设计，不是事实证据。
+  causality：有sceneDraft时比较骨架与提案，不能新增或更换尝试、变化、回应。没有sceneDraft时，只检查每条新事件是否能在已有情境中被人物遇见、是否改变人物处境并深化或转变原愿望所带出的选择；可能走向是否与人物的不同应对有关，而非下一次巧合自动完成。意外不必由上一行动造成，卡片不必解释完整事件来历或写完故事曲线；不要以缺少后续细节判失败。各方向是互斥的备选设计，不是同一时间线；分别核对内部逻辑，不把不同方向的新设定互相当作已定事实来判矛盾。不同方向须有实质不同的主要阻碍或关键选择，换道具、场地或措辞不算不同。作者要求的共同结局不算机制差异：若三条都是同一种认知错误、同一种物件线索或同一种误会，只换了表面细节，必须指出重复。
+ requirements：新人物、道具、往事、代价及日常流程均可作为未来设计创作，不要求作者预先提供。按作者世界、题材惯例及提案的自洽设定理解，只拦截影响关键转折的明显不可能、越权或矛盾：例如办法没有能力支撑所称结果、违背已有能力限制、明显荒谬的强制规则，或把询问与他人沉默直接当作已获授权。正常互动不要求权限链，奇幻能力不要求科学实现，短卡不要求补齐规则制定者、完整手续或事件全史。技术、规则或手续本身不构成错误；相继增加的无关要求若替代人物应对，须指出哪一步失去故事联系，而非要求再补一套设定。
+ author-control：所有新增内容是尚未执行、可拒绝的未来设计，不能决定作者明确保留的未知。保留authorAction，拒绝后改变机制。骨架本身也是设计，不是事实证据。
 questions：问题必要具体、易回答，只问人物目标或不可避开的作者未知，不追问自造设定的现实证明，不重复确认。不提供行动而只问创作选择时，causality只检查问题能否帮助确定人物或情境，不要求问题包含完整故事。
 ${storyCreativeIntentGuidance(brief, 'directions')}
+${storyCreativeFocusGuidance}
 若有候选，检查三条是否都与所选感觉、戏剧力量和作者额外偏好相容，并各自提供不同、可发展的主要机制；这里不要求每条卡片独立完成整篇故事。若某条完全偏离，或把作者偏好直接写成已发生结果，列出候选 id；不能只因出现标签词、俏皮对白就判通过。作者偏好应在选定方向后的曲线与正文中转化为可观察的行动、选择或收束；作者事实与因果优先，不要求新增未确认的关键事件。`,
-        userPrompt: JSON.stringify({ sources, material, brief, authorAction, rejectedCandidates,
+         userPrompt: JSON.stringify({ sources, material, mainlineAnchors, mainlineGoals, creativeFocus, brief, authorAction, rejectedCandidates,
           authorRequirements: sceneAuthorRequirements({ sources, material, brief, rejectedCandidates, authorAction }),
           sceneDraft: sceneDraft ? { action: sceneDraft.attempt.action,
             change: sceneDraft.development.change, response: sceneDraft.development.response } : undefined, proposal: result,
           expressionBoundary: '若提供sceneDraft，核对表达是否新增或改变骨架的事件、物件、人物边界和后果。骨架是待作者审阅的未来设计，不是执行证据。',
           reviewMode: result.candidates.length ? authorAction ? '作者编辑的方向与可能发展核对' : '三条故事困境的共同目标、阻碍差异和选择因果核对' : '仅补充创作选择，不要求行动、结果或完整因果链' }),
-        temperature: 0.1, maxTokens: 1800, diagnosticStage: 'preparation-quality-review',
-      }), ['checks', 'issues'])
+         temperature: 0.1, maxTokens: 1800, diagnosticStage: 'preparation-quality-review', outputSchema: preparationQualitySchema,
+       }, raw => {
+      const audit = object(raw, ['checks', 'issues'])
       const issues = list(audit.issues, 8).map((v, i) => text(v, 500, `issues[${i}]`))
       const checks = list(audit.checks, 5).map(v => {
         const check = object(v, ['criterion', 'passed', 'evidence'])
         if (!preparationQualityCriteria.includes(check.criterion as typeof preparationQualityCriteria[number]) || typeof check.passed !== 'boolean') invalid('内容审阅维度或判断不合法。')
         return { criterion: String(check.criterion), passed: check.passed, evidence: text(check.evidence, 320, `checks[${String(check.criterion)}].evidence`) }
       })
-      if (checks.length !== 5 || new Set(checks.map(c => c.criterion)).size !== 5) invalid('内容审阅没有完成全部维度。')
+       if (checks.length !== 5 || new Set(checks.map(c => c.criterion)).size !== 5) invalid('内容审阅没有完成全部维度。')
+      if (checks.every(c => c.passed) && issues.length) invalid('审阅各项均通过却仍列出内容缺陷。请只重审原提案，使checks和issues一致；不改写故事，也不为保留问题列表编造失败项。')
       logPreparationReview('quality', attempt + 1, result.candidates.map(candidate => candidate.id), { checks, issues })
       // Preserve failed dimensions without flooding regeneration with the same
       // critique twice (issues and checks usually describe the same defects).
       if (!issues.length) for (const check of checks.filter(c => !c.passed)) issues.push(`${check.criterion}：${check.evidence}`)
+      return issues
+      })
       if (issues.length) throw new PreparationQualityError(issues)
       if (result.candidates.length) {
-        const projected = await projectFutureChoices(result.candidates, sources, brief)
+        const projected = await projectFutureChoices(result.candidates, sources, brief, mainlineAnchors, mainlineGoals, creativeFocus)
         return { ...result, candidates: projected }
       }
       return result
     } catch (error) {
+      // Projection already repaired the rejected bridges. Rewriting all
+      // approved directions here discards unrelated work and repeats the loop.
+      if ((error instanceof PreparationQualityError && error.origin === 'causal-bridge')
+        || (error instanceof AppError && (error.modelDiagnostic?.stage.startsWith('preparation-future-choice')
+          || error.modelDiagnostic?.stage === 'preparation-directions-text-length'
+          || error.modelDiagnostic?.stage.startsWith('preparation-quality-review')))) throw error
       if (attempt || !(error instanceof AppError) || !['STORY_PREPARATION_INVALID_OUTPUT', 'STORY_PREPARATION_QUALITY_FAILED'].includes(error.code)) throw error
       validationFailure = error instanceof PreparationQualityError ? `内容审阅：${error.issues.join('；')}` : error.message
       if (error instanceof PreparationQualityError && sceneDraft) {
-        const revised = await generateSceneDraft({ sources, material, brief, rejectedCandidates, authorAction }, { draft: sceneDraft, issues: error.issues })
+        const revised = await generateSceneDraft({ sources, material, brief, rejectedCandidates, authorAction, creativeFocus }, { draft: sceneDraft, issues: error.issues })
         if ('questions' in revised) invalid('表达后的内容修复不能转换为作者资料不足。')
         sceneDraft = revised as typeof sceneDraft
       }
@@ -506,9 +905,9 @@ export async function reviseStoryPreparation(curve: ProvisionalCurve, decision: 
     p.questions = p.questions.filter(q => p.candidates.some(c => c.unknownIds.includes(q.id)))
   } else {
     if (decision === 'revise' && !p.candidates.some(c => c.id === candidateId)) throw new AppError('要编辑的提案不存在。', 400, 'INVALID_REQUEST')
-    if (decision === 'revise' && (!authorAction?.trim() || authorAction.length > 240)) throw new AppError('请填写修改后的行动，最多240字。', 400, 'INVALID_REQUEST')
+    if (decision === 'revise' && (!authorAction?.trim() || authorAction.length > generatedProposalTextMax)) throw new AppError('请填写修改后的行动，最多240字。', 400, 'INVALID_REQUEST')
     if (decision === 'regenerate') p.rejectedCandidates = [...(p.rejectedCandidates ?? []), ...p.candidates]
-    const generated = await generatePreparationCandidates(p.sources, p.material, next.brief, p.rejectedCandidates, decision === 'revise' ? authorAction : undefined)
+    const generated = await generatePreparationCandidates(p.sources, p.material, next.brief, p.mainlineAnchors ?? [], p.rejectedCandidates, decision === 'revise' ? authorAction : undefined, p.mainlineGoals ?? [], p.appealMaterialIds ?? [])
     p.originalCandidates = [...(p.originalCandidates ?? []), ...p.candidates]
     if (decision === 'revise') {
       const revised = generated.candidates[0]!
@@ -564,7 +963,7 @@ async function resolvePreparationGoal(material: StoryPreparationItem[]): Promise
   const known = material.filter(m => m.role !== 'unknown')
   const output = await requestQwenJson({
     systemPrompt: '核对作者目标分类。输出精确 JSON {goalMaterialId}。只从输入 knownMaterial 中选择明确表达作者人物目标的一项 ID；不改写目标，不以行动候选或可能结果代替目标，不推断人物动机。没有明确目标时返回 goalMaterialId:null。此输出只是原文角色审阅，不是设计接受或执行事实。',
-    userPrompt: JSON.stringify({ knownMaterial: known }), temperature: 0.1, maxTokens: 200, diagnosticStage: 'preparation-goal-classification',
+    userPrompt: JSON.stringify({ knownMaterial: known }), temperature: 0.1, maxTokens: 200, diagnosticStage: 'preparation-goal-classification', outputSchema: schemas.goal,
   })
   const r = object(output, ['goalMaterialId'])
   const id = r.goalMaterialId === null ? null : text(r.goalMaterialId, 80)
@@ -603,6 +1002,8 @@ export function acceptPreparation(p: StoryPreparation, acceptedCandidateIds: str
       const merged = { ...c, ...reviewed }
       if (reviewed.futureChoice === '') delete merged.futureChoice
       if (reviewed.action !== c.action || reviewed.possibleResult !== c.possibleResult) delete merged.causalBridge
+      if (reviewed.action !== c.action || reviewed.possibleResult !== c.possibleResult
+        || reviewed.futureChoice !== undefined && reviewed.futureChoice !== c.futureChoice) delete merged.expansionNeeds
       return merged
     }) } : {}) }
   // A revised quote does not automatically prove the old causal claim.
@@ -634,17 +1035,25 @@ async function arrangePreparationCurve(curve: ProvisionalCurve, acceptedIds: str
   const p = acceptPreparation(curve.preparation, acceptedIds, review)
   const selected = p.candidates.filter(c => acceptedIds.includes(c.id))
   const activeMaterial = activePreparationMaterial(p)
-  const goalMaterial = await resolvePreparationGoal(activeMaterial)
-  const output = await requestQwenJson({ systemPrompt: `排列已接受未来行动，不写执行记录。严格输出 JSON {steps:[{kind,title,text,candidateIds,materialIds}],supplements:[{id,kind,text,question,materialIds}]}。
-${storyCreativeIntentGuidance(curve.brief, 'curve')} 本阶段只排列和引用已接受的文字；若已选方向没有兑现创作倾向，也不得偷偷重写它。
-所选方向的 futureChoice 是作者审阅过的未来故事取舍，只用于理解这条故事可能如何升级；它不是已发生行动，不得仅因出现于候选中就把其中的事件写成核心 steps 或 supplements，也不得要求作者逐回合作出角色选择。
-核心 steps 只能引用输入中的逐字已知材料、已接受行动或可能结果；text 必须等于其中一条完整原文，不能改写、拼接或补因果。title 也必须逐字等于相应 text。3 至5段，依序 current-state,trigger,可选 escalation,可选 climax-choice,resolution；简单行动只需三段，不造高潮。current-state 无 candidateIds；其余引用已接受候选。resolution 只展示候选 possibleResult，仍是未来假设，不是已发生。
-trigger 的 text 必须逐字等于被引用候选的 action，不能改用材料 quote。resolution 的 text 必须逐字等于该候选的 possibleResult。current-state 和 trigger 的 materialIds 非空；trigger 使用候选 materialIds。resolution 仅在候选 resultBasisIds 非空时引用它们，否则 materialIds=[]；新创作的可能结果仍是已接受的未来设计，不以原目标充当结果证明。materialIds 不可引用已取代材料。
-先逐项分配全部已知材料：current-state 的 materialIds 保留初始状态、背景、全局条件和作者保留的可选路径，即使 text 只能展示其中一条原文，其余引用仍记录背景承接；trigger 的引用说明行动依据，resolution 的引用说明假设结果依据。这三种用途不同，保留可选路径不等于冲突，尚未开始是行动前状态而非故障假设，均不应另加 supplements 要求作者再次确认。行动和结果的窄引用域不限制 current-state 引用其他已知背景。全部已知材料必须在 steps 的 materialIds 中由模型显式承接。没有期限是边界，不是阻碍；可兼容条件不是冲突。引用背景或替代路径不表示它是行动前提、结果依据或已执行事件，不得因此改写候选 preconditionIds/resultBasisIds。未知材料不在已知覆盖范围内，不得引用为事实。服务端不会自动补齐遗漏的引用。
-新增故障假设、观察步骤、检查标准或条件只能写入独立 supplements，kind=hypothesis|observation|criterion|condition，question 为具体待作者审阅问题，materialIds 只引用现有材料。它们不可成为 steps 或既有行动的前提；即使提出也不阻止独立核心行动生成曲线。没有新增设计就给空数组。引用本身不证明因果，不能暗中增加人物、权限、结果。`, userPrompt: JSON.stringify({ material: activeMaterial, acceptedCandidates: selected, authorReview: p.authorReview ?? null,
-  ...(omittedOnFirstAttempt ? { coverageReview: { omittedMaterialIds: omittedOnFirstAttempt, instruction: '上一预览遗漏这些作者材料。重新审阅各节点的背景、约束及保留替代路径；只显式引用实际承接的材料，不改写行动或补因果。无法承接的仍留给作者决定，不伪造覆盖。' } } : {}) }), temperature: 0.2, maxTokens: 2400, diagnosticStage: 'preparation-curve-generation' })
-  const r = object(output, ['steps', 'supplements']), kinds = ['current-state','trigger','escalation','climax-choice','resolution'] as const
   const known = new Set(activeMaterial.filter(m => m.role !== 'unknown').map(m => m.id))
+  const goalMaterial = await resolvePreparationGoal(activeMaterial)
+  const options = { systemPrompt: `排列已接受未来行动，不写执行记录。严格输出 JSON {steps:[{kind,candidateIds,materialIds,displayMaterialIds}],supplements:[{id,kind,text,question,materialIds}]}。每个step的四个字段均须给出。steps 不输出 title 或 text；程序按 ID 取回已审阅原文，不需要重新抄写。
+materialIds 和 displayMaterialIds 只能选 referenceContract.knownMaterialIds；unknownMaterial 只用于理解作者保留的未知，绝不引用为已知。candidateIds 只能选 referenceContract.acceptedCandidateIds。referenceContract.stepReferences 明确给出每类节点的引用范围：current-state选currentStateMaterialIds；行动阶段选当前candidateId的actionMaterialIds；resolution选当前candidateId的resultMaterialIds，为空时必须输出materialIds=[]。材料与故事相关，不等于它属于该节点的依据；尤其不能把行动目标引用成新结果的依据。若有 validationFailure，只修复本次排列及不合法引用，保留已接受候选，不补新事实。
+${storyCreativeIntentGuidance(curve.brief, 'curve')} 本阶段只排列和引用已接受的文字；若已选方向没有兑现创作倾向，也不得偷偷重写它。
+这是引用排列阶段，不展开故事。只排列 material.quote、acceptedCandidates.action 和 acceptedCandidates.possibleResult，不扩写新办法、后续取舍或新的高潮。
+核心 steps 只选择已有材料或已接受候选的 ID，不扩写新设计。3 至5段，依序 current-state,trigger,可选 escalation,可选 climax-choice,resolution；简单行动只需三段，不造高潮。current-state 的 candidateIds=[]，displayMaterialIds 必须非空，选择 materialIds 中能说明当前情境的已知片段（含分隔符合计不超过240字，不要只选时间短语）；程序将不相邻的片段分行展示，不补连接或因果。其余阶段 candidateIds 恰好一个，displayMaterialIds=[]。程序展示候选 action，resolution 展示 possibleResult，仍是未来假设。
+current-state 的 materialIds 非空；所有行动阶段（trigger、escalation、climax-choice）的 materialIds 也须非空，选择对应候选 materialIds 中实际承接的材料。可选阶段不等于引用可省略；若没有不同的已接受行动可排列，省略 escalation、climax-choice，不重复同一行动凑高潮。resolution 仅在候选 resultBasisIds 非空时引用它们，否则 materialIds=[]；新创作的可能结果仍是已接受的未来设计，不以原目标充当结果证明。materialIds 不可引用已取代材料。
+先逐项分配全部已知材料：current-state 的 materialIds 保留初始状态、背景、全局条件和作者保留的可选路径；displayMaterialIds 只决定展示的原文，其余引用仍记录背景承接。trigger 的引用说明行动依据，resolution 的引用说明假设结果依据。这三种用途不同，保留可选路径不等于冲突，尚未开始是行动前状态而非故障假设，均不应另加 supplements 要求作者再次确认。行动和结果的窄引用域不限制 current-state 引用其他已知背景。全部已知材料必须在 steps 的 materialIds 中由模型显式承接。没有期限是边界，不是阻碍；可兼容条件不是冲突。引用背景或替代路径不表示它是行动前提、结果依据或已执行事件，不得因此改写候选 preconditionIds/resultBasisIds。未知材料不在已知覆盖范围内，不得引用为事实。服务端不会自动补齐遗漏的引用。
+新增故障假设、观察步骤、检查标准或条件只能写入独立 supplements，kind=hypothesis|observation|criterion|condition，question 为具体待作者审阅问题，materialIds 只引用现有材料。它们不可成为 steps 或既有行动的前提；即使提出也不阻止独立核心行动生成曲线。没有新增设计就给空数组。引用本身不证明因果，不能暗中增加人物、权限、结果。`, userPrompt: JSON.stringify({ material: activeMaterial.filter(m => known.has(m.id)),
+  unknownMaterial: activeMaterial.filter(m => !known.has(m.id)), referenceContract: { knownMaterialIds: [...known], acceptedCandidateIds: acceptedIds,
+    stepReferences: { currentStateMaterialIds: [...known], byCandidate: selected.map(c => ({ candidateId: c.id,
+      actionMaterialIds: c.materialIds, resultMaterialIds: c.resultBasisIds })) } },
+  // Derived projections remain in the session for review. This stage only
+  // arranges exact accepted quotations, so do not offer projections as text.
+  acceptedCandidates: selected.map(({ causalBridge, futureChoice, ...candidate }) => candidate), authorReview: p.authorReview ?? null,
+  ...(omittedOnFirstAttempt ? { coverageReview: { omittedMaterialIds: omittedOnFirstAttempt, instruction: '上一预览遗漏这些作者材料。重新审阅各节点的背景、约束及保留替代路径；只显式引用实际承接的材料，不改写行动或补因果。无法承接的仍留给作者决定，不伪造覆盖。' } } : {}) }), temperature: 0.2, maxTokens: 2400, diagnosticStage: 'preparation-curve-generation', outputSchema: schemas.arrangement }
+  const parseArrangement = (output: unknown) => {
+  const r = object(output, ['steps', 'supplements']), kinds = ['current-state','trigger','escalation','climax-choice','resolution'] as const
   p.supplements = list(r.supplements, 8).map(v => {
     const s = object(v, ['id','kind','text','question','materialIds'])
     if (!['hypothesis','observation','criterion','condition'].includes(String(s.kind))) invalid('新增设计类型不合法。')
@@ -652,25 +1061,65 @@ trigger 的 text 必须逐字等于被引用候选的 action，不能改用材�
   })
   unique([...activeMaterial, ...p.candidates, ...p.questions, ...p.supplements])
   const arrangements = list(r.steps, 5).map((v, i) => {
-    const s = object(v, ['kind', 'title', 'text', 'candidateIds', 'materialIds'])
+    const legacyText = !!v && typeof v === 'object' && ('text' in v || 'title' in v)
+    const s = object(v, ['kind', 'candidateIds', 'materialIds', ...(legacyText ? ['title', 'text'] : [])], legacyText ? [] : ['displayMaterialIds'])
     if (!kinds.includes(s.kind as typeof kinds[number])) invalid('曲线阶段不正确。')
     const refs = ids(s.candidateIds, new Set(acceptedIds))
     if ((i === 0 && refs.length) || (i > 0 && !refs.length)) invalid('曲线只能排列已接受的行动结构。')
     const materialRefs = ids(s.materialIds, known)
+    const referencedCandidates = selected.filter(c => refs.includes(c.id))
     if (s.kind === 'resolution') {
-      const hasAuthorResultBasis = selected.some(c => refs.includes(c.id) && c.resultBasisIds.length)
+      const allowedResultIds = new Set(referencedCandidates.flatMap(c => c.resultBasisIds))
+      const hasAuthorResultBasis = allowedResultIds.size > 0
       if (hasAuthorResultBasis && !materialRefs.length) invalid('曲线遗漏候选已有的作者结果条件。')
-      if (!hasAuthorResultBasis && materialRefs.length) invalid('系统新创作的结果不能补造作者原文依据。')
-    } else if (!materialRefs.length) invalid('曲线文案缺少已知材料引用；服务端不补依据。')
-    const content = text(s.text)
+      if (materialRefs.some(id => !allowedResultIds.has(id))) invalid(`steps[${i}].materialIds只能选择当前候选的resultMaterialIds=${JSON.stringify([...allowedResultIds])}，不能引用目标、行动起点或其他候选的依据。${!hasAuthorResultBasis ? '系统新创作的结果不能补造作者原文依据；此节点必须输出materialIds=[]。' : ''}只修改当前排列的引用，不修改已接受故事。`)
+    } else if (s.kind !== 'current-state') {
+      const allowedActionIds = new Set(referencedCandidates.flatMap(c => c.materialIds))
+      if (materialRefs.some(id => !allowedActionIds.has(id))) invalid(`steps[${i}].materialIds只能选择当前候选的actionMaterialIds=${JSON.stringify([...allowedActionIds])}；不能把背景或结果依据移入行动依据。只修改当前排列的引用，不修改已接受故事。`)
+      if (!materialRefs.length) invalid(`steps[${i}]（${s.kind}）的 materialIds 不能为空；行动阶段引用对应候选 actionMaterialIds。可选行动阶段没有独立内容时应省略，服务端不补依据。`)
+    } else if (!materialRefs.length) invalid(`steps[${i}]（${s.kind}）的 materialIds 不能为空；当前情境引用已知材料，行动阶段引用对应候选 materialIds。可选行动阶段没有独立内容时应省略，服务端不补依据。`)
+    let content: string
+    if (legacyText) content = text(s.text)
+    else if (s.kind === 'current-state') {
+      if (!Array.isArray(s.displayMaterialIds) || !s.displayMaterialIds.length) invalid(`steps[${i}].displayMaterialIds缺失或为空；必须从本节点materialIds选择用于展示的原文编号。只补本次排列引用，不改写故事。`)
+      const displayRefs = ids(s.displayMaterialIds, new Set(materialRefs), `steps[${i}].displayMaterialIds`)
+      if (!displayRefs.length) invalid('当前情境缺少展示材料。')
+      // Display only model-selected known excerpts. Separate disjoint sources
+      // or spans visibly rather than inventing a continuous quotation.
+      const display = activeMaterial.filter(item => displayRefs.includes(item.id))
+      const sourceId = display[0]!.sourceId
+      const original = p.sources.find(source => source.id === sourceId)
+      const joined = display.map(item => item.quote).join('')
+      const contiguous = display.every(item => item.sourceId === sourceId) && original?.text.includes(joined)
+      content = text(display.map(item => item.quote).join(contiguous ? '' : '\n'))
+    } else {
+      if (refs.length !== 1 || s.displayMaterialIds !== undefined
+        && (!Array.isArray(s.displayMaterialIds) || s.displayMaterialIds.length)) invalid('行动或结果须选择一个已接受候选，displayMaterialIds为空数组。')
+      const candidate = selected.find(candidate => candidate.id === refs[0])!
+      content = text(s.kind === 'resolution' ? candidate.possibleResult : candidate.action)
+    }
     const allowedTexts = s.kind === 'current-state' ? activeMaterial.filter(m => materialRefs.includes(m.id)).map(m => m.quote)
       : selected.filter(c => refs.includes(c.id)).map(c => s.kind === 'resolution' ? c.possibleResult : c.action)
-    if (!allowedTexts.includes(content) || s.title !== content) invalid('核心曲线夹带未审新增设计；只能逐字展示有效材料或已接受行动及可能结果。')
+    if (legacyText && (!allowedTexts.includes(content) || s.title !== content)) invalid('核心曲线夹带未审新增设计；只能逐字展示有效材料或已接受行动及可能结果。')
     return { kind: s.kind as typeof kinds[number], title: content, text: content, refs, materialRefs }
   })
   if (arrangements.length < 3 || arrangements[0]?.kind !== 'current-state' || arrangements[1]?.kind !== 'trigger' || arrangements.at(-1)?.kind !== 'resolution'
     || arrangements.some((s, i) => i > 0 && kinds.indexOf(s.kind) <= kinds.indexOf(arrangements[i-1]!.kind))
     || selected.some(c => !arrangements.some(s => s.refs.includes(c.id)))) invalid('曲线遗漏已接受结构或阶段顺序不正确。')
+  // Optional phases must contribute distinct accepted wording. Merge only
+  // already validated references; this changes neither text nor its authority.
+  const normalized: typeof arrangements = []
+  for (const step of arrangements) {
+    const duplicate = step.kind === 'escalation' || step.kind === 'climax-choice'
+      ? normalized.find(previous => previous.kind !== 'current-state' && previous.text.replace(/\s/gu, '') === step.text.replace(/\s/gu, '')) : undefined
+    if (duplicate) {
+      duplicate.refs = [...new Set([...duplicate.refs, ...step.refs])]
+      duplicate.materialRefs = [...new Set([...duplicate.materialRefs, ...step.materialRefs])]
+    } else normalized.push(step)
+  }
+  return normalized
+  }
+  const arrangements = await requestPreparationResponse(options, parseArrangement)
   const covered = new Set(arrangements.flatMap(s => s.materialRefs))
   const omitted = [...known].filter(id => !covered.has(id))
   // One explicit model recovery, never server-added citations. A partial

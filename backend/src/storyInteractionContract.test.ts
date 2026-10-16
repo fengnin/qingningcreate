@@ -132,7 +132,7 @@ test('unconfirmed mainline still rejects before any call; malformed model propos
     { needsAuthorDetail: ['模型猜测作者缺资料'] },
   ]) {
     stub(bad)
-    await assert.rejects(service.generateSessionStoryTurn(click(before)), hasCode('STORY_TURN_RETRY_EXHAUSTED'))
+    await assert.rejects(service.generateSessionStoryTurn(click(before)), hasCode('QWEN_OUTPUT_SCHEMA_FAILED'))
     assert.deepEqual(service.getStorySessionSnapshot(before.storyId), before)
     assert.equal(readFileSync(store, 'utf8'), disk)
   }

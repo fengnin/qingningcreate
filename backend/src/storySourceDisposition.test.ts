@@ -21,7 +21,7 @@ test('unused material decision preserves reviewed structure, but live dependenci
   process.env.DASHSCOPE_API_KEY='stub';process.env.STORY_DISABLE_MODEL='false'
   globalThis.fetch = async()=>new Response(JSON.stringify({choices:[{message:{content:JSON.stringify({steps:['current-state','trigger','resolution'].map((kind,i)=>{
     const text=i===0?material[0]!.quote:i===1?candidate.action:candidate.possibleResult
-    return {kind,title:text,text,candidateIds:i?['sort']:[],materialIds:i?['permission']:['goal']}
+    return {kind,displayMaterialIds:i?[]:['goal'],candidateIds:i?['sort']:[],materialIds:i===2?['permission']:['goal']}
   }),supplements:[]})}}]}),{status:200})
   try {
     const prepared = await generateCurveFromPreparation(curve,['sort'])

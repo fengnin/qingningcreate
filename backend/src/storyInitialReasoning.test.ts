@@ -75,9 +75,14 @@ test('online initial entry requests direct structure; legacy IDs, invalid author
     await assert.rejects(() => regenerateCurveBeat(c.text,seed,curve,'beat-escalation'), (e: unknown) => e instanceof AppError && e.code === 'STORY_REASONING_REGENERATION_NOT_CONNECTED')
     const failure = (e: unknown) => e instanceof AppError && e.code === 'STORY_CURVE_MODEL_GENERATION_FAILED'
     payload = { curvePlan: { triggerFactId: 'source-fact-1' } }
-    await assert.rejects(() => generateProvisionalCurve(c.text,seed,brief),failure)
+    await assert.rejects(() => generateProvisionalCurve(c.text,seed,brief),
+      (e: unknown) => e instanceof AppError && e.code === 'QWEN_OUTPUT_SCHEMA_FAILED'
+        && e.modelDiagnostic?.stage === 'initial-reasoning-generation:response-schema')
     payload = fixture(c.text,c.action); (payload as any).constraints[0].text += '因此失去权限。'
-    await assert.rejects(() => generateProvisionalCurve(c.text,seed,brief),failure)
+    // The deliberately invalid v1 fixture cannot be serialized to wire v2;
+    // it is rejected at the shared shape boundary before source validation.
+    await assert.rejects(() => generateProvisionalCurve(c.text,seed,brief),
+      (e: unknown) => e instanceof AppError && e.code === 'QWEN_OUTPUT_SCHEMA_FAILED')
     payload = fixture(c.text,c.action)
     await assert.rejects(() => generateProvisionalCurve(c.text,seed,brief,[c.action+'（设计节点1，结果未发生）']),failure)
     assert.ok(calls >= 4)

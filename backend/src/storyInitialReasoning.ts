@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { AppError, requestQwenJson, summarizeModelResponse, withModelDiagnostic } from './qwen.js'
 import { parseStoryReasoningWire } from './storyReasoningWire.js'
 import { storyReasoningSystemPrompt } from './storyReasoningPrompt.js'
+import { reasoningOutputSchema } from './storyOutputSchemas.js'
 import type { StoryReasoningProposal, StoryReasoningStatement, StoryReasoningValidationContext } from '../../shared/story-reasoning-contract.js'
 import type { CreativeBrief, CurveBeat, ProvisionalCurve, StoryCurveFoundation, StoryDesignRecord, StorySeed } from '../../shared/story-contract.js'
 
@@ -74,7 +75,7 @@ export async function generateInitialReasoningCurve(idea: string, seed: StorySee
     try {
       output = await requestQwenJson({ systemPrompt: initialReasoningSystemPrompt,
         userPrompt: JSON.stringify({ idea, brief, context, excludedProposalDetails, validationFailure: failure?.message }),
-        temperature: attempt === 0 ? 0.35 : 0.1, maxTokens: 6500, diagnosticStage: 'initial-reasoning-generation' })
+        temperature: attempt === 0 ? 0.35 : 0.1, maxTokens: 6500, diagnosticStage: 'initial-reasoning-generation', outputSchema: reasoningOutputSchema('initial-design') })
       const proposal = parseStoryReasoningWire(output, context)
       if (proposal.outcome === 'proposal' && 'steps' in proposal && proposal.steps.some(s => excludedProposalDetails.includes(s.text))) {
         throw new AppError('输出重新采用了作者已拒绝的提案。', 502, 'STORY_REASONING_INVALID_OUTPUT')

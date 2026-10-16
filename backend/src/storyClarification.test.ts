@@ -161,8 +161,9 @@ test('review rejects literal gaps, causal-anchor leakage, semantic paraphrases a
     await assert.rejects(() => reviewClarificationReplacement(curve, question, candidate), hasCode('STORY_CLARIFICATION_REPLACEMENT_UNGROUNDED'))
     assert.equal(calls.length, 1, 'nonliteral dependence requires a semantic review')
   }, { grounded: true, dependsOnUnconfirmedPremise: true })
-  await mockModel(async () => {
-    await assert.rejects(() => reviewClarificationReplacement(curve, question, candidate), hasCode('STORY_CLARIFICATION_REPLACEMENT_UNGROUNDED'))
+  await mockModel(async (calls) => {
+    await assert.rejects(() => reviewClarificationReplacement(curve, question, candidate), hasCode('QWEN_OUTPUT_SCHEMA_FAILED'))
+    assert.equal(calls.length, 2, 'malformed reviews get one format repair and no causal verdict')
   }, { grounded: true })
   await assert.rejects(() => reviewClarificationReplacement(curve, question, candidate), hasCode('STORY_CLARIFICATION_REVIEW_UNAVAILABLE', 503))
   const knownText = curve.design!.sourceFacts[0]!.text

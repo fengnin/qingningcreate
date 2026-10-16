@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { AppError, requestQwenJson, withModelDiagnostic } from './qwen.js'
+import { reasoningOutputSchema } from './storyOutputSchemas.js'
 import { mapInitialReasoningProposal } from './storyInitialReasoning.js'
 import { storyReasoningSystemPrompt } from './storyReasoningPrompt.js'
 import { validateStoryReasoningProposal } from './storyReasoningContract.js'
@@ -76,7 +77,7 @@ export async function previewReasoningRecovery(idea:string,seed:StorySeed,curve:
       const output=await requestQwenJson({systemPrompt:storyReasoningSystemPrompt('edit-preview'),
         userPrompt:JSON.stringify({idea,brief:curve.brief,context,prefix,targets,authorEdits:context.protectedSteps,
           currentSteps:curve.beats.filter(b=>!targets.includes(b.id)&&b.status!=='rejected'),questions:curve.clarifications,feedback,validationFailure:failure?.message}),
-        temperature:attempt?0.1:0.35,maxTokens:6500,diagnosticStage:'reasoning-edit-preview'})
+        temperature:attempt?0.1:0.35,maxTokens:6500,diagnosticStage:'reasoning-edit-preview',outputSchema:reasoningOutputSchema('edit-preview')})
       const p=parseStoryReasoningWire(output,context)
       if(p.outcome==='proposal'&&'steps'in p){
         if(p.steps.length!==targets.length||targets.some(id=>!p.steps.some(s=>s.id===id)))invalid('重推必须覆盖指定节点，不得修改范围外节点。')

@@ -9,7 +9,8 @@ const invalid = (message: string): never => { throw new AppError(message, 502, '
 function record(value: unknown, keys: string[]): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) invalid('推理提案字段必须为对象。')
   const r = value as Record<string, unknown>
-  if (Object.keys(r).some(k => !keys.includes(k)) || keys.some(k => !(k in r))) invalid('推理提案缺少字段或夹带了状态、执行结果及其他字段。')
+  const missing = keys.filter(k => !(k in r)), extra = Object.keys(r).filter(k => !keys.includes(k))
+  if (missing.length || extra.length) invalid(`推理提案字段不完整：缺少 ${missing.join(', ') || '无'}；多余 ${extra.join(', ') || '无'}。请只修正这些字段，保留已有内容及引用。`)
   return r
 }
 function text(value: unknown, max = 240): string {

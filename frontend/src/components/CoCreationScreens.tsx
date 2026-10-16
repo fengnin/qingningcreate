@@ -759,7 +759,7 @@ function PreparationReview({ session }: { session: StorySession }) {
     <div className="preparation-layout">
     <div className="preparation-direction-column" aria-busy={busy}>
     <div className="preparation-intro"><p className="eyebrow">01 / 故事困境</p><h1>这件事会遇到什么难处？</h1><p className="setup-lead">先选一种阻碍与取舍，再继续展开故事。</p></div>
-    {!!candidates.length && <div className="preparation-direction-heading"><div><p>围绕你的想法继续</p><strong>原始目标不变，先选它会遇到什么难处。</strong></div><span>选定后，还可以继续修改故事规划。</span></div>}
+    {!!candidates.length && <div className="preparation-direction-heading"><div><p>围绕你的想法继续</p><strong>原始目标不变，先选它会遇到什么难处。</strong>{!!p.mainlineAnchors?.length && <p>主线要素：{p.mainlineAnchors.map(anchor => anchor.quote).join(' · ')}</p>}</div><span>选定后，还可以继续修改故事规划。</span></div>}
     {busy && <div className="preparation-generation-feedback" role="status"><strong>{pendingOperation === 'accept' ? '正在整理选中的故事方向' : '正在构思新的一组方向'}</strong><p>{pendingOperation === 'accept' ? '故事方向尚未发生，接下来可以继续修改故事规划。' : '当前方向会保留到操作完成。'}</p></div>}
     {session.stageError && <div className="preparation-generation-feedback is-error" role="alert"><strong>这次调整没有完成</strong><p>{preparationErrorMessage(session)}</p><p>当前方向和你的编辑仍保留，可以继续修改。</p><div className="preparation-recovery-actions"><button className="text-action" type="button" disabled={busy} onClick={() => void requestAlternative()}>换一组方向</button><button className="text-action" type="button" disabled={busy} onClick={session.goBackToOpening}>修改想法</button></div></div>}
     {candidates.map((active, index) => {

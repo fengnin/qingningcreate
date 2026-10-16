@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { clarificationReviewSchema } from './storyOutputSchemas.js'
 import type {
   CurveBeat,
   ProvisionalCurve,
@@ -267,6 +268,7 @@ export async function reviewClarificationReplacement(
     temperature: 0,
     maxTokens: 120,
     diagnosticStage: 'curve-clarification-replacement-review',
+    outputSchema: clarificationReviewSchema,
   })
   if (!review || typeof review !== 'object' || Array.isArray(review)
     || Object.keys(review).some((key) => !['grounded', 'dependsOnUnconfirmedPremise'].includes(key))
