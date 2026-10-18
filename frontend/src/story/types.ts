@@ -88,6 +88,7 @@ export type {
 export type StoryView =
   | 'opening'
   | 'creative-brief'
+  | 'preparation-review'
   | 'provisional-curve'
   | 'conflict-core-picker'
   | 'predicament'
@@ -95,5 +96,5 @@ export type StoryView =
   | 'story-spine'
   | 'complete'
 
-export type StoryStep = 1 | 2 | 3 | 4 | 5 | 6
+export type StoryStep = 1 | 2 | 3 | 4 | 5
 export type GenerationStatus = 'idle' | 'loading' | 'error'

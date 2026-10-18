@@ -89,6 +89,9 @@ export interface StorySessionActions {
   }) => Promise<boolean>
   confirmProvisionalCurve: (acceptedDesignProposalIds?: string[]) => Promise<void>
   openStoryWriting: () => void
+  resumeStoryDesign: () => void
+  reviewStoryPredicament: () => void
+  openCompletedStory: () => void
   startStorySpineFromCurve: () => Promise<void>
   writeStory: (request: Omit<StoryWritingRequest, 'storyId' | 'revision'>) => Promise<void>
   showDifferentConflictCores: () => Promise<void>
@@ -123,6 +126,7 @@ export interface StorySessionActions {
 
 const previousViewByView: Partial<Record<StoryView, StoryView>> = {
   'creative-brief': 'opening',
+  'preparation-review': 'creative-brief',
   'provisional-curve': 'creative-brief',
   'conflict-core-picker': 'opening',
   predicament: 'conflict-core-picker',
@@ -144,6 +148,21 @@ export function createStorySessionActions(
     ...createStoryFoundationActions(context),
     ...coCreationActions,
     openStoryWriting: () => state.setView('story-spine'),
+    resumeStoryDesign: () => {
+      if (!state.provisionalCurve || stage.stageStatus === 'loading') return
+      stage.clearStageFeedback()
+      state.setView('provisional-curve')
+    },
+    reviewStoryPredicament: () => {
+      if (!state.provisionalCurve?.preparation || stage.stageStatus === 'loading') return
+      stage.clearStageFeedback()
+      state.setView(state.provisionalCurve.preparation.status === 'needs-review' ? 'provisional-curve' : 'preparation-review')
+    },
+    openCompletedStory: () => {
+      if (!state.generatedStory || stage.stageStatus === 'loading') return
+      stage.clearStageFeedback()
+      state.setView('complete')
+    },
     ...createStoryWritingActions(context),
     ...createStoryPlanningActions(context),
     ...storyProgressActions,
@@ -676,14 +695,16 @@ function createNavigationActions(
   }
 
   const goBack = () => {
-    if (state.view === 'story-spine' && stage.stageStatus === 'error') {
+    if (state.view === 'story-spine' && !state.confirmedCurve && stage.stageStatus === 'error') {
       state.setPendingTurnRequest(undefined)
       stage.clearStageFeedback()
       return
     }
 
     stage.clearStageFeedback()
-    const previousView = state.view === 'story-spine' && state.confirmedCurve
+    const previousView = state.view === 'provisional-curve' && state.provisionalCurve?.preparation
+      ? 'preparation-review'
+      : state.view === 'story-spine' && state.confirmedCurve
       ? 'provisional-curve'
       : previousViewByView[state.view]
     if (previousView) state.setView(previousView)

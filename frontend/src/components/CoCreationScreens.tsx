@@ -4,6 +4,7 @@ import { Archive, ArrowLeft, ArrowRight, Check, CircleAlert, FileText, History, 
 import type { CreativeBrief, CreativeTone, CurveBeat, DramaticForce, StoryAuthorClarification, StoryAuthorClarificationAction, StoryCurveVersion, StorySourceFact, StoryCurveRegenerationDecision } from '../story/types'
 import type { StorySession } from '../story/useStorySession'
 import { StoryRequirementsFields } from './StoryRequirementsFields'
+import { StoryJourney } from './StoryScreens'
 import { requestPreparationGoalSuggestion, requestPreparationStoryDirections } from '../story/storyApi'
 import { PreparationExplanation, ExplanationExpansionNotes, explanationMatches } from './PreparationExplanation'
 import { preparationActionFieldLimit, splitPreparationAction, updatePreparationAction } from '../story/preparationAction'
@@ -116,8 +117,8 @@ export function CreativeBriefScreen({ session }: { session: StorySession }) {
         <button className="opening-back" type="button" onClick={session.goBack} disabled={isLoading}>
           <ArrowLeft size={18} /> 返回想法
         </button>
-        <div className="cocreation-step"><span>01</span><strong>创意方向</strong><small>先决定这件事往哪里变有趣</small></div>
-        <span className="model-label"><span className="status-dot" /> 共创工作区</span>
+        <StoryJourney current={1} />
+        {hasExistingSession ? <button className="text-action stage-forward" type="button" onClick={session.provisionalCurve?.preparation ? session.reviewStoryPredicament : session.resumeStoryDesign} disabled={isLoading || isSubmitting}>下一步 · {session.provisionalCurve?.preparation ? '故事走向' : '故事设计'} <ArrowRight size={16} /></button> : <span className="model-label"><span className="status-dot" /> 共创工作区</span>}
       </header>
       <div className="cocreation-layout">
         <section className="cocreation-main">
@@ -177,7 +178,8 @@ export function CreativeBriefScreen({ session }: { session: StorySession }) {
 
           {session.stageError && <p className="cocreation-error" role="alert"><CircleAlert size={16} /> {session.stageError}</p>}
           <div className="cocreation-actions">
-            <button className="primary-action" type="button" onClick={submit} disabled={isLoading || isSubmitting}>{isLoading || isSubmitting ? '正在整理主线…' : hasExistingSession ? (versionMode === 'new-version' ? '生成并保留为新版本' : '更新当前草案') : '生成暂定故事曲线'} <ArrowRight size={18} /></button>
+            {hasExistingSession && <button className="primary-action" type="button" onClick={session.provisionalCurve?.preparation ? session.reviewStoryPredicament : session.resumeStoryDesign} disabled={isLoading || isSubmitting}>下一步 · {session.provisionalCurve?.preparation ? '故事走向' : '故事设计'} <ArrowRight size={16} /></button>}
+            <button className={hasExistingSession ? 'text-action' : 'primary-action'} type="button" onClick={submit} disabled={isLoading || isSubmitting}>{isLoading || isSubmitting ? '正在整理主线…' : hasExistingSession ? (versionMode === 'new-version' ? '生成并保留为新版本' : '更新当前草案') : '下一步 · 生成故事走向'} <ArrowRight size={18} /></button>
           </div>
         </section>
         <aside className="cocreation-aside">
@@ -189,6 +191,10 @@ export function CreativeBriefScreen({ session }: { session: StorySession }) {
       </div>
     </main>
   )
+}
+
+export function AcceptedPreparationScreen({ session }: { session: StorySession }) {
+  return <PreparationReview session={session} />
 }
 
 export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
@@ -325,8 +331,9 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
   return (
     <main className="app-shell setup-shell cocreation-shell curve-shell">
       <header className="setup-header cocreation-header">
-        <button className="opening-back" type="button" onClick={session.goBack} disabled={isLoading}><ArrowLeft size={18} /> 返回创意方向</button>
-        <div className="cocreation-step"><span>02</span><strong>故事设计</strong><small>{session.confirmedCurve ? '主线已确认，可以开始推演' : '从选定方向，看见一版完整故事'}</small></div>
+        <button className="opening-back" type="button" onClick={session.goBack} disabled={isLoading}><ArrowLeft size={18} /> 上一步 · {curve.preparation ? '故事走向' : '创意方向'}</button>
+        <StoryJourney current={3} />
+        {session.hasVisitedStoryWriting && <button className="text-action stage-forward" type="button" onClick={session.openStoryWriting} disabled={isLoading}>下一步 · 写成故事 <ArrowRight size={16} /></button>}
       </header>
       <div className="curve-layout">
         <section className="curve-main">
@@ -400,6 +407,7 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
           {!session.confirmedCurve && sourceFacts.length > 0 && <details className="story-review-details" open={unresolvedFacts.length > 0}><summary>查看原文保留情况{unresolvedFacts.length > 0 && <span>{unresolvedFacts.length} 项待决定</span>}</summary><SourceFactLedger facts={sourceFacts} beats={curve.beats} busyFactId={busyFactId} disabled={isLoading} onSetDisposition={updateFactDisposition} /></details>}
           <div className="curve-version-bar"><button className="text-action" type="button" onClick={() => setShowVersions((visible) => !visible)} disabled={isLoading}><History size={15} /> {showVersions ? '收起版本记录' : `查看已保存版本（${session.curveVersions.length}）`}</button>{showVersions && <CurveVersionList versions={session.curveVersions} activeVersionId={session.activeCurveVersionId} disabled={isLoading} onSelect={(versionId) => void session.selectCurveVersion(versionId)} />}</div>
           <div className="curve-footer-actions">
+            <button className="text-action" type="button" onClick={session.goBack} disabled={isLoading}><ArrowLeft size={16} /> 上一步 · {curve.preparation ? '故事走向' : '创意方向'}</button>
             {session.confirmedCurve ? <button className="primary-action" type="button" onClick={() => session.openStoryWriting()} disabled={isLoading}>{hasStartedStoryPath ? '继续写成故事' : '开始写成故事'} <ArrowRight size={18} /></button> : <button className="primary-action" type="button" onClick={() => void session.confirmProvisionalCurve(acceptedDesignIds)} disabled={!canConfirm}>{isLoading ? '正在确认主线…' : '确定这版故事方向'} <Check size={18} /></button>}
           </div>
         </section>
@@ -422,15 +430,15 @@ function ProvisionalCurveEmptyState({ session, isLoading }: { session: StorySess
         <button className="opening-back" type="button" onClick={session.goBack} disabled={isLoading}>
           <ArrowLeft size={18} /> 返回创意方向
         </button>
-        <div className="cocreation-step"><span>02</span><strong>故事方向</strong><small>比较三种困境，选定一条主线</small></div>
+        <StoryJourney current={2} />
       </header>
       <section className="curve-empty-state" aria-live="polite">
         {isLoading ? (
           <div className="curve-building" role="status" aria-busy="true">
             <div className="curve-building-copy">
-              <p className="eyebrow"><Sparkles size={15} /> 故事方向</p>
+              <p className="eyebrow"><Sparkles size={15} /> 故事设计</p>
               <h1>故事正在成形</h1>
-              <p>围绕你的想法构思三种不同困境，完成后由你选择故事要往哪里走。</p>
+              <p>围绕你的想法，提出三种不同的推进方向；看完后，由你选定故事接下来怎么展开。</p>
               <div className="curve-building-status"><span aria-hidden="true" /><strong>正在构思故事方向</strong></div>
             </div>
             <div className="curve-building-map preparation-building-map" aria-label="生成流程说明">
@@ -784,10 +792,10 @@ function PreparationReview({ session }: { session: StorySession }) {
     }) } finally { submitLock.current = false; setPendingOperation(undefined) }
   }
   return <main className="app-shell setup-shell cocreation-shell preparation-workspace">
-    <header className="setup-header"><button className="opening-back" type="button" onClick={session.goBackToOpening} disabled={busy}><ArrowLeft size={18} /> 修改想法</button><span className="preparation-brand">青柠创作<span> / </span>一起构思</span><span className="model-label">尚未开始剧情</span></header>
+    <header className="setup-header"><button className="opening-back" type="button" onClick={session.goBack} disabled={busy}><ArrowLeft size={18} /> 返回创意方向</button><StoryJourney current={2} /><div className="setup-header-actions">{p.status !== 'needs-review' && <button className="text-action" type="button" onClick={session.resumeStoryDesign} disabled={busy}>下一步 · 故事设计 <ArrowRight size={16} /></button>}</div></header>
     <div className="preparation-layout">
     <div className="preparation-direction-column" aria-busy={busy}>
-    <div className="preparation-intro"><p className="eyebrow">01 / 故事困境</p><h1>这件事会遇到什么难处？</h1><p className="setup-lead">先选一种阻碍与取舍，再继续展开故事。</p></div>
+    <div className="preparation-intro"><p className="eyebrow">02 / 05 · 故事走向选择</p><h1>这件事接下来会怎样发展？</h1><p className="setup-lead">先看看几种不同的推进可能，再选定故事接下来怎么展开。</p></div>
    {!!candidates.length && <div className="preparation-direction-heading"><div><p>围绕你的想法继续</p><strong>原始目标不变，先选它会遇到什么难处。</strong>{(() => { const anchors = displayMainlineAnchors(p.mainlineAnchors ?? []); return anchors.length ? <p>主线要素：{anchors.map(anchor => anchor.quote).join(' · ')}</p> : null })()}</div><span>选定后，还可以继续修改故事规划。</span></div>}
     {busy && <div className="preparation-generation-feedback" role="status"><strong>{pendingOperation === 'accept' ? '正在按你选定的走向构思故事' : '正在构思新的一组方向'}</strong><p>{pendingOperation === 'accept' ? '完成后可以审阅、编辑或局部重做故事设计。' : '当前方向会保留到操作完成。'}</p></div>}
     {session.stageError && <div className="preparation-generation-feedback is-error" role="alert"><strong>这次调整没有完成</strong><p>{preparationErrorMessage(session)}</p><p>当前方向和你的编辑仍保留，可以继续修改。</p><div className="preparation-recovery-actions"><button className="text-action" type="button" disabled={busy} onClick={() => void requestAlternative()}>换一组方向</button><button className="text-action" type="button" disabled={busy} onClick={session.goBackToOpening}>修改想法</button></div></div>}
@@ -799,7 +807,7 @@ function PreparationReview({ session }: { session: StorySession }) {
       const proposedSetup = wording.action.match(/^遇到的难处：([\s\S]*?)\s*眼前的选择：/u)?.[1]?.trim() ?? wording.action
       const currentExplanation = explanations[active.id] ?? active.explanation
       const explanationCurrent = currentExplanation ? explanationMatches(currentExplanation.wording, wording) : explanationMatches(active, wording)
-      return <section className={`preparation-proposal ${selectedId === active.id ? 'is-selected' : ''}`} aria-label={`故事困境 ${index + 1}`} key={active.id}>
+      return <section className={`preparation-proposal ${selectedId === active.id ? 'is-selected' : ''}`} aria-label={`故事走向 ${index + 1}`} key={active.id}>
       <button className="preparation-choice" type="button" aria-pressed={selectedId === active.id} disabled={busy || !!active.unknownIds.length} onClick={() => { if (selectedId !== active.id) setChoosingDirection(false); setSelectedId(active.id) }}>
         <span className="preparation-choice-index">0{index + 1}</span>
         <span className="preparation-choice-icon"><FileText size={18} /></span>
@@ -836,7 +844,7 @@ function PreparationReview({ session }: { session: StorySession }) {
           onChange={value => setExplanations(current => ({ ...current, [active.id]: value }))} />
       </details>
     </section>})}
-    {!!candidates.length && <div className="preparation-direction-footer">{!choosingDirection && <button className="primary-action" type="button" disabled={busy || !selected || selectedNeedsReview || !((reviewed[selected.id]?.action ?? selected.action).trim()) || !((reviewed[selected.id]?.possibleResult ?? selected.possibleResult).trim())} onClick={() => { setEditing(undefined); setChoosingDirection(true) }}>确认这个困境 <ArrowRight size={16} /></button>}<button className="text-action" type="button" disabled={busy} onClick={() => void requestAlternative()}> <RefreshCcw size={16} /> 换一组困境</button></div>}
+    {!!candidates.length && <div className="preparation-direction-footer">{!choosingDirection && <button className="primary-action" type="button" disabled={busy || !selected || selectedNeedsReview || !((reviewed[selected.id]?.action ?? selected.action).trim()) || !((reviewed[selected.id]?.possibleResult ?? selected.possibleResult).trim())} onClick={() => { setEditing(undefined); setChoosingDirection(true) }}>确认这个故事走向 <ArrowRight size={16} /></button>}<button className="text-action" type="button" disabled={busy} onClick={() => void requestAlternative()}> <RefreshCcw size={16} /> 换一组故事走向</button></div>}
     {choosingDirection && selected && !selectedNeedsReview && <PreparationStoryDirectionChoice
       key={JSON.stringify([session.revision, selected.id, createReview(selected)])}
       session={session} candidateId={selected.id} review={createReview(selected)} disabled={busy}

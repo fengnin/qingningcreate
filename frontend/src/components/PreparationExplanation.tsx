@@ -67,7 +67,7 @@ export function PreparationExplanation({ candidate, wording, explanation, disabl
   return <div className="preparation-explanation">
     <p className="preparation-explanation-status" role="status">{!current ? '解释待补充' : stale ? '内容已修改，解释待核对' : explanation ? '当前解释 · 已由你采用' : '当前解释 · 系统提案'}</p>
     {stale && current && <p>点击“重新推演这张卡”，千问会结合最新四项内容生成新解释，供你决定是否采用。旧解释仍可查看，也可以手动编辑或核对后沿用。</p>}
-    <p className="preparation-evidence-note">采用的解释会随“确认这个困境”一起保存。</p>
+    <p className="preparation-evidence-note">采用的解释会随“确认这个故事走向”一起保存。</p>
     {current ? <div className={stale ? 'is-stale' : undefined}>{stale && <small>旧解释 · 尚未核对当前内容</small>}{show(current)}</div> : <p>这张卡还没有推演解释。</p>}
     <div className="preparation-explanation-actions">
       <button className="text-action" type="button" disabled={disabled} onClick={() => setDraft({

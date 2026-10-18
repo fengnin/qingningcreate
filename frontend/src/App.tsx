@@ -6,7 +6,7 @@ import {
   PredicamentPickerScreen,
   StorySpineScreen,
 } from './components/StoryScreens'
-import { CreativeBriefScreen, ProvisionalCurveScreen } from './components/CoCreationScreens'
+import { CreativeBriefScreen, ProvisionalCurveScreen, AcceptedPreparationScreen } from './components/CoCreationScreens'
 import { useStorySession } from './story/useStorySession'
 
 function App() {
@@ -15,6 +15,8 @@ function App() {
   switch (session.view) {
     case 'creative-brief':
       return <CreativeBriefScreen session={session} />
+    case 'preparation-review':
+      return <AcceptedPreparationScreen session={session} />
     case 'provisional-curve':
       return <ProvisionalCurveScreen session={session} />
     case 'conflict-core-picker':

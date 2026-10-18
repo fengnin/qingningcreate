@@ -36,6 +36,7 @@ export interface StorySession extends StorySessionActions {
   creativeBrief: CreativeBrief
   provisionalCurve: ProvisionalCurve | undefined
   confirmedCurve: ConfirmedCurve | undefined
+  hasVisitedStoryWriting: boolean
   conflictCoreFeedback: string
   selectedConflictCore: StoryConflictCore | undefined
   selectedConflictCoreId: string | undefined
@@ -75,6 +76,9 @@ export function useStorySession(): StorySession {
   const stage = useStoryStageRequest()
   const actions = createStorySessionActions(state, stage)
   const restoreStarted = useRef(false)
+  const writingVisits = useRef(new Set<string>())
+  const curveId = state.provisionalCurve?.id
+  if (curveId && state.view === 'story-spine') writingVisits.current.add(curveId)
 
   useEffect(() => {
     if (restoreStarted.current) return
@@ -92,6 +96,7 @@ export function useStorySession(): StorySession {
     creativeBrief: state.creativeBrief,
     provisionalCurve: state.provisionalCurve,
     confirmedCurve: state.confirmedCurve,
+    hasVisitedStoryWriting: Boolean(state.confirmedCurve && (curveId && writingVisits.current.has(curveId) || state.writingDraft || state.currentTurn || state.generatedStory)),
     conflictCoreFeedback: state.conflictCoreFeedback,
     selectedConflictCore: state.selectedConflictCore,
     selectedConflictCoreId: state.selectedConflictCoreId,

@@ -6,7 +6,6 @@ import {
   Check,
   CircleAlert,
   FileText,
-  GitBranch,
   Lightbulb,
   PencilLine,
   RefreshCcw,
@@ -40,12 +39,11 @@ import type { StorySession } from '../story/useStorySession'
 const maximumStoryIdeaLength = 120
 
 const journeyStages: { step: StoryStep; label: string; detail: string }[] = [
-  { step: 1, label: '冲突核心', detail: '先确定它卡在哪里' },
-  { step: 2, label: '具体困境', detail: '再落到当前局面' },
-  { step: 3, label: '待审阅的故事设计', detail: '查看并修改整版故事骨架' },
-  { step: 4, label: '写成故事', detail: '按确认的方向展开情节' },
-  { step: 5, label: '收束故事', detail: '让主角完成关键行动' },
-  { step: 6, label: '完整故事', detail: '整理成完整正文' },
+  { step: 1, label: '创意方向', detail: '确定这件事的创作方向' },
+  { step: 2, label: '故事走向选择', detail: '比较不同走向，选定故事方向' },
+  { step: 3, label: '故事设计', detail: '审阅并调整故事骨架' },
+  { step: 4, label: '写成故事', detail: '按确认主线逐段写作' },
+  { step: 5, label: '完整故事', detail: '整理并阅读完整正文' },
 ]
 
 const variationAxisLabel: Record<StoryVariationAxis, string> = {
@@ -79,15 +77,15 @@ export function OpeningScreen({ session }: { session: StorySession }) {
       <div className="opening-shade" aria-hidden="true" />
       <header className="opening-header">
         <Brand />
-        <span className="model-label"><span className="status-dot" /> 通义千问</span>
+        <span className="model-label"><span className="status-dot" /> 共创助手</span>
       </header>
       <section className="opening-content">
         {session.restoreError && <p className="cocreation-error" role="alert"><CircleAlert size={16} /> {session.restoreError} <button className="text-action" type="button" onClick={() => void session.retryRestoreSession()}>重试恢复</button></p>}
         <p className="opening-kicker"><Sparkles size={15} /> 从一句话开始</p>
         <h1>时光川行<br />青柠创作平台</h1>
-        <p>先由你决定它要讲什么，系统再把想法整理成可编辑的故事曲线；确认主线后，才开始让它发生。</p>
+        <p>先由你定下创作方向，再一起选择故事走向、审阅故事设计；确认主线后，系统才按这条路径逐段写成故事。</p>
         <label className="idea-field">
-          <span className="idea-field-label">此刻浮现的想法 <small>一个人想做的一件事就够了</small></span>
+          <span className="idea-field-label">此刻浮现的想法</span>
             <textarea
               value={session.idea}
               onChange={(event) => session.updateIdea(event.target.value)}
@@ -169,7 +167,7 @@ export function ConflictCorePickerScreen({ session }: { session: StorySession })
   return (
     <StoryWorkspace
       step={1}
-      eyebrow="01 / 06 · 冲突核心"
+      eyebrow="01 / 05 · 创意方向"
       title="先确认，主角到底会被什么卡住。"
       lead="先比较同一目标下的阻碍与取舍；具体场景、紧迫性和应对方向留到下一步。"
       session={session}
@@ -312,7 +310,7 @@ export function PredicamentPickerScreen({ session }: { session: StorySession }) 
   return (
     <StoryWorkspace
       step={2}
-      eyebrow="02 / 06 · 具体困境"
+      eyebrow="02 / 05 · 故事走向选择"
       title="再把这个阻碍，落到一个当下局面。"
       lead="补齐当前场景、缘由、暂定事实和两条应对方向，先确认故事为什么必须从这里开始。"
       session={session}
@@ -321,7 +319,7 @@ export function PredicamentPickerScreen({ session }: { session: StorySession }) 
       <StepContent
         loading={isLoading}
         error={session.stageError}
-        loadingLabel="正在展开具体困境"
+        loadingLabel="正在展开故事走向"
         loadingDetail="保留已确认的目标和阻碍，再补齐此刻能进入故事的局面。"
         onRetry={() => void session.retryCurrentStage()}
       >
@@ -334,7 +332,7 @@ export function PredicamentPickerScreen({ session }: { session: StorySession }) 
         <StageActions
           onRegenerate={() => void session.regeneratePredicament()}
           onNext={session.continueToHeadTail}
-          nextLabel="确认这个具体困境"
+          nextLabel="确认这个故事走向"
           disabled={!predicament}
         />
       </StepContent>
@@ -349,7 +347,7 @@ export function HeadTailScreen({ session }: { session: StorySession }) {
   return (
     <StoryWorkspace
       step={3}
-      eyebrow="03 / 06 · 故事两端"
+      eyebrow="03 / 05 · 故事设计"
       title="先定故事从哪里开始，最后如何结束。"
       lead="先选故事要从哪条应对方向开始，再定下开场、关键行动和结尾。"
       session={session}
@@ -412,7 +410,7 @@ export function StorySpineScreen({ session }: { session: StorySession }) {
   const canConclude = currentTurn?.canConclude ?? false
   const isWritingStory = hasConclusion && session.stageStatus === 'loading'
   const hasStoryGenerationError = hasConclusion && Boolean(session.stageError)
-  const step = hasConclusion ? 5 : 4
+  const step = 4
   const currentTurnPanel = currentTurn ? (
     <CurrentStoryTurn
       currentTurn={currentTurn}
@@ -427,7 +425,7 @@ export function StorySpineScreen({ session }: { session: StorySession }) {
   return (
     <StoryWorkspace
       step={step}
-      eyebrow={hasConclusion ? '05 / 06 · 故事收束' : '04 / 06 · 写成故事'}
+      eyebrow="04 / 05 · 写成故事"
       title={hasConclusion ? '这些确认的选择，已经让故事可以走向结局。' : '按确认的故事设计，把情节写出来。'}
       lead={hasConclusion ? '回看这条由你确认的因果链；结尾会在它之后自然完成。' : '系统按当前故事设计展开情节；每一步都可以修改、重做，再继续写下去。'}
       session={session}
@@ -505,7 +503,7 @@ function WritingWorkspace({ session }: { session: StorySession }) {
   return (
     <StoryWorkspace
       step={4}
-      eyebrow="04 / 06 · 写成故事"
+      eyebrow="04 / 05 · 写成故事"
       title="按确认的故事设计，把情节写出来。"
       lead="每次展开一段正文。你可以先修改或局部重写，再决定是否采用并继续。"
       session={session}
@@ -582,12 +580,9 @@ export function CompletedStory({ session }: { session: StorySession }) {
   return (
     <main className="app-shell setup-shell stage-shell complete-shell">
       <header className="setup-header complete-header">
-        <Brand />
-        <StoryJourney current={6} />
+        <button className="opening-back" type="button" onClick={session.goBack}><ArrowLeft size={18} /> 上一步 · 写成故事</button>
+        <StoryJourney current={5} />
         <div className="stage-header-actions complete-header-actions">
-          <button className="opening-back" type="button" onClick={session.goBack}>
-            <ArrowLeft size={18} /> 返回故事路径
-          </button>
           <button className="toolbar-action restart-action" type="button" onClick={session.restartStory} aria-label="新建故事" title="新建故事">
             <RefreshCcw size={15} /> 新建故事
           </button>
@@ -597,93 +592,17 @@ export function CompletedStory({ session }: { session: StorySession }) {
         <header className="completed-heading">
           <span className="complete-mark"><Check size={20} /></span>
           <div>
-            <p className="eyebrow"><FileText size={16} /> 06 / 06 · 完整故事</p>
+            <p className="eyebrow"><FileText size={16} /> 05 / 05 · 完整故事</p>
             <h1>{isPlaceholderTitle ? '完整故事' : story.title}</h1>
             <p className="completed-logline">{isPlaceholderTitle ? '根据已确认的故事路径写成。' : story.logline}</p>
           </div>
         </header>
-        <div className="completed-grid">
-          <article className="manuscript" aria-label="完整正文">
-            <p className="manuscript-label">完整正文</p>
-            <StoryBody body={story.body} />
-          </article>
-          <CompletedStoryPath
-            predicament={session.predicament}
-            headTail={session.selectedHeadTail}
-            history={session.turnHistory}
-            conclusion={session.currentTurn?.isConclusion ? session.currentTurn : undefined}
-          />
-        </div>
+        <article className="manuscript" aria-label="完整正文">
+          <p className="manuscript-label">完整正文</p>
+          <StoryBody body={story.body} />
+        </article>
       </section>
     </main>
-  )
-}
-
-function CompletedStoryPath({
-  predicament,
-  headTail,
-  history,
-  conclusion,
-}: {
-  predicament: StoryPredicament | undefined
-  headTail: StoryHeadTailOption | undefined
-  history: StoryTurnHistoryItem[]
-  conclusion: StoryTurn | undefined
-}) {
-  const startingTitle = headTail?.opening ?? predicament?.title
-  const startingDetail = predicament?.immediateSituation ?? headTail?.promise
-  const conclusionAction = conclusion?.narrativeAction?.intent ?? conclusion?.conflict.action
-
-  return (
-    <aside className="completed-path" aria-label="故事走过的路">
-      <p className="manuscript-label"><Route size={16} /> 故事走过的路</p>
-      <ol className="completed-path-list">
-        {startingTitle && (
-          <li className="completed-path-item is-start">
-            <span className="completed-path-marker">起点</span>
-            <div className="completed-path-copy">
-              <p className="completed-path-phase">开场</p>
-              <strong>{startingTitle}</strong>
-              {startingDetail && <p className="completed-path-summary">{startingDetail}</p>}
-              {predicament && (
-                <dl className="completed-path-details">
-                  <div><dt>目标</dt><dd>{predicament.preservedGoal}</dd></div>
-                  <div><dt>阻碍</dt><dd>{predicament.obstacle}</dd></div>
-                </dl>
-              )}
-            </div>
-          </li>
-        )}
-        {history.map((item, index) => (
-          <li className="completed-path-item" key={item.turnId}>
-            <span className="completed-path-marker">{String(index + 1).padStart(2, '0')}</span>
-            <div className="completed-path-copy">
-              <p className="completed-path-phase">{turnPhaseLabel[item.phase]}</p>
-              <strong>{item.node.title}</strong>
-              <p className="completed-path-summary">{item.node.event}</p>
-              <dl className="completed-path-details">
-                <div><dt>选择</dt><dd>{item.selectedOption.action}</dd></div>
-                <div><dt>当下结果</dt><dd>{item.selectedOption.immediateConsequence}</dd></div>
-              </dl>
-            </div>
-          </li>
-        ))}
-        {conclusion && (
-          <li className="completed-path-item is-conclusion">
-            <span className="completed-path-marker">结局</span>
-            <div className="completed-path-copy">
-              <p className="completed-path-phase">实际收束</p>
-              <strong>{conclusion.node.title}</strong>
-              <p className="completed-path-summary">{conclusion.node.event}</p>
-              <dl className="completed-path-details">
-                {conclusionAction && <div><dt>完成</dt><dd>{conclusionAction}</dd></div>}
-                <div><dt>结果</dt><dd>{conclusion.conflict.consequence}</dd></div>
-              </dl>
-            </div>
-          </li>
-        )}
-      </ol>
-    </aside>
   )
 }
 
@@ -714,11 +633,11 @@ function StoryWorkspace({
   return (
     <main className="app-shell setup-shell stage-shell">
       <header className="setup-header">
-        <Brand />
+        <button className="opening-back" type="button" onClick={handleBack} disabled={session.stageStatus === 'loading'}><ArrowLeft size={18} /> {backLabel ?? (isRecoveringStoryPath ? '回到当前故事路径' : step === 4 && session.confirmedCurve ? '上一步 · 故事设计' : '返回上一步')}</button>
         <StoryJourney current={step} />
         <div className="stage-header-actions">
           {session.generatedStory && <button className="toolbar-action restart-action" type="button" onClick={session.restartStory}><RefreshCcw size={15} /> 新建故事</button>}
-          <button className="opening-back" type="button" onClick={handleBack} disabled={session.stageStatus === 'loading'}><ArrowLeft size={18} /> {backLabel ?? (isRecoveringStoryPath ? '回到当前故事路径' : '返回上一步')}</button>
+          {step === 4 && session.generatedStory && <button className="text-action" type="button" onClick={session.openCompletedStory} disabled={session.stageStatus === 'loading'}>下一步 · 完整故事 <ArrowRight size={16} /></button>}
         </div>
       </header>
       <section className="setup-layout stage-layout">
@@ -1237,11 +1156,11 @@ function PredicamentSummary({
   approach: StoryPredicamentApproach | undefined
   compact?: boolean
 }) {
-  if (!predicament) return <AsideEmpty icon={<Target size={19} />} label="正在等你确认一个故事困境" detail="选中后，故事目标和这次阻碍会固定下来。" />
+  if (!predicament) return <AsideEmpty icon={<Target size={19} />} label="正在等你确认故事走向" detail="选中后，故事目标和这次阻碍会固定下来。" />
   return (
     <>
       <span className="aside-icon"><Target size={19} /></span>
-      <p className="eyebrow">已确认的故事困境</p>
+      <p className="eyebrow">已确认的故事走向</p>
       <h2>{predicament.title}</h2>
       <dl className="anchor-preview">
         <div><dt>{getStoryGoalLabel(seed)}</dt><dd>{seed?.lockedGoal ?? predicament.preservedGoal}</dd></div>
@@ -1327,12 +1246,12 @@ function GenerationError({ message, onRetry, retryLabel = '再试一次' }: {
   )
 }
 
-function StoryJourney({ current, compact = false }: { current: number; compact?: boolean }) {
+export function StoryJourney({ current, compact = false }: { current: number; compact?: boolean }) {
   return <nav className={`story-journey ${compact ? 'is-compact' : ''}`} aria-label="创作进度"><ol>{journeyStages.map((stage) => { const isComplete = stage.step < current; const isCurrent = stage.step === current; return <li className={`${isComplete ? 'is-complete' : ''} ${isCurrent ? 'is-current' : ''}`} key={stage.label} aria-current={isCurrent ? 'step' : undefined}><span className="journey-marker">{isComplete ? <Check size={14} /> : String(stage.step).padStart(2, '0')}</span><span className="journey-copy"><strong>{stage.label}</strong><small>{stage.detail}</small></span></li> })}</ol></nav>
 }
 
 function StageIcon({ step, size }: { step: StoryStep; size: number }) {
-  const Icon = [Target, FileText, Route, Waypoints, GitBranch, FileText][step - 1]
+  const Icon = [Target, FileText, Route, Waypoints, FileText][step - 1]
   return <Icon size={size} />
 }
 

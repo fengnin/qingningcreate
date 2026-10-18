@@ -1,0 +1,53 @@
+# Node.js dependencies
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+
+# Build output and local tooling
+dist/
+backend/dist/
+frontend/dist/
+.vite/
+frontend/.vite/
+*.tsbuildinfo
+
+# Local story session snapshots
+backend/data/
+
+# Secrets and local environment configuration
+.env
+.env.*
+!.env.example
+
+# Logs and operating-system files
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Local acceptance evidence, one-off scripts, patches, and isolated runs
+local-evidence/
+/logs/
+/backend/tmp-*
+/*.patch
+
+# Local product notes and private creative references
+ARCHITECTURE.md
+PRODUCT_FLOW.md
+DEVELOPMENT_PLAN.md
+/共创作者边界与编辑失败诊断.md
+/准备材料引用失败诊断与最小方案.md
+/行动构思界面整改记录-20261011.md
+/共创主线体验验收手册.md
+/时光川行.txt
+/frontend/desktop-six-step.png
+/frontend/mobile-six-step.png
+/backend/scripts/
+/frontend/scripts/
+*.test.ts
+*.test.mjs
+lizi.txt
+测试.txt
+老白.txt
