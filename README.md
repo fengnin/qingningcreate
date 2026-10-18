@@ -1,58 +1,59 @@
 # 时光川行 · 青柠创作平台
 
-一个由通义千问驱动的互动故事创作应用。用户从一个模糊念头出发，依次确认故事困境、开端与结尾，并通过关键选择推进故事，最后生成完整正文。
+由通义千问驱动的故事共创应用。从一句想法出发，先整理材料、设计故事，再由作者确认主线，逐段展开正文。每段都可以手动修改、提出局部重写意见，确认采用后继续写作。
 
-## 功能概览
+## 项目介绍
 
-- 在新共创主线中，先把模糊念头整理成可编辑的暂定故事曲线，并用原始材料账本确认冲突核心、具体困境、故事两端和中间发展；确认前不会生成连续剧情。
-- 兼容保留旧的三条冲突核心接口，用于比较共同目标、核心阻碍和真正的两难；它不是新共创主线的默认入口。
-- 选定冲突核心后，再生成当前场景、紧迫性、暂定事实和两条可行的应对方向。
-- 生成故事开端、高潮和结尾的组合，固定故事目标与代价。
-- 以分支选择推进故事路径，并保存已确认的剧情事实与行动。
-- 主线确认后，作者可以通过独立的“作者调整主线”入口修改故事；“提出角色行动”只负责当前回合的角色选择，不能替代作者指令。
-- 根据确认的路径生成完整故事、故事节拍和一致性检查结果。
-- 在本地持久化故事会话，刷新页面或重启后端后仍可继续创作。
+时光川行面向希望把零散灵感发展成完整故事的创作者，将方向构思、主线设计和正文写作放在同一个工作流中。AI 提供可编辑的故事建议，作者决定采用什么，并逐步完成自己的作品。
 
-## 技术组成
+## 核心功能
+
+- **灵感构思**：根据想法和创作要求生成候选故事方向，帮助找到值得展开的冲突与困境。
+- **故事地图**：在写作前查看故事的开端、发展与收束，编辑节点或重新生成局部设计。
+- **逐段共创**：按确认的主线展开正文，支持手动编辑和带意见的局部重写。
+- **作者确认**：由作者审阅和采用设计、正文，控制故事走向与表达。
+- **会话恢复**：在本地保存创作进度，支持刷新后继续创作及恢复故事设计版本。
+
+## 使用流程
+
+1. **准备材料**：输入创作想法与要求，比较故事方向，编辑困境及其推演解释。
+2. **故事设计**：审阅故事地图，修改开端、发展与结尾；系统补充的内容作为提案，由作者决定是否采用。
+3. **确认主线**：处理原始材料和待审设计后确认故事主线。确认设计不会自动开始剧情。
+4. **逐段写作**：按故事设计展开一段正文，审阅、手动修改或填写意见局部重写，保存修改后再采用并继续。
+5. **整理成稿**：完成段落审阅，整理为完整故事。
+
+## 技术栈
 
 - 前端：React 18、TypeScript、Vite。
 - 后端：Express、TypeScript。
-- AI 服务：阿里云 DashScope 的 OpenAI 兼容接口，默认模型为 `qwen-plus`。
+- 模型：DashScope 的 OpenAI 兼容接口，默认使用 `qwen-plus`。
+- 存储：本地 JSON 会话文件。
 
-## 环境要求
+## 快速开始
 
-- Node.js 18 或更高版本，推荐 Node.js 20 或 22。
-- npm。
-- 一个可用的 DashScope API Key。
+建议使用 Node.js 22 LTS 与 npm，并准备可用的 DashScope API Key。
 
-在 Windows PowerShell 中，如果直接运行 `npm` 出现“禁止运行脚本”错误，请使用本文命令中的 `npm.cmd`。macOS、Linux 或未受该限制的终端可将 `npm.cmd` 替换为 `npm`。
+以下命令适用于 Windows PowerShell。macOS、Linux 可将 `npm.cmd` 替换为 `npm`。
 
-## 本地运行
-
-### 1. 获取代码并安装依赖
+### 安装依赖
 
 ```powershell
 git clone https://github.com/fengnin/qingningcreate.git
 cd qingningcreate
-
 cd backend
-npm.cmd install
-
+npm.cmd ci
 cd ../frontend
-npm.cmd install
-
+npm.cmd ci
 cd ..
 ```
 
-### 2. 配置后端环境变量
-
-从示例文件创建本地配置：
+### 配置模型
 
 ```powershell
 Copy-Item backend/.env.example backend/.env
 ```
 
-打开 `backend/.env`，至少填入 DashScope API Key：
+编辑 `backend/.env`，填入自己的密钥：
 
 ```dotenv
 DASHSCOPE_API_KEY=your-dashscope-api-key
@@ -60,140 +61,74 @@ QWEN_MODEL=qwen-plus
 PORT=8787
 ```
 
-`.env` 已被 Git 忽略，请不要提交真实密钥。`backend/.env.example` 只保留可公开的配置模板。
+真实密钥仅放在后端，不能写入前端代码或上传到仓库。
 
-### 3. 启动后端
+### 启动服务
 
-在第一个终端中运行：
+在一个终端启动后端：
 
 ```powershell
 cd backend
 npm.cmd run dev
 ```
 
-服务默认监听 `http://127.0.0.1:8787`。可另开一个终端检查服务和密钥是否已加载：
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:8787/health
-```
-
-返回结果中的 `configured` 应为 `true`。
-
-### 4. 启动前端
-
-在第二个终端中运行：
+在另一个终端启动前端：
 
 ```powershell
 cd frontend
 npm.cmd run dev
 ```
 
-打开终端显示的地址，默认是 `http://localhost:5173`。
+打开前端终端显示的地址，默认是 `http://localhost:5173`。开发服务器会将 `/api` 请求代理到 `http://127.0.0.1:8787`。
 
-开发模式下，Vite 会将前端的 `/api` 请求转发到 `http://127.0.0.1:8787`，因此前后端都需要保持运行。
+可访问 `http://127.0.0.1:8787/health` 检查后端状态。
 
-### 共创主线的最小验收
+## 常用配置
 
-真实体验应按以下顺序进行：写下一句想法，选择创意方向，查看“暂定故事曲线”，编辑或拒绝系统提案，处理原始材料账本，再点击“确认主线（仍停留在设计阶段）”。确认不会自动进入连续剧情；只有再次点击“确认主线后，开始第一回合”才会出现角色行动。进入推演后，作者调整和角色行动是两个独立入口。
+| 变量 | 默认值 | 用途 |
+| --- | --- | --- |
+| `DASHSCOPE_API_KEY` | 无 | 后端调用模型所需的密钥 |
+| `QWEN_MODEL` | `qwen-plus` | 模型名称 |
+| `PORT` | `8787` | 后端监听端口 |
+| `DASHSCOPE_BASE_URL` | DashScope 兼容接口地址 | 自定义兼容服务地址 |
+| `STORY_SESSION_STORE_PATH` | `backend/data/story-sessions.json` | 本地会话存储路径 |
 
-后端提供一条不依赖模型网络的合同验收脚本。它会覆盖未确认拦截、节点编辑后的因果重推、提案拒绝、事实暂存、刷新恢复、版本保留、作者指令与角色行动双通道：
+配置示例见 [`backend/.env.example`](backend/.env.example)。
 
-```powershell
-cd backend
-npm.cmd run build
-$env:STORY_DISABLE_MODEL = 'true'
-$env:PORT = '9193'
-node dist/server.js
+如修改后端端口，可在 `frontend/.env.local` 中设置开发代理目标，然后重启前端：
+
+```dotenv
+VITE_STORY_API_TARGET=http://127.0.0.1:9193
 ```
 
-另开终端运行：
-
-```powershell
-cd backend
-npm.cmd run test:e2e:co-creation -- --BaseUrl http://127.0.0.1:9193 -RequireSpine
-```
-
-脚本通过后，再用浏览器按上面的真实用户顺序检查文案和可见状态；模型开启时应额外确认系统新增内容仍标为“系统提案”，并且下游节点不会复制整句上游编辑。
-
-## 可选：直接测试故事接口
-
-后端启动并配置好密钥后，可从项目根目录运行：
-
-```powershell
-cd backend
-npm.cmd run request:directions -- -Idea "放学铃响前三分钟，一个学生发现最好的朋友开始刻意躲着自己"
-```
-
-该命令会请求 `POST /api/story-directions`，输出三条共享同一目标、但阻碍机制和取舍不同的冲突核心。每条可带一句只用于比较的短故事钩子；第一步不会固定当前场景、具体行动过程或结局。选定一条后，再将返回的 `storyId`、`revision` 和 `conflictCoreId` 提交到 `POST /api/story-predicament`，由第二步展开当前场景、紧迫性、2 至 4 条暂定事实和两条并列的应对方向；这两条方向只用于验证困境是否成立，进入故事两端后才选择一条，作为逐步发展和成稿的路线起点。
-
-## 构建
+## 构建与部署
 
 分别构建前后端：
 
 ```powershell
 cd backend
 npm.cmd run build
-
 cd ../frontend
 npm.cmd run build
 ```
 
-构建产物分别位于 `backend/dist` 与 `frontend/dist`。后端生产启动命令为：
+后端构建后可在 `backend` 目录执行 `npm.cmd start`；前端构建后可使用 `npm.cmd run preview` 查看静态产物。
 
-```powershell
-cd backend
-npm.cmd run start
-```
-
-前端产物是静态文件。部署时需要让 Web 服务器将 `/api` 反向代理至后端服务；Vite 中的开发代理只在 `npm.cmd run dev` 时生效。不要把 `DASHSCOPE_API_KEY` 放入前端环境变量或静态文件中。
-
-## 环境变量
-
-| 变量 | 是否必填 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `DASHSCOPE_API_KEY` | 是 | 无 | DashScope API Key。 |
-| `QWEN_MODEL` | 否 | `qwen-plus` | 使用的通义千问模型。 |
-| `PORT` | 否 | `8787` | 后端监听端口。修改后需同步调整 `frontend/vite.config.ts` 的代理目标。 |
-| `STORY_DISABLE_MODEL` | 否 | `false` | 仅用于本地合同验收；设为 `true` 时跳过模型网络调用，使用带事实追踪的结构草案。 |
-| `STORY_QWEN_REQUEST_ATTEMPTS` | 否 | 未设置时不启用 | 诊断时为单个 API 请求设置 Qwen 上游 HTTP 调用总上限，覆盖传输重试、`response_format` 降级和后续恢复调用；隔离诊断可设为 `1`。未设置时保持默认重试策略。 |
-| `STORY_MODEL_OUTPUT_ATTEMPTS` | 否 | 各流程默认 2 或 3 | 模型启用时单次业务生成的结构重试上限；只能降低默认值。隔离诊断可设为 `1`，不影响 `STORY_DISABLE_MODEL=true` 的离线合同路径。 |
-| `STORY_QWEN_DISABLE_RESPONSE_FORMAT_FALLBACK` | 否 | `false` | 设为 `true` 时，不会因 `response_format` 错误再发起一次去掉格式参数的请求。 |
-| `STORY_QWEN_REQUEST_TIMEOUT_MS` | 否 | `90000` | 单次上游请求超时毫秒数；只能降低默认值。 |
-| `DASHSCOPE_BASE_URL` | 否 | DashScope 兼容接口地址 | 用于切换兼容 API 地址。 |
-| `STORY_TURN_GROUNDING_REVIEW` | 否 | `false` | 是否启用剧情回合的额外事实校验。 |
-| `STORY_BODY_CONSISTENCY_REVIEW` | 否 | `true` | 是否在生成完整故事后执行一致性检查。 |
-| `STORY_SESSION_STORE_PATH` | 否 | `backend/data/story-sessions.json` | 自定义本地故事会话存储路径。 |
+前端静态产物位于 `frontend/dist`。部署时需要配置 Web 服务器，将 `/api` 转发到后端；Vite 开发代理不会随静态产物部署。
 
 ## 项目结构
 
 ```text
-.
-├── backend/              # Express API、通义千问调用与故事会话存储
-│   ├── src/
-│   ├── scripts/
-│   └── .env.example
-├── frontend/             # React + Vite 用户界面
-│   └── src/
-├── shared/               # 前后端共享的数据契约与类型
-└── README.md
+backend/
+  src/          API、模型调用、故事设计与会话逻辑
+  .env.example  后端配置模板
+frontend/
+  src/          页面、组件与创作会话状态
+shared/         前后端共享的数据契约和规则
 ```
 
-## 本地数据与 Git
+## 数据保存
 
-- `backend/data/story-sessions.json` 保存本地创作会话，由后端首次写入时自动创建，已被 Git 忽略。
-- `node_modules/`、构建产物、日志和 `.env` 均不应提交。
-- `package-lock.json`、源代码、共享类型与 `.env.example` 应提交，确保其他开发者可复现运行环境。
+故事会话默认写入 `backend/data/story-sessions.json`。请自行备份需要保留的创作内容。
 
-## 常见问题
-
-**页面提示无法连接故事服务**
-
-确认后端已在 `8787` 端口运行，并访问 `http://127.0.0.1:8787/health` 检查服务状态。若修改了 `PORT`，还需要修改 `frontend/vite.config.ts` 中的代理端口。
-
-**接口提示尚未配置 Qwen API Key**
-
-确认 `backend/.env` 存在、变量名为 `DASHSCOPE_API_KEY`，然后重启后端开发服务。健康检查中的 `configured` 应为 `true`。
-
-**PowerShell 无法运行 npm**
-
-使用 `npm.cmd install`、`npm.cmd run dev` 等带 `.cmd` 的命令；这是 PowerShell 执行策略造成的，不影响项目本身。
+当前会话保存在运行后端的机器上，不提供云端同步。浏览器保存当前故事标识，用于重新打开会话。调用模型时，相关创作材料会发送至配置的模型服务。

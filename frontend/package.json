@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "test:preparation-explanation": "node --test scripts/preparationExplanation.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
