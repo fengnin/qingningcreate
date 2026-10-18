@@ -19,6 +19,7 @@ import type {
   StorySessionSnapshot,
   StoryTurn,
   StoryTurnHistoryItem,
+  StoryWritingDraft,
   StoryTurnMode,
   StoryTurnOption,
   StoryView,
@@ -81,6 +82,8 @@ export interface StorySessionState {
   setPendingTurnRequest: (request: PendingTurnRequest | undefined) => void
   generatedStory: GeneratedStory | undefined
   setGeneratedStory: (story: GeneratedStory | undefined) => void
+  writingDraft: StoryWritingDraft | undefined
+  setWritingDraft: (draft: StoryWritingDraft | undefined) => void
   storyId: string | undefined
   revision: number
   trimmedIdea: string
@@ -160,6 +163,7 @@ export function useStorySessionState(): StorySessionState {
   const [selectedTurnOptionId, setSelectedTurnOptionId] = useState<string>()
   const [pendingTurnRequest, setPendingTurnRequest] = useState<PendingTurnRequest>()
   const [generatedStory, setGeneratedStory] = useState<GeneratedStory>()
+  const [writingDraft, setWritingDraft] = useState<StoryWritingDraft>()
   const [storyId, setStoryId] = useState<string>()
   const [revision, setRevision] = useState(0)
   const [curveVersions, setCurveVersions] = useState<StoryCurveVersion[]>([])
@@ -202,6 +206,7 @@ export function useStorySessionState(): StorySessionState {
     setSelectedTurnOptionId(undefined)
     setPendingTurnRequest(undefined)
     setGeneratedStory(undefined)
+    setWritingDraft(undefined)
     setPendingCurveRegeneration(undefined)
   }
 
@@ -282,6 +287,7 @@ export function useStorySessionState(): StorySessionState {
     setPendingActionProposal(snapshot.pendingActionProposal)
     setPendingCurveRegeneration(snapshot.pendingCurveRegeneration)
     setGeneratedStory(snapshot.generatedStory)
+    setWritingDraft(snapshot.writingDraft)
     setSelectedTurnOptionId(undefined)
     setPendingTurnRequest(undefined)
     setView(snapshot.resumeStage)
@@ -335,6 +341,8 @@ export function useStorySessionState(): StorySessionState {
     setPendingTurnRequest,
     generatedStory,
     setGeneratedStory,
+    writingDraft,
+    setWritingDraft,
     storyId,
     revision,
     trimmedIdea,

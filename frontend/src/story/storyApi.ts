@@ -61,6 +61,8 @@ import type {
   StoryActionProposalConfirmRequest,
   StoryActionProposalResponse,
   StoryActionProposal,
+  StoryWritingDraft,
+  StoryWritingResponse,
 } from '../../../shared/story-contract.js'
 
 const INVALID_RESPONSE_MESSAGE = '故事服务返回的数据不完整，请重试。'
@@ -88,6 +90,16 @@ export function requestStoryCoCreationStart(request: StoryCoCreationStartRequest
 
 export function requestPreparationAcceptance(request: import('../../../shared/story-preparation-request.js').StoryPreparationAcceptanceRequest): Promise<StoryCurveMutationResponse> {
   return postJson('/api/story/preparation/accept', request, parseStoryCurveMutationResponse)
+}
+export function requestPreparationStoryDirections(request: import('../../../shared/story-preparation-request.js').StoryPreparationAcceptanceRequest): Promise<import('../../../shared/story-preparation.js').StoryPreparationStoryDirection[]> {
+  return postJson('/api/story/preparation/story-directions', request, payload => {
+    const r = expectRecord(payload)
+    if (!Array.isArray(r.directions) || !r.directions.length || r.directions.length > 2) throwInvalidResponse()
+    return r.directions.map(value => {
+      const d = expectRecord(value)
+      return { id: readIdentifier(d, 'id'), title: readText(d, 'title'), choice: readText(d, 'choice'), consequence: readText(d, 'consequence') }
+    })
+  })
 }
 export function requestPreparationSupplement(request: import('../../../shared/story-preparation-request.js').StoryPreparationSupplementRequest): Promise<StoryCurveMutationResponse> {
   return postJson('/api/story/preparation/supplement', request, parseStoryCurveMutationResponse)
@@ -180,6 +192,24 @@ export function requestCurveStorySpine(request: StoryCurveStartSpineRequest): Pr
 
 export function requestStorySession(storyId: string): Promise<StorySessionSnapshot> {
   return getJson(`/api/story/session/${encodeURIComponent(storyId)}`, parseStorySessionSnapshot)
+}
+
+export function requestStoryWriting(request: import('../../../shared/story-contract.js').StoryWritingRequest): Promise<StoryWritingResponse> {
+  return postJson('/api/story/writing', request, parseStoryWritingResponse)
+}
+
+function parseStoryWritingResponse(payload: unknown): StoryWritingResponse {
+  const record = expectRecord(payload)
+  const draftRecord = expectRecord(record.draft)
+  if (!Array.isArray(draftRecord.segments) || typeof draftRecord.complete !== 'boolean') throwInvalidResponse()
+  const draft: StoryWritingDraft = { complete: draftRecord.complete, segments: draftRecord.segments.map(value => {
+    const segment = expectRecord(value)
+    const status = segment.status
+    if (status !== 'pending' && status !== 'accepted') throwInvalidResponse()
+    return { id: readIdentifier(segment, 'id'), beatId: readIdentifier(segment, 'beatId'), label: readText(segment, 'label'), text: readVerbatimAnswer(segment.text), status }
+  }) }
+  return { ...parseStorySessionVersion(record), draft,
+    ...(record.story === undefined ? {} : { story: parseGeneratedStory(record.story) }) }
 }
 
 export function requestCurveVersionSelection(
@@ -407,6 +437,7 @@ function parseStorySessionSnapshot(payload: unknown): StorySessionSnapshot {
   const headTail = record.headTail === undefined ? undefined : parseHeadTailOption(record.headTail)
   const currentTurn = record.currentTurn === undefined ? undefined : parseStoryTurn(record.currentTurn)
   const generatedStory = record.generatedStory === undefined ? undefined : parseGeneratedStory(record.generatedStory)
+  const writingDraft = record.writingDraft === undefined ? undefined : parseStoryWritingDraft(record.writingDraft)
   return {
     ...parseStorySessionVersion(record),
     idea: readText(record, 'idea'),
@@ -426,8 +457,19 @@ function parseStorySessionSnapshot(payload: unknown): StorySessionSnapshot {
       ? {}
       : { pendingCurveRegeneration: parseCurveRegenerationPreview(record.pendingCurveRegeneration) }),
     ...(generatedStory ? { generatedStory } : {}),
+    ...(writingDraft ? { writingDraft } : {}),
     resumeStage,
   }
+}
+
+function parseStoryWritingDraft(value: unknown): import('../../../shared/story-contract.js').StoryWritingDraft {
+  const record = expectRecord(value)
+  if (!Array.isArray(record.segments) || typeof record.complete !== 'boolean') throwInvalidResponse()
+  return { complete: record.complete, segments: record.segments.map(value => {
+    const segment = expectRecord(value), status = segment.status
+    if (status !== 'pending' && status !== 'accepted') throwInvalidResponse()
+    return { id: readIdentifier(segment, 'id'), beatId: readIdentifier(segment, 'beatId'), label: readText(segment, 'label'), text: readVerbatimAnswer(segment.text), status }
+  }) }
 }
 
 export function parseStoryCurveSpineResponse(payload: unknown): StoryCurveSpineResponse {
@@ -1417,7 +1459,7 @@ function parsePreparation(value: unknown): import('../../../shared/story-prepara
   if (p.authorReview !== undefined) {
     const review = expectRecord(p.authorReview)
     if (!Array.isArray(review.candidates)) throwInvalidResponse()
-    authorReview = { originalText: readText(review, 'originalText'), candidates: review.candidates.map(v => {
+    authorReview = { originalText: readText(review, 'originalText'), ...(review.selectedStoryDirection === undefined ? {} : { selectedStoryDirection: readText(review, 'selectedStoryDirection') }), candidates: review.candidates.map(v => {
       const c = expectRecord(v)
       return { id: readIdentifier(c, 'id'), action: readText(c, 'action'), possibleResult: readText(c, 'possibleResult'),
         ...(c.futureChoice === undefined ? {} : { futureChoice: c.futureChoice === '' ? '' : readText(c, 'futureChoice') }), ...(c.resultBasisIds === undefined ? {} : { resultBasisIds: readIdentifierList(c, 'resultBasisIds') }),

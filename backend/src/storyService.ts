@@ -40,7 +40,9 @@ import {
   reviewClarificationReplacement,
 } from './storyClarification.js'
 import { randomUUID } from 'node:crypto'
-import { generateStoryPreparation, generateCurveFromPreparation, parsePreparationReview, reviseStoryPreparation } from './storyPreparation.js'
+import { generateStoryPreparation, generateCurveFromPreparation, parsePreparationReview, reviseStoryPreparation, acceptPreparation } from './storyPreparation.js'
+import { suggestPreparationStoryDirections } from './storyPreparationDirections.js'
+import { assembleWrittenStory, reviseWritingDraft } from './storyWriting.js'
 import { parseExplanationWording, suggestPreparationExplanation } from './storyPreparationExplanation.js'
 import type { StoryPreparationExplanationRequest } from '../../shared/story-preparation-request.js'
 import { selectedExpansionNeeds, storyExpansionGuidance } from './storyBridgeReview.js'
@@ -120,6 +122,9 @@ import type {
   StoryActionProposalConfirmRequest,
   StoryActionProposalRequest,
   StoryActionProposalResponse,
+  StoryWritingDraft,
+  StoryWritingRequest,
+  StoryWritingResponse,
 } from '../../shared/story-contract.js'
 
 type ValidationErrorContext = StoryValidationContext
@@ -667,6 +672,7 @@ interface StorySessionRecord {
   currentTurn?: StoryTurn
   pendingActionProposal?: StoryActionProposal
   generatedStory?: GeneratedStory
+  writingDraft?: StoryWritingDraft
   revision: number
   updatedAt: number
 }
@@ -975,6 +981,27 @@ export function parseStoryCurveStartSpineRequest(body: unknown): StoryCurveStart
     ...parseStorySessionReference(record),
     curveId: readIdentifier(record, 'curveId', '暂定故事曲线不完整，请刷新后重试。', invalidRequestContext),
   }
+}
+
+export function parseStoryWritingRequest(body: unknown): StoryWritingRequest {
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'action', 'segmentId', 'feedback', 'text'])
+  if (!['start', 'next', 'accept', 'edit', 'regenerate'].includes(String(record.action))) {
+    throw new AppError('写作操作不合法。', 400, 'INVALID_REQUEST')
+  }
+  return {
+    ...parseStorySessionReference(record), action: record.action as StoryWritingRequest['action'],
+    ...(['accept', 'edit', 'regenerate'].includes(String(record.action))
+      ? { segmentId: readIdentifier(record, 'segmentId', '请选择故事段落。', invalidRequestContext) } : {}),
+    ...(record.action === 'edit' ? { text: readVerbatimWritingText(record.text) } : {}),
+    ...(record.feedback === undefined ? {} : { feedback: readText(record, 'feedback', '请填写重写意见。', 600, invalidRequestContext) }),
+  }
+}
+
+function readVerbatimWritingText(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > 6000) {
+    throw new AppError('请填写1至6000字的正文。', 400, 'INVALID_REQUEST')
+  }
+  return value
 }
 
 export function parseStoryCurveVersionSelectionRequest(body: unknown): StoryCurveVersionSelectionRequest {
@@ -3063,6 +3090,7 @@ export function parseStoryPreparationAcceptanceRequest(body: unknown): StoryPrep
 }
 
 export async function acceptSessionPreparation(request: StoryPreparationAcceptanceRequest): Promise<StoryCurveMutationResponse> {
+  if (!request.authorReview?.selectedStoryDirection?.trim()) throw new AppError('请先选择故事走向，再构思故事。', 400, 'STORY_DIRECTION_REQUIRED')
   const current = getStorySession(request.storyId, request.revision)
   const curve = requireDraftCurve(current, request.curveId)
   const mapped = await generateCurveFromPreparation(curve, request.acceptedCandidateIds, request.authorReview)
@@ -3072,6 +3100,16 @@ export async function acceptSessionPreparation(request: StoryPreparationAcceptan
   next.seed = { ...next.seed, lockedGoal: mapped.reasoning?.goal?.text ?? null }
   const saved = commitClarificationSessionChanges(current, next)
   return createCurveMutationResponse(saved, { curve: mapped, affectedBeatIds: mapped.beats.map(b => b.id) })
+}
+
+export async function suggestSessionStoryDirections(request: StoryPreparationAcceptanceRequest) {
+  const current = getStorySession(request.storyId, request.revision)
+  const curve = requireDraftCurve(current, request.curveId)
+  if (!curve.preparation || curve.beats.length) throw new AppError('当前不在方向选择阶段。', 409, 'STORY_PREPARATION_NOT_PENDING')
+  const preparation = acceptPreparation(curve.preparation, request.acceptedCandidateIds, request.authorReview)
+  const result = await suggestPreparationStoryDirections(curve, preparation)
+  assertStorySessionRevision(current, request.revision)
+  return result
 }
 
 export function parseStoryPreparationRevisionRequest(body: unknown): StoryPreparationRevisionRequest {
@@ -6251,7 +6289,13 @@ export async function generateStoryTurn(request: StoryTurnRequest): Promise<Stor
 // text never supplies narrative transitions or author confirmation receipts.
 function createPreparedActionTurn(request: StoryTurnRequest): StoryTurn {
   const p = request.confirmedCurve!.preparation!
-  const options: StoryTurnOption[] = p.candidates.filter(c => p.acceptedCandidateIds.includes(c.id)).map((c, index) => {
+  const first = request.confirmedCurve!.beats.find(b => b.kind === 'trigger' && b.status !== 'rejected')
+  const ending = request.confirmedCurve!.beats.find(b => b.kind === 'resolution' && b.status !== 'rejected')
+  // The confirmed skeleton (including author edits) owns the next action.
+  // Preparation cards remain history, never an override of the current plan.
+  const candidates = first ? [{ action: first.detail, possibleResult: ending?.detail ?? '', materialIds: first.sourceFactIds ?? [] }]
+    : p.candidates.filter(c => p.acceptedCandidateIds.includes(c.id))
+  const options: StoryTurnOption[] = candidates.map((c, index) => {
     const id = `turn-1-option-${index + 1}`, actionId = `${id}-action`
     return { id, label: `审阅行动 ${index + 1}`, action: c.action, immediateConsequence: '尚未执行；点击仅打开行动审阅。', laterEffect: c.possibleResult,
       narrativeAction: { id: actionId, intent: c.action, source: 'generated', mode: 'candidate', preconditions: [], effects: [] },
@@ -8316,6 +8360,17 @@ function createStoryTurnResponse(session: StorySessionRecord, turn: StoryTurn): 
     ...(session.pendingActionProposal ? { pendingActionProposal: structuredClone(session.pendingActionProposal) } : {}) }
 }
 
+export async function updateSessionWriting(request: StoryWritingRequest): Promise<StoryWritingResponse> {
+  const session = getStorySession(request.storyId, request.revision)
+  if (session.workflow !== 'co-creation' || !session.confirmedCurve) {
+    throw new AppError('请先确认这一版故事设计，再开始写作。', 409, 'STORY_CURVE_NOT_CONFIRMED')
+  }
+  const draft = await reviseWritingDraft(session.idea, session.confirmedCurve, session.writingDraft, request)
+  const story = assembleWrittenStory(session.confirmedCurve, draft)
+  const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), writingDraft: draft, generatedStory: story })
+  return { storyId: saved.id, revision: saved.revision, draft, ...(story ? { story } : {}) }
+}
+
 export async function generateSessionStory(
   request: StoryGenerationSessionRequest,
 ): Promise<StoryGenerationResponse> {
@@ -8388,6 +8443,7 @@ export async function selectSessionCurveVersion(
     ? structuredClone(path.pendingActionProposal)
     : undefined
   session.generatedStory = path?.generatedStory ? structuredClone(path.generatedStory) : undefined
+  session.writingDraft = path?.writingDraft ? structuredClone(path.writingDraft) : undefined
   commitStorySessionChanges(session)
   return createStorySessionSnapshot(session)
 }
@@ -8471,6 +8527,7 @@ function createStoryPathSnapshot(session: StorySessionRecord) {
     ...(session.currentTurn ? { currentTurn: structuredClone(session.currentTurn) } : {}),
     ...(session.pendingActionProposal ? { pendingActionProposal: structuredClone(session.pendingActionProposal) } : {}),
     ...(session.generatedStory ? { generatedStory: structuredClone(session.generatedStory) } : {}),
+    ...(session.writingDraft ? { writingDraft: structuredClone(session.writingDraft) } : {}),
   }
 }
 
@@ -8484,7 +8541,7 @@ function createStorySessionSnapshot(session: StorySessionRecord): StorySessionSn
   const curve = session.provisionalCurve
   const resumeStage = session.generatedStory
     ? 'complete'
-    : session.currentTurn
+    : session.writingDraft || session.currentTurn
       ? 'story-spine'
       : curve
         ? 'provisional-curve'
@@ -8507,6 +8564,7 @@ function createStorySessionSnapshot(session: StorySessionRecord): StorySessionSn
     ...(session.pendingActionProposal ? { pendingActionProposal: structuredClone(session.pendingActionProposal) } : {}),
     ...(session.pendingCurveRegeneration ? { pendingCurveRegeneration: structuredClone(session.pendingCurveRegeneration) } : {}),
     ...(session.generatedStory ? { generatedStory: structuredClone(session.generatedStory) } : {}),
+    ...(session.writingDraft ? { writingDraft: structuredClone(session.writingDraft) } : {}),
     resumeStage,
   }
 }
@@ -8594,6 +8652,7 @@ function clearSessionApproachAndStoryPath(session: StorySessionRecord) {
   session.currentTurn = undefined
   session.pendingActionProposal = undefined
   session.generatedStory = undefined
+  session.writingDraft = undefined
 }
 
 function replaceSessionHeadTailOptions(
@@ -11833,10 +11892,13 @@ function ensureUniqueValues(values: string[], message: string, context: Validati
 
 function parseGeneratedStory(record: Record<string, unknown>): GeneratedStory {
   const body = readText(record, 'body', '模型没有返回故事正文，请重试。', 12_000, invalidModelOutputContext)
+  const rawTitle = readOptionalGeneratedText(record.title, 50)
+  const rawLogline = readOptionalGeneratedText(record.logline, 220)
+  const isPlaceholderTitle = rawTitle !== undefined && /^(待审阅的故事设计|暂定故事曲线|故事设计)$/u.test(rawTitle.trim())
 
   return {
-    title: readOptionalGeneratedText(record.title, 50) ?? '未命名故事',
-    logline: readOptionalGeneratedText(record.logline, 220) ?? '根据你确认的故事路径写成。',
+    title: isPlaceholderTitle ? '完整故事' : (rawTitle ?? '未命名故事'),
+    logline: isPlaceholderTitle ? '根据你确认的故事路径写成。' : (rawLogline ?? '根据你确认的故事路径写成。'),
     body,
     outline: parseOptionalStoryOutline(record.outline),
     review: parseOptionalStoryReview(record.review),

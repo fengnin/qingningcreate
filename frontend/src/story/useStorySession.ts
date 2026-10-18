@@ -23,6 +23,7 @@ import type {
   StoryTurnOption,
   StoryView,
   StoryCurveRegenerationPreview,
+  StoryWritingDraft,
 } from './types'
 
 export interface StorySession extends StorySessionActions {
@@ -56,6 +57,7 @@ export interface StorySession extends StorySessionActions {
   stageErrorContextPrefill: StoryConflictCoreContextPrefill | undefined
   stageErrorSystemDraftPrefill: StoryConflictCoreSystemDraft | undefined
   generatedStory: GeneratedStory | undefined
+  writingDraft: StoryWritingDraft | undefined
   storyId: string | undefined
   revision: number
   curveVersions: import('./types').StoryCurveVersion[]
@@ -111,6 +113,7 @@ export function useStorySession(): StorySession {
     stageErrorContextPrefill: stage.stageErrorContextPrefill,
     stageErrorSystemDraftPrefill: stage.stageErrorSystemDraftPrefill,
     generatedStory: state.generatedStory,
+    writingDraft: state.writingDraft,
     storyId: state.storyId,
     revision: state.revision,
     curveVersions: state.curveVersions,

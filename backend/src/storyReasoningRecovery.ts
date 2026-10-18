@@ -6,6 +6,7 @@ import { storyReasoningSystemPrompt } from './storyReasoningPrompt.js'
 import { validateStoryReasoningProposal } from './storyReasoningContract.js'
 import { parseStoryReasoningWire } from './storyReasoningWire.js'
 import { reviewSelectedReasoningDesign } from './storyDesignReview.js'
+import { preparationExplanationContext, preparationMaterialAuthorityGuidance } from './storyPreparationContext.js'
 import type { StoryReasoningProposal, StoryReasoningDesignStep, StoryReasoningStatement, StoryReasoningValidationContext } from '../../shared/story-reasoning-contract.js'
 import type { ProvisionalCurve, StorySeed, StoryCurveRegenerationPreview, StoryCurveRegenerationDecision } from '../../shared/story-contract.js'
 
@@ -74,9 +75,11 @@ export async function previewReasoningRecovery(idea:string,seed:StorySeed,curve:
   let failure:AppError|undefined
   for(let attempt=0;attempt<3;attempt++){
     try{
-      const output=await requestQwenJson({systemPrompt:storyReasoningSystemPrompt('edit-preview'),
+      const selectedDirection=curve.preparation?.candidates.find(c=>curve.preparation!.acceptedCandidateIds.includes(c.id))
+      const preparationContext=selectedDirection ? preparationExplanationContext(curve.preparation!,selectedDirection) : undefined
+      const output=await requestQwenJson({systemPrompt:`${storyReasoningSystemPrompt('edit-preview')}${preparationContext ? `\n${preparationMaterialAuthorityGuidance}\npreparationContext保留原来已选方向及作者保留的未知，供承接故事；它不是执行事实。后续作者编辑优先，不恢复被作者改掉的旧情节。只重做指定段落，维持简洁故事骨架，不把普通细节变成作者待答问题。` : ''}`,
         userPrompt:JSON.stringify({idea,brief:curve.brief,context,prefix,targets,authorEdits:context.protectedSteps,
-          currentSteps:curve.beats.filter(b=>!targets.includes(b.id)&&b.status!=='rejected'),questions:curve.clarifications,feedback,validationFailure:failure?.message}),
+          currentSteps:curve.beats.filter(b=>!targets.includes(b.id)&&b.status!=='rejected'),preparationContext,questions:curve.clarifications,feedback,validationFailure:failure?.message}),
         temperature:attempt?0.1:0.35,maxTokens:6500,diagnosticStage:'reasoning-edit-preview',outputSchema:reasoningOutputSchema('edit-preview')})
       const p=parseStoryReasoningWire(output,context)
       if(p.outcome==='proposal'&&'steps'in p){
@@ -156,7 +159,7 @@ export function acceptReasoningRecovery(curve:ProvisionalCurve,preview:StoryCurv
   const protectedIds = new Set(mergedContext.protectedSteps.map(s=>s.id))
   validateStoryReasoningProposal({...merged,steps:modelSteps,
     ...(merged.designReview ? { designReview: { required: true, acceptedProposalIds: merged.designReview.acceptedProposalIds.filter(id=>!protectedIds.has(id)||modelStepIds.has(id)) } } : {})},mergedContext)
-  const mapped=mapInitialReasoningProposal(merged,curve.design!,curve.brief)
+  const mapped=mapInitialReasoningProposal(merged,curve.design!,curve.brief,{allowSimplePlan:!!curve.preparation})
   const beats=mapped.beats.map(b=>{const old=curve.beats.find(o=>o.id===b.id)
     return old&&!accepted.has(b.id)?{...old}:b})
   const foundation=mapped.foundation!

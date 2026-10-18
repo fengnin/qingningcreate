@@ -12,10 +12,13 @@ import {
   generateSessionHeadTailOptions,
   generateSessionPredicament,
   generateSessionStory,
+  parseStoryWritingRequest,
+  updateSessionWriting,
   generateSessionStoryTurn,
   generateSessionStoryTurnOptionRefinement,
   startStoryCoCreation,
   acceptSessionPreparation,
+  suggestSessionStoryDirections,
   reviseSessionPreparation,
   parseStoryPreparationSuggestionRequest,
   suggestSessionPreparationGoal,
@@ -128,6 +131,8 @@ registerStoryStage(
 
 registerStoryStage('/api/story/preparation/revise', parseStoryPreparationRevisionRequest, reviseSessionPreparation,
   (result) => result satisfies StoryCurveMutationResponse)
+registerStoryStage('/api/story/preparation/story-directions', parseStoryPreparationAcceptanceRequest, suggestSessionStoryDirections,
+  (result) => result)
 registerStoryStage('/api/story/preparation/suggest-goal', parseStoryPreparationSuggestionRequest, suggestSessionPreparationGoal,
   (result) => result satisfies { suggestion: string })
 registerStoryStage('/api/story/preparation/explanation', parseStoryPreparationExplanationRequest, suggestSessionPreparationExplanation,
@@ -253,6 +258,8 @@ registerStoryStage(
   generateSessionStory,
   (result) => result satisfies StoryGenerationResponse,
 )
+
+registerStoryStage('/api/story/writing', parseStoryWritingRequest, updateSessionWriting, result => result)
 
 app.use((_request, response: Response<ApiErrorResponse>) => {
   sendApiError(response, 404, 'NOT_FOUND', '没有找到这个接口。')

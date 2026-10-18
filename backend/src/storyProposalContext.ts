@@ -79,10 +79,9 @@ export function createStoryProposalContext(
     ...authorTexts.map((text, index) => ({ id: `author-${index + 1}`, text, authority: 'author-material' as const })),
     ...executedHistory.map((item) => ({ id: item.factId, text: item.resultText, authority: 'author-confirmed-result' as const })),
   ]
-  // Once execution has begun, system predictions belong to the historical
-  // draft. Keep only explicit author design intent in continuation context.
-  const designBeats = curve.beats.filter((beat) => beat.status !== 'rejected'
-    && (!executedHistory.length || beat.source === 'user-edit')).map((beat) => ({
+  // Keep the reviewed story available as a plan throughout development.
+  // Actual confirmed results take priority; this never turns plans into facts.
+  const designBeats = curve.beats.filter((beat) => beat.status !== 'rejected').map((beat) => ({
     id: beat.id, kind: beat.kind, text: beat.detail, dependsOn: beat.dependsOn,
     authority: beat.source === 'user-edit' ? 'author-design' as const : 'reviewed-system-design' as const,
   }))
@@ -98,6 +97,7 @@ export function createStoryProposalContext(
   return {
     subject: seed.subject, goal: seed.lockedGoal, sourceFacts,
     authorEdits, designBeats, unresolvedQuestions, selectedFocus,
+    selectedStoryDirection: curve.preparation?.authorReview?.selectedStoryDirection,
     expansionNeeds: selectedExpansionNeeds(curve.preparation),
     creativeFocus: preparationCreativeFocus(curve.preparation, curve.design?.sourceFacts.filter(f => f.disposition === 'parked').map(f => f.id)),
     executedHistory,
@@ -108,6 +108,7 @@ export function createStoryProposalContext(
     referenceContract: { sourceFactIds: sourceFacts.map(f => f.id),
       designOnlyIds: designBeats.map(b => b.id), unconfirmedQuestionIds: unresolvedQuestions.map(q => q.id) },
     priorities: [
+      'selectedStoryDirection 是作者选定的未来设计倾向；承接关键分支，不当作已发生事实；后续作者编辑和实际结果优先。',
       '承接最近已确认的实际结果，不把已执行行动重新当作待执行行动。',
       '保留作者编辑的行动对象、约束及尚待决定的部分，系统节点不覆盖作者编辑。',
       '关注点只是审阅角度；结合完整目标和相关编辑，不把被点选的单一材料替换成整个故事任务。',

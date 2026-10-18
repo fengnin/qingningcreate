@@ -4,7 +4,7 @@ import { Archive, ArrowLeft, ArrowRight, Check, CircleAlert, FileText, History, 
 import type { CreativeBrief, CreativeTone, CurveBeat, DramaticForce, StoryAuthorClarification, StoryAuthorClarificationAction, StoryCurveVersion, StorySourceFact, StoryCurveRegenerationDecision } from '../story/types'
 import type { StorySession } from '../story/useStorySession'
 import { StoryRequirementsFields } from './StoryRequirementsFields'
-import { requestPreparationGoalSuggestion } from '../story/storyApi'
+import { requestPreparationGoalSuggestion, requestPreparationStoryDirections } from '../story/storyApi'
 import { PreparationExplanation, ExplanationExpansionNotes, explanationMatches } from './PreparationExplanation'
 import { preparationActionFieldLimit, splitPreparationAction, updatePreparationAction } from '../story/preparationAction'
 import type { StoryReasoningProposal, StoryReasoningStatement } from '../../../shared/story-reasoning-contract.js'
@@ -33,6 +33,16 @@ const forceOptions: Array<{ value: DramaticForce; label: string }> = [
 
 const toneLabels = Object.fromEntries(toneOptions.map(({ value, label }) => [value, label])) as Record<CreativeTone, string>
 const forceLabels = Object.fromEntries(forceOptions.map(({ value, label }) => [value, label])) as Record<DramaticForce, string>
+
+/** The model may anchor several fields to overlapping slices of one sentence.
+ * Keep the longest source quote for the compact mainline display; the full
+ * anchor records remain available to evidence and review logic. */
+function displayMainlineAnchors(anchors: NonNullable<import('../../../shared/story-preparation.js').StoryPreparation['mainlineAnchors']>) {
+  const normalized = anchors.map(anchor => ({ ...anchor, quote: anchor.quote.trim().replace(/\s+/gu, ' ') }))
+  return normalized.filter((anchor, index) => anchor.quote && !normalized.some((other, otherIndex) =>
+    otherIndex !== index && other.sourceId === anchor.sourceId && other.quote.includes(anchor.quote)
+    && (other.quote.length > anchor.quote.length || otherIndex < index)))
+}
 
 const curveBeatKindLabels: Record<CurveBeat['kind'], string> = {
   'current-state': '起 · 当前状态',
@@ -206,7 +216,7 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
   const sourceFacts = curve?.design?.sourceFacts ?? []
   const unresolvedFacts = sourceFacts.filter((fact) => fact.disposition === 'needs-author-decision')
   const unresolvedClarifications = curve?.clarifications?.filter((item) => !item.resolution) ?? []
-  const hasStartedStoryPath = Boolean(session.currentTurn)
+  const hasStartedStoryPath = Boolean(session.writingDraft || session.currentTurn)
   // Prepared simple actions need no invented climax or middle-development slot.
   // All fact, stale-node and explicit design-review gates remain below.
   const missingDesignSections = curve?.preparation ? [] : getMissingStoryDesignSectionLabels(
@@ -316,18 +326,21 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
     <main className="app-shell setup-shell cocreation-shell curve-shell">
       <header className="setup-header cocreation-header">
         <button className="opening-back" type="button" onClick={session.goBack} disabled={isLoading}><ArrowLeft size={18} /> 返回创意方向</button>
-        <div className="cocreation-step"><span>02</span><strong>暂定故事曲线</strong><small>{session.confirmedCurve ? '主线已确认，可以开始推演' : '先看见要讲什么，再进入剧情'}</small></div>
-        <span className={`curve-status ${session.confirmedCurve ? 'is-confirmed' : ''}`}>{session.confirmedCurve ? <><Check size={14} /> 已确认</> : '系统提案 · 待你决定'}</span>
+        <div className="cocreation-step"><span>02</span><strong>故事设计</strong><small>{session.confirmedCurve ? '主线已确认，可以开始推演' : '从选定方向，看见一版完整故事'}</small></div>
       </header>
       <div className="curve-layout">
         <section className="curve-main">
           <div className="curve-heading">
-            <div><p className="eyebrow"><RouteIcon /> 故事地图</p><h1>{curve.title}</h1><p>这不是最终大纲。每个节点都可以编辑，系统提案也可以重推；确认前不会进入连续剧情。</p></div>
+            <div><p className="eyebrow"><RouteIcon /> 故事地图</p><h1>{curve.title}</h1><p>先看这版故事怎样开始、发展和收束。每一段都可以编辑或局部重做；普通细节会在后续写作中展开。</p></div>
             <div className="curve-brief-summary"><span>创意方向</span><strong>{getBriefSummary(curve.brief)}</strong></div>
           </div>
           {session.stageError && <p className="cocreation-error" role="alert"><CircleAlert size={16} /> {session.stageError}</p>}
           {curve.generation && <div className={`curve-generation-notice ${curve.generation.origin === 'fact-preserving-fallback' ? 'is-fallback' : ''}`}><Sparkles size={15} /><span><strong>{curve.generation.origin === 'fact-preserving-fallback' ? '已使用保留原始材料的结构草案' : '已完成一版结构提案'}</strong>{curve.generation.notice ?? '新增内容仍是提案，尚未成为故事事实。'}</span></div>}
-          {acceptedFutureChoice && <p className="curve-future-choice"><strong>选定方向可能推向</strong><span>{acceptedFutureChoice}</span></p>}
+          {(curve.preparation?.authorReview?.selectedStoryDirection || acceptedFutureChoice) && <p className="curve-future-choice"><strong>{curve.preparation?.authorReview?.selectedStoryDirection ? '你选定的故事走向' : '选定方向可能推向'}</strong><span>{curve.preparation?.authorReview?.selectedStoryDirection || acceptedFutureChoice}</span><small>这是本版构思的起点；后续可以通过编辑和局部重做调整。</small></p>}
+          {curve.preparation && <details className="story-review-details"><summary>查看已确认的创意方向</summary>{curve.preparation.candidates.filter(c => curve.preparation!.acceptedCandidateIds.includes(c.id)).map(c => {
+            const parts = splitPreparationAction(c.action)
+            return <dl key={c.id}><dt>遇到的难处</dt><dd>{parts.difficulty}</dd>{parts.choice && <><dt>眼前的选择</dt><dd>{parts.choice}</dd></>}<dt>故事将推向</dt><dd>{c.futureChoice || '尚未指定'}</dd><dt>可能走向</dt><dd>{c.possibleResult}</dd></dl>
+          })}<p>这是构思本版故事的起点；下方段落是进一步提出的故事设计。</p></details>}
           {curve.preparation?.candidates.filter(c => curve.preparation!.acceptedCandidateIds.includes(c.id) && c.explanation).map(c => <details className="story-review-details" key={`explanation-${c.id}`}><summary>查看选定困境的推演解释</summary><p>这是选择困境时采用的设计解释；后续节点修改后需重新判断，尚未成为故事事实。</p><dl><dt>可能采取的办法</dt><dd>{c.explanation!.method}</dd><dt>处境变化</dt><dd>{c.explanation!.change}</dd></dl><ExplanationExpansionNotes value={c.explanation!} />{c.explanation!.issues.map((issue, i) => <p key={i}>保留的问题：{issue}</p>)}</details>)}
           <CurveDesignSummary curve={curve} />
           {curve.preparation && (curve.preparation.material.some(m => m.role === 'unknown') || !!curve.preparation.authorReview?.supersededMaterialIds?.length || !!curve.preparation.supplements?.length) && <details className="story-review-details"><summary>待定内容与设定调整</summary>{curve.preparation.material.filter(m => m.role === 'unknown').map(m => <p key={m.id}>待定：{m.quote}</p>)}
@@ -372,7 +385,7 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
               onApplyAuthorRevision={() => void applyAuthorRevision()}
             />)}
           </div>
-          {curve.reasoning && <ReasoningDesignReview reasoning={curve.reasoning} acceptedIds={acceptedDesignIds} onChange={setAcceptedDesignIds} disabled={isLoading || Boolean(session.confirmedCurve)} />}
+          {curve.reasoning && <ReasoningDesignReview reasoning={curve.reasoning} acceptedIds={acceptedDesignIds} onChange={setAcceptedDesignIds} disabled={isLoading || Boolean(session.confirmedCurve)} wholeStory={Boolean(curve.preparation)} />}
           {!session.confirmedCurve && <RejectedProposalHistory proposals={curve.rejectedProposals ?? []} />}
           {!session.confirmedCurve && <label className="curve-feedback-field"><span>给系统一句修改方向 <small>可选，作用于下一次重推</small></span><input value={regenerationFeedback} onChange={(event) => setRegenerationFeedback(event.target.value)} placeholder="例如：让阻碍来自关系承诺，而不是新增一个外部人物" maxLength={180} disabled={isLoading} /></label>}
            {staleBeats.length > 0 && !session.confirmedCurve && !session.pendingCurveRegeneration && <div className="curve-stale-panel"><p className="curve-stale-notice"><CircleAlert size={15} /> 你修改了上游节点，下面的节点需要重新看一遍。作者编辑不会被系统批量覆盖。</p><div className="curve-stale-actions">{staleProposalBeats.length > 0 && <button className="text-action" type="button" onClick={() => void regenerateAffected()} disabled={isLoading || isRegeneratingAffected}>{isRegeneratingAffected ? '正在生成重推预览…' : <><RefreshCcw size={14} /> 生成重推差异预览</>}</button>}{staleAuthorBeats.length > 0 && <div className="curve-stale-author-actions"><span>你的版本需要单独决定：</span>{staleAuthorBeats.map((beat) => <button className="text-action" type="button" key={beat.id} onClick={() => beginEdit(beat)} disabled={isLoading}><PencilLine size={14} /> 编辑我的版本</button>)}</div>}{staleBeats.length - staleProposalBeats.length > 0 && <span>原始材料可在下方账本中选择“暂不纳入本版本”；处理完所有 stale 节点后才能确认。</span>}</div></div>}
@@ -387,10 +400,10 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
           {!session.confirmedCurve && sourceFacts.length > 0 && <details className="story-review-details" open={unresolvedFacts.length > 0}><summary>查看原文保留情况{unresolvedFacts.length > 0 && <span>{unresolvedFacts.length} 项待决定</span>}</summary><SourceFactLedger facts={sourceFacts} beats={curve.beats} busyFactId={busyFactId} disabled={isLoading} onSetDisposition={updateFactDisposition} /></details>}
           <div className="curve-version-bar"><button className="text-action" type="button" onClick={() => setShowVersions((visible) => !visible)} disabled={isLoading}><History size={15} /> {showVersions ? '收起版本记录' : `查看已保存版本（${session.curveVersions.length}）`}</button>{showVersions && <CurveVersionList versions={session.curveVersions} activeVersionId={session.activeCurveVersionId} disabled={isLoading} onSelect={(versionId) => void session.selectCurveVersion(versionId)} />}</div>
           <div className="curve-footer-actions">
-            {session.confirmedCurve ? <button className="primary-action" type="button" onClick={() => hasStartedStoryPath ? void session.continueToStorySpine() : void session.startStorySpineFromCurve()} disabled={isLoading}>{isLoading ? '正在准备第一回合…' : hasStartedStoryPath ? '返回当前推演' : '确认主线后，开始第一回合'} <ArrowRight size={18} /></button> : <button className="primary-action" type="button" onClick={() => void session.confirmProvisionalCurve(acceptedDesignIds)} disabled={!canConfirm}>{isLoading ? '正在确认主线…' : '确定这版故事方向'} <Check size={18} /></button>}
+            {session.confirmedCurve ? <button className="primary-action" type="button" onClick={() => session.openStoryWriting()} disabled={isLoading}>{hasStartedStoryPath ? '继续写成故事' : '开始写成故事'} <ArrowRight size={18} /></button> : <button className="primary-action" type="button" onClick={() => void session.confirmProvisionalCurve(acceptedDesignIds)} disabled={!canConfirm}>{isLoading ? '正在确认主线…' : '确定这版故事方向'} <Check size={18} /></button>}
           </div>
         </section>
-        <aside className="curve-aside"><div className="curve-aside-title"><Sparkles size={15} /> 共创边界</div><p>你在这里决定故事怎么发展。系统补出的名字、秘密和意外都只是可编辑提案；确认整条主线以前，不会创建连续剧情。</p><div className="curve-aside-divider" /><span>当前状态</span><strong>{session.confirmedCurve ? hasStartedStoryPath ? '主线已确认，正在推演当前情境' : '主线已确认，等待你开始第一回合' : '仍在设计主线，尚未创建剧情回合'}</strong>{!session.confirmedCurve && <small>拒绝的提案不会重新变成故事事实。原始材料必须被纳入，或由你明确暂不纳入。</small>}</aside>
+        <aside className="curve-aside"><div className="curve-aside-title"><Sparkles size={15} /> 共创边界</div><p>你在这里决定故事怎么发展。系统补出的名字、秘密和意外都只是可编辑提案；确认整条主线以前，不会开始写正文。</p><div className="curve-aside-divider" /><span>当前状态</span><strong>{session.confirmedCurve ? hasStartedStoryPath ? '主线已确认，可以继续写作' : '主线已确认，等待开始写作' : '仍在设计主线，尚未开始写作'}</strong>{!session.confirmedCurve && <small>拒绝的提案不会重新变成故事事实。原始材料必须被纳入，或由你明确暂不纳入。</small>}</aside>
       </div>
     </main>
   )
@@ -537,7 +550,7 @@ function CurveBeatCard({
       <div className="curve-beat-body">
         <div className="curve-beat-topline">
           <div><span className="curve-beat-kind">{getKindLabel(beat.kind)}</span><h2>{beat.title}</h2></div>
-          <span className={`curve-beat-status status-${beat.status}`}>{sourceLabel[beat.source]} · {statusLabel[beat.status]}</span>
+          {!(beat.source === 'system-proposal' && beat.status === 'proposed') && <span className={`curve-beat-status status-${beat.status}`}>{sourceLabel[beat.source]} · {statusLabel[beat.status]}</span>}
         </div>
         {isEditing ? (
           <div className="curve-edit-box">
@@ -550,12 +563,12 @@ function CurveBeatCard({
         ) : <p>{beat.detail}</p>}
         {sourceFactText && <details className="story-review-source"><summary>查看原文</summary><blockquote>{sourceFactText}</blockquote></details>}
         {(beat.status !== 'rejected' || clarifications.length > 0) && <CurveClarificationReview
-          beat={beat}
+              beat={beat}
           clarifications={clarifications}
           disabled={isLoading}
           isConfirmed={isConfirmed}
           onClarification={onClarification}
-          onRegenerate={onRegenerate}
+              onRegenerate={onRegenerate}
         />}
         {!isEditing && !isConfirmed && beat.status !== 'rejected' && (
           <div className="curve-beat-actions">
@@ -606,17 +619,8 @@ function CurveClarificationReview({ beat, clarifications, disabled, isConfirmed,
   }) => Promise<boolean>
   onRegenerate: (beatId: string) => void
 }) {
-  const [isAdding, setIsAdding] = useState(false)
-  const [causalGap, setCausalGap] = useState('')
-  const [question, setQuestion] = useState('')
   const [answers, setAnswers] = useState<Record<string, string>>({})
-  const submitQuestion = async () => {
-    if (!beat.detail.includes(causalGap.trim()) || !question.trim()) return
-    if (!await onClarification('create', { causalGap: causalGap.trim(), prompt: question.trim() })) return
-    setIsAdding(false)
-    setCausalGap('')
-    setQuestion('')
-  }
+  if (!clarifications.length) return null
   return <div className="curve-clarifications">
     {clarifications.map((item) => {
       const answer = answers[item.id] ?? item.answerText ?? ''
@@ -642,13 +646,6 @@ function CurveClarificationReview({ beat, clarifications, disabled, isConfirmed,
         {item.status === 'confirmed' && beat.source === 'system-proposal' && <button className="text-action" type="button" disabled={disabled} onClick={() => onRegenerate(beat.id)}><RefreshCcw size={14} /> 用已确认回答生成替代预览</button>}
       </div>}
     </section>})}
-    {beat.status !== 'rejected' && beat.source !== 'user-input' && (isAdding
-      ? <div className="curve-clarification-entry">
-        <label><span>节点中的待核对原句</span><input value={causalGap} onChange={(event) => setCausalGap(event.target.value)} maxLength={180} disabled={disabled} /></label>
-        <label><span>向作者询问</span><input value={question} onChange={(event) => setQuestion(event.target.value)} maxLength={180} disabled={disabled} /></label>
-        <div><button className="text-action" type="button" onClick={() => setIsAdding(false)}>取消</button><button className="text-action" type="button" disabled={disabled || !causalGap.trim() || !beat.detail.includes(causalGap.trim()) || !question.trim()} onClick={() => void submitQuestion()}>记录问题</button></div>
-      </div>
-      : <button className="text-action" type="button" disabled={disabled} onClick={() => setIsAdding(true)}>{isConfirmed ? '保留旧版并标记待核对前提' : '标记待核对前提'}</button>)}
   </div>
 }
 
@@ -658,8 +655,19 @@ function CurveDesignSummary({ curve }: { curve: NonNullable<StorySession['provis
   const sections = STORY_DESIGN_SECTION_RULES.map(({ key, label }) => [label, design[key]] as const)
   const beatLabel = (id: string) => curve.beats.find((beat) => beat.id === id)?.title ?? id
   const foundation = curve.foundation ?? design.foundation
+  const beatText = (kind: CurveBeat['kind']) => curve.beats.find((beat) => beat.kind === kind && beat.status !== 'rejected')?.detail ?? ''
+  const developmentText = [beatText('escalation'), beatText('midpoint-turn')].filter(Boolean).join('\n')
   return <details className="story-review-details" aria-label="故事设定"><summary>查看故事设定</summary><section className="curve-design-summary">
     <header><strong>故事设定</strong><small>人物目标、阻碍与可能发展</small></header>
+    <div className="curve-five-stage" aria-label="五阶段故事推进">
+      {[
+        ['故事起点', beatText('current-state')],
+        ['开始尝试', beatText('trigger')],
+        ['尝试带来的变化', developmentText],
+        ['关键选择', beatText('climax-choice') || '本版暂不需要单独的关键选择'],
+        ['暂定结局', beatText('resolution')],
+      ].map(([label, text]) => <section key={label}><b>{label}</b><p className={!text || text === '本版暂不需要单独的关键选择' ? 'is-empty' : ''}>{text || '待补充'}</p></section>)}
+    </div>
     <div className="curve-design-coverage">{sections.map(([label, ids]) => <span key={label}><b>{label}</b>{ids.map(beatLabel).join('、') || '待补充'}</span>)}</div>
     {foundation && <div className="curve-foundation" aria-label="统一故事设计基础">
       <section><b>冲突核心</b><dl><dt>目标</dt><dd>{foundation.conflictCore.goal}</dd><dt>阻碍</dt><dd>{foundation.conflictCore.obstacle}</dd><dt>取舍</dt><dd>{foundation.conflictCore.tradeoff}</dd></dl></section>
@@ -717,10 +725,11 @@ function PreparationReview({ session }: { session: StorySession }) {
   const [reviewed, setReviewed] = useState<Record<string, { action: string; possibleResult: string; futureChoice?: string }>>({})
   const [explanations, setExplanations] = useState<Record<string, import('../../../shared/story-preparation.js').StoryPreparationExplanation>>({})
   const [pendingOperation, setPendingOperation] = useState<'regenerate' | 'accept'>()
+  const [choosingDirection, setChoosingDirection] = useState(false)
   const p = session.provisionalCurve!.preparation!
   const busy = session.stageStatus === 'loading'
   const submitLock = useRef(false)
-  useEffect(() => { setEditing(undefined); setSelectedId(undefined); setReviewed({}); setExplanations({}) }, [session.provisionalCurve!.id, p.candidates])
+  useEffect(() => { setEditing(undefined); setSelectedId(undefined); setReviewed({}); setExplanations({}); setChoosingDirection(false) }, [session.provisionalCurve!.id, p.candidates])
   const candidates = p.candidates
   const available = candidates.filter(c => !c.unknownIds.length)
   const active = available[0] ?? candidates[0]
@@ -740,6 +749,7 @@ function PreparationReview({ session }: { session: StorySession }) {
     .map(id => p.material.find(material => material.id === id))
     .filter((material): material is typeof p.material[number] => Boolean(material))
   const editCandidate = (candidate: typeof candidates[number], field: 'difficulty' | 'choice' | 'possibleResult' | 'futureChoice', value: string) => {
+    setChoosingDirection(false)
     setReviewed(current => {
       const wording = current[candidate.id] ?? candidate
       return { ...current, [candidate.id]: {
@@ -755,17 +765,22 @@ function PreparationReview({ session }: { session: StorySession }) {
     setPendingOperation('regenerate')
     try { await session.revisePreparation('regenerate') } finally { submitLock.current = false; setPendingOperation(undefined) }
   }
-  const accept = async (c: typeof p.candidates[number]) => {
-    if (busy || submitLock.current || selectedNeedsReview) return
-    submitLock.current = true
-    setPendingOperation('accept')
+  const createReview = (c: typeof p.candidates[number]): import('../../../shared/story-preparation.js').StoryPreparationReview => {
     const wording = reviewed[c.id] ?? c
     const explanation = explanations[c.id] ?? c.explanation
+    return {
+      originalText: `我选择这个困境，故事尚未发生。\n方向：${wording.action}${wording.futureChoice ? `\n故事将推向：${wording.futureChoice}` : ''}\n可能走向：${wording.possibleResult}`,
+      candidates: [{ id: c.id, action: wording.action, possibleResult: wording.possibleResult, ...(wording.futureChoice !== undefined ? { futureChoice: wording.futureChoice } : {}), ...(explanation ? { explanation } : {}) }],
+    }
+  }
+  const accept = async (c: typeof p.candidates[number], direction: string) => {
+    if (busy || submitLock.current || selectedNeedsReview || !direction.trim()) return
+    submitLock.current = true
+    setPendingOperation('accept')
     // A click receipts exactly the displayed future design. It supplies no
     // confirmed facts, supersession or execution, and retains server checks.
     try { await session.acceptPreparation([c.id], {
-      originalText: `我选择这个故事方向，故事尚未发生。\n方向：${wording.action}${wording.futureChoice ? `\n故事将推向：${wording.futureChoice}` : ''}\n可能走向：${wording.possibleResult}`,
-      candidates: [{ id: c.id, action: wording.action, possibleResult: wording.possibleResult, ...(wording.futureChoice !== undefined ? { futureChoice: wording.futureChoice } : {}), ...(explanation ? { explanation } : {}) }],
+      ...createReview(c), selectedStoryDirection: direction.trim(),
     }) } finally { submitLock.current = false; setPendingOperation(undefined) }
   }
   return <main className="app-shell setup-shell cocreation-shell preparation-workspace">
@@ -773,8 +788,8 @@ function PreparationReview({ session }: { session: StorySession }) {
     <div className="preparation-layout">
     <div className="preparation-direction-column" aria-busy={busy}>
     <div className="preparation-intro"><p className="eyebrow">01 / 故事困境</p><h1>这件事会遇到什么难处？</h1><p className="setup-lead">先选一种阻碍与取舍，再继续展开故事。</p></div>
-    {!!candidates.length && <div className="preparation-direction-heading"><div><p>围绕你的想法继续</p><strong>原始目标不变，先选它会遇到什么难处。</strong>{!!p.mainlineAnchors?.length && <p>主线要素：{p.mainlineAnchors.map(anchor => anchor.quote).join(' · ')}</p>}</div><span>选定后，还可以继续修改故事规划。</span></div>}
-    {busy && <div className="preparation-generation-feedback" role="status"><strong>{pendingOperation === 'accept' ? '正在整理选中的故事方向' : '正在构思新的一组方向'}</strong><p>{pendingOperation === 'accept' ? '故事方向尚未发生，接下来可以继续修改故事规划。' : '当前方向会保留到操作完成。'}</p></div>}
+   {!!candidates.length && <div className="preparation-direction-heading"><div><p>围绕你的想法继续</p><strong>原始目标不变，先选它会遇到什么难处。</strong>{(() => { const anchors = displayMainlineAnchors(p.mainlineAnchors ?? []); return anchors.length ? <p>主线要素：{anchors.map(anchor => anchor.quote).join(' · ')}</p> : null })()}</div><span>选定后，还可以继续修改故事规划。</span></div>}
+    {busy && <div className="preparation-generation-feedback" role="status"><strong>{pendingOperation === 'accept' ? '正在按你选定的走向构思故事' : '正在构思新的一组方向'}</strong><p>{pendingOperation === 'accept' ? '完成后可以审阅、编辑或局部重做故事设计。' : '当前方向会保留到操作完成。'}</p></div>}
     {session.stageError && <div className="preparation-generation-feedback is-error" role="alert"><strong>这次调整没有完成</strong><p>{preparationErrorMessage(session)}</p><p>当前方向和你的编辑仍保留，可以继续修改。</p><div className="preparation-recovery-actions"><button className="text-action" type="button" disabled={busy} onClick={() => void requestAlternative()}>换一组方向</button><button className="text-action" type="button" disabled={busy} onClick={session.goBackToOpening}>修改想法</button></div></div>}
     {candidates.map((active, index) => {
       const wording = reviewed[active.id] ?? active
@@ -785,7 +800,7 @@ function PreparationReview({ session }: { session: StorySession }) {
       const currentExplanation = explanations[active.id] ?? active.explanation
       const explanationCurrent = currentExplanation ? explanationMatches(currentExplanation.wording, wording) : explanationMatches(active, wording)
       return <section className={`preparation-proposal ${selectedId === active.id ? 'is-selected' : ''}`} aria-label={`故事困境 ${index + 1}`} key={active.id}>
-      <button className="preparation-choice" type="button" aria-pressed={selectedId === active.id} disabled={busy || !!active.unknownIds.length} onClick={() => setSelectedId(active.id)}>
+      <button className="preparation-choice" type="button" aria-pressed={selectedId === active.id} disabled={busy || !!active.unknownIds.length} onClick={() => { if (selectedId !== active.id) setChoosingDirection(false); setSelectedId(active.id) }}>
         <span className="preparation-choice-index">0{index + 1}</span>
         <span className="preparation-choice-icon"><FileText size={18} /></span>
         <span className="preparation-choice-copy"><span className="preparation-choice-action">{renderAction(wording.action)}</span>{wording.futureChoice && <span className="preparation-choice-outcome"><small>故事可能推向</small><span className="preparation-development">{wording.futureChoice}</span></span>}<span className="preparation-choice-outcome"><small>可能走向 · 尚未发生</small><span className="preparation-development">{wording.possibleResult}</span></span></span>
@@ -821,7 +836,11 @@ function PreparationReview({ session }: { session: StorySession }) {
           onChange={value => setExplanations(current => ({ ...current, [active.id]: value }))} />
       </details>
     </section>})}
-    {!!candidates.length && <div className="preparation-direction-footer"><button className="primary-action" type="button" disabled={busy || !selected || selectedNeedsReview || !((reviewed[selected.id]?.action ?? selected.action).trim()) || !((reviewed[selected.id]?.possibleResult ?? selected.possibleResult).trim())} onClick={() => selected && void accept(selected)}>确认这个困境 <ArrowRight size={16} /></button><button className="text-action" type="button" disabled={busy} onClick={() => void requestAlternative()}> <RefreshCcw size={16} /> 换一组困境</button></div>}
+    {!!candidates.length && <div className="preparation-direction-footer">{!choosingDirection && <button className="primary-action" type="button" disabled={busy || !selected || selectedNeedsReview || !((reviewed[selected.id]?.action ?? selected.action).trim()) || !((reviewed[selected.id]?.possibleResult ?? selected.possibleResult).trim())} onClick={() => { setEditing(undefined); setChoosingDirection(true) }}>确认这个困境 <ArrowRight size={16} /></button>}<button className="text-action" type="button" disabled={busy} onClick={() => void requestAlternative()}> <RefreshCcw size={16} /> 换一组困境</button></div>}
+    {choosingDirection && selected && !selectedNeedsReview && <PreparationStoryDirectionChoice
+      key={JSON.stringify([session.revision, selected.id, createReview(selected)])}
+      session={session} candidateId={selected.id} review={createReview(selected)} disabled={busy}
+      onConfirm={direction => accept(selected, direction)} />}
     {selectedNeedsReview && <p className="preparation-note" role="status">所选卡片已修改。请展开“查看依据”，点击“重新推演这张卡”并采用新解释；也可以手动编辑解释，或核对后沿用旧解释，再确认困境。</p>}
     {!!candidates.length && <p className="preparation-note">选中的是未来设计，不表示人物已经行动。</p>}
     {!candidates.length && criticalQuestion && <PreparationContextRecovery session={session} disabled={busy} />}
@@ -833,6 +852,53 @@ function PreparationReview({ session }: { session: StorySession }) {
     </aside>
     </div>
   </main>
+}
+
+function PreparationStoryDirectionChoice({ session, candidateId, review, disabled, onConfirm }: {
+  session: StorySession
+  candidateId: string
+  review: import('../../../shared/story-preparation.js').StoryPreparationReview
+  disabled: boolean
+  onConfirm: (direction: string) => Promise<void>
+}) {
+  const [directions, setDirections] = useState<import('../../../shared/story-preparation.js').StoryPreparationStoryDirection[]>([])
+  const [selected, setSelected] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [retry, setRetry] = useState(0)
+  const directionRequest = useRef<{ retry: number; promise: ReturnType<typeof requestPreparationStoryDirections> }>()
+  useEffect(() => {
+    let active = true
+    setLoading(true); setError(''); setDirections([]); setSelected('')
+    if (!directionRequest.current || directionRequest.current.retry !== retry) {
+      directionRequest.current = { retry, promise: requestPreparationStoryDirections({ storyId: session.storyId!, revision: session.revision,
+        curveId: session.provisionalCurve!.id, acceptedCandidateIds: [candidateId], authorReview: review }) }
+    }
+    directionRequest.current.promise
+      .then(value => { if (active) setDirections(value) })
+      .catch(reason => { if (active) setError(reason instanceof Error ? reason.message : '这次没能整理出走向，请再试一次。') })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [retry])
+  const directionPanel = useRef<HTMLElement>(null)
+  useEffect(() => { directionPanel.current?.scrollIntoView({ block: 'start' }) }, [])
+  const direction = (() => {
+    const item = directions.find(d => d.id === selected)
+    return item ? `${item.choice}\n可能承担的变化：${item.consequence}` : ''
+  })()
+  return <section ref={directionPanel} className="preparation-story-directions" aria-label="选择故事走向" aria-busy={loading}>
+    <div><p className="eyebrow">接下来 / 故事走向</p><h2>你想让故事往哪里走？</h2><p className="preparation-direction-description">先决定关键取舍，再构思完整故事；具体过程和暂定结局仍可修改。</p></div>
+    {loading && <p role="status">正在根据这张卡整理走向…</p>}
+    {error && <div role="alert"><p>{error}</p><button type="button" className="text-action" disabled={disabled || loading} onClick={() => setRetry(v => v + 1)}>重新整理走向</button></div>}
+    <div className="preparation-story-direction-list" role="radiogroup" aria-label="本版故事走向">
+      {directions.map(item => <label className={`preparation-proposal preparation-story-direction ${selected === item.id ? 'is-selected' : ''}`} key={item.id}>
+        <input type="radio" name="story-direction" checked={selected === item.id} disabled={disabled || loading} onChange={() => setSelected(item.id)} />
+        <span className="preparation-choice-copy"><strong>{item.title}</strong><span className="preparation-choice-action">{item.choice}</span><span className="preparation-choice-outcome"><small>可能的代价或变化</small><span className="preparation-development">{item.consequence}</span></span></span>
+        <span className="preparation-choice-indicator" aria-hidden="true">{selected === item.id && <Check size={16} />}</span>
+      </label>)}
+    </div>
+    <div className="preparation-direction-footer"><button className="primary-action" type="button" disabled={disabled || !direction} onClick={() => void onConfirm(direction)}>按这个走向构思故事 <ArrowRight size={16} /></button></div>
+  </section>
 }
 
 function PreparationContextRecovery({ session, disabled }: { session: StorySession; disabled: boolean }) {
@@ -879,7 +945,7 @@ function PreparationSupplementReview({ item, disabled, onReview }: { item: impor
   </article>
 }
 
-function ReasoningDesignReview({ reasoning, acceptedIds, onChange, disabled }: { reasoning: StoryReasoningProposal; acceptedIds: string[]; onChange: (ids: string[]) => void; disabled: boolean }) {
+function ReasoningDesignReview({ reasoning, acceptedIds, onChange, disabled, wholeStory = false }: { reasoning: StoryReasoningProposal; acceptedIds: string[]; onChange: (ids: string[]) => void; disabled: boolean; wholeStory?: boolean }) {
   const items = designReviewItems(reasoning)
   const groups = new Map<string, typeof items>()
   for (const item of items) {
@@ -890,6 +956,11 @@ function ReasoningDesignReview({ reasoning, acceptedIds, onChange, disabled }: {
   const accepted = (id: string) => acceptedIds.includes(id) || Boolean(reasoning.designReview?.acceptedProposalIds.includes(id))
   const pending = proposals.filter(group => !group.every(s => accepted(s.id))).length
   const sources = [...new Set(items.filter(s => s.basis.kind === 'author-text').map(s => s.text))]
+  const editableIds = proposals.flatMap(group => group.filter(s => !reasoning.designReview?.acceptedProposalIds.includes(s.id)).map(s => s.id))
+  const unresolvedDesign = proposals.some(group => group.some(s => s.basis.kind !== 'author-text' && s.basis.unknownIds.length > 0))
+  if (wholeStory) return reasoning.designReview ? <section className="story-direction-review" aria-label="故事方向确认">
+    <label className="story-review-choice"><input type="checkbox" checked={pending === 0} disabled={disabled || unresolvedDesign || !editableIds.length} onChange={e => onChange(e.target.checked ? [...new Set([...acceptedIds, ...editableIds])] : acceptedIds.filter(id => !editableIds.includes(id)))} /><span>我已审阅上面的故事设计，采用当前版本</span></label>
+  </section> : null
   return <section className="story-direction-review" aria-label="故事方向确认">
     <details className="story-review-details">
       <summary>确认这版故事中的创意 <span>{pending ? `${pending} 项待决定` : proposals.length ? '已选择' : '暂无新增创意'}</span></summary>

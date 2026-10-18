@@ -575,6 +575,35 @@ export interface GeneratedStory {
   review: StoryReviewItem[]
 }
 
+export interface StoryWritingSegment {
+  id: string
+  beatId: string
+  label: string
+  text: string
+  status: 'pending' | 'accepted'
+  /** Set by the server; legacy segments without this marker are model prose. */
+  authorship?: 'model' | 'author'
+}
+
+export interface StoryWritingDraft {
+  segments: StoryWritingSegment[]
+  complete: boolean
+  /** Server-owned, source-bound continuity cache; never author facts or future design. */
+  continuity?: {
+    snapshots: Array<{
+      segmentId: string
+      sourceHash: string
+      facts: Array<{
+        kind: 'event' | 'condition' | 'location' | 'possession' | 'time' | 'relationship' | 'unknown'
+        status: 'established' | 'not-established' | 'open'
+        evidenceId: string
+        quote: string
+      }>
+    }>
+    auditedHash?: string
+  }
+}
+
 /** Persisted progress for one curve version. */
 export interface StoryPathSnapshot {
   seed: StorySeed
@@ -586,6 +615,7 @@ export interface StoryPathSnapshot {
   currentTurn?: StoryTurn
   pendingActionProposal?: StoryActionProposal
   generatedStory?: GeneratedStory
+  writingDraft?: StoryWritingDraft
 }
 
 export interface StoryCurveVersion {
@@ -619,6 +649,7 @@ export interface StorySessionSnapshot extends StorySessionVersion {
   /** Batch curve regeneration waiting for item-by-item author decisions. */
   pendingCurveRegeneration?: StoryCurveRegenerationPreview
   generatedStory?: GeneratedStory
+  writingDraft?: StoryWritingDraft
   resumeStage: StoryResumeStage
 }
 
@@ -739,6 +770,13 @@ export interface StoryCurveConfirmRequest extends StorySessionVersion {
 
 export interface StoryCurveStartSpineRequest extends StorySessionVersion {
   curveId: string
+}
+
+export interface StoryWritingRequest extends StorySessionVersion {
+  action: 'start' | 'next' | 'accept' | 'edit' | 'regenerate'
+  segmentId?: string
+  feedback?: string
+  text?: string
 }
 
 export interface StoryCurveVersionSelectionRequest extends StorySessionVersion {
@@ -868,6 +906,11 @@ export interface StoryCurveSpineResponse extends StoryTurnResponse {
 
 export interface StoryGenerationResponse extends StorySessionVersion {
   story: GeneratedStory
+}
+
+export interface StoryWritingResponse extends StorySessionVersion {
+  draft: StoryWritingDraft
+  story?: GeneratedStory
 }
 
 export interface ApiErrorResponse {

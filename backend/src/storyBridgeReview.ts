@@ -1,5 +1,6 @@
 import { AppError } from './qwen.js'
 import { shape as s } from './modelOutputSchema.js'
+import { selectStoryEvidence } from './storyEvidence.js'
 import type { StoryExpansionNeed, StoryPreparation, StoryPreparationExplanation } from '../../shared/story-preparation.js'
 
 export const bridgeEvidenceFields = ['author', 'action', 'possibleResult', 'method', 'change', 'futureChoice'] as const
@@ -116,13 +117,8 @@ export function parseBridgeEvidence(value: unknown, rejected: boolean, candidate
   // or enter the repair input. Transport schema still checks their encoding.
   if (!rejected) return []
   const invalid = (): never => { throw new AppError('审阅依据编号不合法：只能选择当前方向或作者原文的evidenceCatalog编号；拒绝须提供至少两个不同编号，至少一个来自当前提案。请重审全部原提案，不改写故事或引用原文。', 502, 'STORY_PREPARATION_INVALID_OUTPUT') }
-  if (!Array.isArray(value) || value.length > 4) return invalid()
-  if (new Set(value).size !== value.length) return invalid()
-  const evidence = value.map(id => {
-    const entry = catalog.find(entry => entry.id === id)
-    if (!entry || entry.candidateId !== null && entry.candidateId !== candidateId) return invalid()
-    return { field: entry.field, quote: entry.quote }
-  })
+  const evidence = selectStoryEvidence(value, catalog, entry => entry.candidateId === null || entry.candidateId === candidateId,
+    2, 4, invalid).map(entry => ({ field: entry.field, quote: entry.quote }))
   if (evidence.length < 2 || !evidence.some(e => e.field !== 'author')) return invalid()
   return evidence
 }

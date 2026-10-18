@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { attachReasoningQuestions, previewReasoningRecovery, acceptReasoningRecovery } from './storyReasoningRecovery.js'
 import { generateInitialReasoningCurve, mapInitialReasoningProposal } from './storyInitialReasoning.js'
 import { acceptStoryReasoningDesign } from './storyReasoningContract.js'
-import { reviewSelectedReasoningDesign } from './storyDesignReview.js'
+import { reviewSelectedReasoningDesign, selectReasoningDesign } from './storyDesignReview.js'
 import { getAuthorDecisionMaterial, renderAuthorDecisionChoice } from './storyDecision.js'
 import { getClarificationGroundingFacts, getClarificationsForBeat, getUnresolvedClarifications, markClarificationsResolved, reviewClarificationReplacement } from './storyClarification.js'
 import {
@@ -318,6 +318,28 @@ function finalizeCurveMutation(
     : design && foundation ? { ...design, foundation } : design
   const rejectedProposals = overrides.rejectedProposals ?? curve.rejectedProposals
   const generation = overrides.generation ?? curve.generation
+  // A terminal edit (or the last manually revised downstream node) needs no
+  // model rewrite. Rebuild the proposal from explicit author edits so a simple
+  // story cannot get stuck with an invalid foundation and no stale node to redo.
+  if (curve.preparation && curve.reasoning?.outcome === 'proposal' && 'steps' in curve.reasoning
+    && design && instruction.kind === 'replace' && !beats.some(b => b.status === 'stale')) {
+    const reasoning = structuredClone(curve.reasoning)
+    const authoredIds = new Set(beats.filter(b => b.source === 'user-edit').map(b => b.id))
+    for (const step of reasoning.steps) {
+      const edit = beats.find(b => b.id === step.id && authoredIds.has(b.id))
+      if (!edit) continue
+      step.text = edit.detail
+      step.basis = { kind: 'design-proposal', unknownIds: [], evidence: design.sourceFacts.filter(f => edit.sourceFactIds?.includes(f.id)).map(f => ({ sourceId: f.id, quote: f.text })) }
+      step.actionIds = []; step.relationIds = []
+    }
+    const selected = selectReasoningDesign(reasoning, beats.filter(b => b.status !== 'rejected').map(b => b.id))
+    if (selected.designReview) selected.designReview.acceptedProposalIds = selected.designReview.acceptedProposalIds.filter(id => !authoredIds.has(id))
+    const mapped = mapInitialReasoningProposal(selected, design, curve.brief, { allowSimplePlan: true })
+    const nextFoundation = mapped.foundation!
+    nextFoundation.beatSignatures = Object.fromEntries(beats.filter(b => b.status !== 'rejected').map(b => [b.id, [b.kind, b.detail.trim(), b.causalAnchor?.trim() ?? '', [...(b.sourceFactIds ?? [])].sort().join(',')].join('|')]))
+    return { ...curve, reasoning: selected, beats, foundation: nextFoundation, design: { ...mapped.design!, foundation: nextFoundation },
+      instructions: [...curve.instructions, instruction], updatedAt: Date.now() }
+  }
   return {
     ...curve,
     beats,
@@ -1657,13 +1679,13 @@ function materializePreparationCurve(seed: StorySeed, curve: ConfirmedCurve): Ma
   if (p.status !== 'accepted-design' || !foundation || !isStoryCurveFoundationCurrent(foundation, curve.beats)) throw new AppError('行动设计与冻结曲线不一致。', 409, 'STORY_CURVE_FOUNDATION_OUT_OF_DATE')
   const known = (curve.design?.sourceFacts ?? []).filter(f => f.disposition === 'integrated')
   const facts: StoryFact[] = known.map(f => ({ id: `fact-source-${f.id}`, statement: f.text, source: 'confirmed-curve', mutability: 'fixed' }))
-  const actions: StoryAction[] = p.candidates.filter(c => p.acceptedCandidateIds.includes(c.id)).map(c => ({ id: `prepared-${c.id}`, intent: c.action,
-    preconditions: [], effects: [], source: 'generated', originCurveBeatIds: ['beat-trigger'] }))
+  const actions: StoryAction[] = curve.beats.filter(b => b.status !== 'rejected' && !['current-state', 'resolution', 'character-tension'].includes(b.kind)).map(b => ({ id: `prepared-${b.id}`, intent: b.detail,
+    preconditions: [], effects: [], source: b.source === 'user-edit' ? 'user-choice' : 'generated', originCurveBeatIds: [b.id] }))
   const approach = { id: 'prepared-approach', intent: actions.map(a => a.intent).join('\n'), cost: '未声明代价。' }
   const predicament: StoryPredicament = { id: 'prepared-predicament', designProtocol: 'prepared-action', title: foundation.predicament.title, variationAxis: 'commitment',
-    preservedGoal: foundation.preservedGoal, immediateSituation: foundation.predicament.immediateSituation, obstacle: '', tradeoff: '', urgency: '', choice: '', plausibleCost: '', approaches: [approach], facts, actions }
+    preservedGoal: foundation.preservedGoal, immediateSituation: foundation.predicament.immediateSituation, obstacle: '', tradeoff: '', urgency: '', choice: foundation.predicament.choice, plausibleCost: '', approaches: [approach], facts, actions }
   return { seed: { ...seed, activeSituation: foundation.predicament.immediateSituation, lockedGoal: foundation.preservedGoal, lockedFacts: known.map(f => f.text), creativeBrief: curve.brief },
-    predicament, approach, headTail: { id: 'prepared-head-tail', designProtocol: 'prepared-action', opening: foundation.storyEnds.opening, openingClue: foundation.storyEnds.openingClue, climax: '',
+    predicament, approach, headTail: { id: 'prepared-head-tail', designProtocol: 'prepared-action', opening: foundation.storyEnds.opening, openingClue: foundation.storyEnds.openingClue, climax: foundation.storyEnds.climax,
       resolution: foundation.storyEnds.resolution, cost: '', promise: '', climaxActionId: actions[0]!.id,
       transition: { actionId: actions[0]!.id, consumedFacts: [], changedFacts: [], introducedFacts: [] } } }
 }

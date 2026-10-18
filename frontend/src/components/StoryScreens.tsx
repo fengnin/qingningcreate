@@ -42,10 +42,10 @@ const maximumStoryIdeaLength = 120
 const journeyStages: { step: StoryStep; label: string; detail: string }[] = [
   { step: 1, label: '冲突核心', detail: '先确定它卡在哪里' },
   { step: 2, label: '具体困境', detail: '再落到当前局面' },
-  { step: 3, label: '故事两端', detail: '确定开始与结尾' },
-  { step: 4, label: '逐步发展', detail: '选择后，再发生下一步' },
+  { step: 3, label: '待审阅的故事设计', detail: '查看并修改整版故事骨架' },
+  { step: 4, label: '写成故事', detail: '按确认的方向展开情节' },
   { step: 5, label: '收束故事', detail: '让主角完成关键行动' },
-  { step: 6, label: '写成故事', detail: '生成场景与对白' },
+  { step: 6, label: '完整故事', detail: '整理成完整正文' },
 ]
 
 const variationAxisLabel: Record<StoryVariationAxis, string> = {
@@ -387,7 +387,7 @@ export function HeadTailScreen({ session }: { session: StorySession }) {
             <StageActions
               onRegenerate={() => void session.regenerateHeadTail()}
               onNext={() => void session.continueToStorySpine()}
-              nextLabel="确认两端，开始逐步发展"
+              nextLabel="确认两端，开始写成故事"
               disabled={!session.selectedHeadTail}
             />
           </>
@@ -406,6 +406,7 @@ export function HeadTailScreen({ session }: { session: StorySession }) {
 export function StorySpineScreen({ session }: { session: StorySession }) {
   const currentTurn = session.currentTurn
   const story = session.generatedStory
+  if (session.writingDraft || (session.confirmedCurve && !currentTurn)) return <WritingWorkspace session={session} />
   const hasConclusion = currentTurn?.isConclusion ?? false
   const canAdvance = Boolean((session.selectedTurnOption || (currentTurn?.presentation === 'closure-review' && currentTurn.canConclude)) && !hasConclusion)
   const canConclude = currentTurn?.canConclude ?? false
@@ -426,9 +427,9 @@ export function StorySpineScreen({ session }: { session: StorySession }) {
   return (
     <StoryWorkspace
       step={step}
-      eyebrow={hasConclusion ? '05 / 06 · 故事收束' : '04 / 06 · 逐步发展'}
-      title={hasConclusion ? '这些确认的选择，已经让故事可以走向结局。' : '先审阅行动，再确认实际结果。'}
-      lead={hasConclusion ? '回看这条由你确认的因果链；结尾会在它之后自然完成。' : '关注点选择不执行动作。候选行动与因果均待审阅，只有你明确确认的实际结果才能进入故事事实。'}
+      eyebrow={hasConclusion ? '05 / 06 · 故事收束' : '04 / 06 · 写成故事'}
+      title={hasConclusion ? '这些确认的选择，已经让故事可以走向结局。' : '按确认的故事设计，把情节写出来。'}
+      lead={hasConclusion ? '回看这条由你确认的因果链；结尾会在它之后自然完成。' : '系统按当前故事设计展开情节；每一步都可以修改、重做，再继续写下去。'}
       session={session}
       aside={<ProgressSummary option={session.selectedHeadTail} history={session.turnHistory} currentTurn={currentTurn} hasGeneratedStory={Boolean(story)} />}
     >
@@ -476,10 +477,107 @@ export function StorySpineScreen({ session }: { session: StorySession }) {
   )
 }
 
+function WritingWorkspace({ session }: { session: StorySession }) {
+  const draft = session.writingDraft
+  const segments = draft?.segments ?? []
+  const [selectedSegmentId, setSelectedSegmentId] = useState<string>()
+  const activeSegment = segments.find(segment => segment.id === selectedSegmentId) ?? segments.find(segment => segment.status === 'pending')
+  const [text, setText] = useState(activeSegment?.text ?? '')
+  const [feedback, setFeedback] = useState('')
+  const [retryRequest, setRetryRequest] = useState<Parameters<StorySession['writeStory']>[0]>()
+  const curve = session.confirmedCurve!
+  const acceptedCount = segments.filter(segment => segment.status === 'accepted').length
+  const beats = curve.beats.filter(beat => beat.status !== 'rejected')
+  const busy = session.stageStatus === 'loading'
+
+  useEffect(() => setSelectedSegmentId(undefined), [draft])
+
+  useEffect(() => {
+    setText(activeSegment?.text ?? '')
+    setFeedback('')
+  }, [activeSegment?.id, activeSegment?.text])
+
+  const run = (request: Parameters<StorySession['writeStory']>[0]) => {
+    setRetryRequest(request)
+    void session.writeStory(request)
+  }
+
+  return (
+    <StoryWorkspace
+      step={4}
+      eyebrow="04 / 06 · 写成故事"
+      title="按确认的故事设计，把情节写出来。"
+      lead="每次展开一段正文。你可以先修改或局部重写，再决定是否采用并继续。"
+      session={session}
+      aside={(
+        <div className="writing-outline">
+          <p className="manuscript-label"><Route size={15} /> 已确认的故事设计</p>
+          <ol>
+            {beats.map((beat, index) => (
+              <li key={beat.id} className={segments.some(segment => segment.beatId === beat.id && segment.status === 'accepted') ? 'is-written' : beat.id === activeSegment?.beatId ? 'is-active' : ''}>
+                <span>{String(index + 1).padStart(2, '0')}</span>
+                <div><strong>{beat.title}</strong><p>{beat.detail}</p></div>
+              </li>
+            ))}
+          </ol>
+          <p className="writing-progress">已采用 {acceptedCount} / {beats.length} 段</p>
+        </div>
+      )}
+    >
+      <section className="writing-workspace" aria-label="故事正文写作">
+        {busy && <GenerationNotice label="正在处理当前段落" detail="已有正文会保留，完成后可继续审阅。" />}
+        {session.stageError && (
+          <div className="generation-error" role="alert">
+            <CircleAlert size={17} /><p>{session.stageError}</p>
+            {retryRequest && <button className="text-action" type="button" disabled={busy} onClick={() => void session.writeStory(retryRequest)}><RefreshCcw size={15} /> 重试本次操作</button>}
+          </div>
+        )}
+        {segments.filter(segment => segment.id !== activeSegment?.id).map(segment => (
+          <article className="writing-segment is-accepted" key={segment.id}>
+            <header><span>第 {segments.indexOf(segment) + 1} 段 · {segment.status === 'accepted' ? '已采用' : '待审阅'}</span><strong>{segment.label}</strong></header>
+            <div className="writing-prose">{segment.text.split(/\n\s*\n/).map((paragraph, paragraphIndex) => <p key={paragraphIndex}>{paragraph}</p>)}</div>
+            <button type="button" className="text-action" disabled={busy} onClick={() => setSelectedSegmentId(segment.id)}><PencilLine size={15} /> 修改或重写这段</button>
+          </article>
+        ))}
+        {activeSegment ? (
+          <article className="writing-segment is-pending">
+            <header><span>当前段 · 待你审阅</span><strong>{activeSegment.label}</strong></header>
+            <label className="writing-editor-label" htmlFor="writing-segment-text">故事正文</label>
+            <textarea id="writing-segment-text" className="writing-segment-editor" value={text} maxLength={6000} disabled={busy} onChange={event => setText(event.target.value)} />
+            <label className="writing-editor-label" htmlFor="writing-segment-feedback">局部重写意见 <span>选填</span></label>
+            <textarea id="writing-segment-feedback" className="writing-feedback-editor" value={feedback} maxLength={600} disabled={busy} placeholder="例如：保留发生的事，把青柠的犹豫写得更细一些。" onChange={event => setFeedback(event.target.value)} />
+            <p className="writing-edit-note">一次说一项想调整的地方，其他内容会尽量保留。</p>
+            <div className="writing-segment-actions">
+              {text !== activeSegment.text ? <button type="button" className="primary-action" disabled={busy || !text.trim()} onClick={() => run({ action: 'edit', segmentId: activeSegment.id, text })}><Check size={16} /> 保存修改</button>
+                : activeSegment.status === 'pending' && <button type="button" className="primary-action" disabled={busy} onClick={() => run({ action: 'accept', segmentId: activeSegment.id })}><Check size={16} /> 采用这段</button>}
+              <button type="button" className="text-action" disabled={busy || text !== activeSegment.text} onClick={() => run({ action: 'regenerate', segmentId: activeSegment.id, ...(feedback.trim() ? { feedback: feedback.trim() } : {}) })}><RefreshCcw size={15} /> 局部重写</button>
+              {selectedSegmentId && <button type="button" className="text-action" disabled={busy} onClick={() => setSelectedSegmentId(undefined)}>取消</button>}
+            </div>
+            {(text !== activeSegment.text || selectedSegmentId) && <p className="writing-edit-note">保存修改后再采用。修改或重写本段会移除后续正文，之后按新版本继续生成。</p>}
+          </article>
+        ) : draft?.complete ? (
+          <p className="writing-complete-note"><Check size={17} /> 所有段落已采用，完整故事已经整理完成。</p>
+        ) : segments.length === 0 ? (
+          <div className="writing-empty">
+            <p>故事设计已确认。正文会逐段生成，补出的场景细节仍可编辑。</p>
+            <button type="button" className="primary-action" disabled={busy} onClick={() => run({ action: 'start' })}>{busy ? '正在写第一段…' : '开始写第一段'} <ArrowRight size={17} /></button>
+          </div>
+        ) : (
+          <div className="writing-next">
+            <p><Check size={16} /> 当前段已采用，可以继续。</p>
+            <button type="button" className="primary-action" disabled={busy} onClick={() => run({ action: 'next' })}>{busy ? '正在写下一段…' : '继续生成下一段'} <ArrowRight size={17} /></button>
+          </div>
+        )}
+      </section>
+    </StoryWorkspace>
+  )
+}
+
 export function CompletedStory({ session }: { session: StorySession }) {
   const story = session.generatedStory
 
   if (!story) return <StorySpineScreen session={session} />
+  const isPlaceholderTitle = /^(待审阅的故事设计|暂定故事曲线|故事设计)$/u.test(story.title.trim())
 
   return (
     <main className="app-shell setup-shell stage-shell complete-shell">
@@ -500,8 +598,8 @@ export function CompletedStory({ session }: { session: StorySession }) {
           <span className="complete-mark"><Check size={20} /></span>
           <div>
             <p className="eyebrow"><FileText size={16} /> 06 / 06 · 完整故事</p>
-            <h1>{story.title}</h1>
-            <p className="completed-logline">{story.logline}</p>
+            <h1>{isPlaceholderTitle ? '完整故事' : story.title}</h1>
+            <p className="completed-logline">{isPlaceholderTitle ? '根据已确认的故事路径写成。' : story.logline}</p>
           </div>
         </header>
         <div className="completed-grid">
@@ -1083,7 +1181,7 @@ function StoryControlPanel({ session, currentTurn }: {
                 <label><input type="checkbox" checked={confirmExecuted} onChange={(event) => setConfirmExecuted(event.target.checked)} disabled={disabled} />我明确确认上述行动已执行，填写的是实际结果。</label>
               </>}
               <div className="pending-action-buttons">
-                <button className="text-action" type="button" onClick={() => void session.confirmStoryActionProposal('continue', pendingProposal.requiresExecutedResultConfirmation ? { actionText: pendingProposal.action, resultText: executedResult.trim() } : undefined)} disabled={disabled || Boolean(pendingProposal.requiresExecutedResultConfirmation && (!confirmExecuted || !executedResult.trim()))}>{pendingProposal.requiresExecutedResultConfirmation ? '确认实际行动与结果，审阅下一步' : '接受并继续发展'} <ArrowRight size={14} /></button>
+                <button className="text-action" type="button" onClick={() => void session.confirmStoryActionProposal('continue', pendingProposal.requiresExecutedResultConfirmation ? { actionText: pendingProposal.action, resultText: executedResult.trim() } : undefined)} disabled={disabled || Boolean(pendingProposal.requiresExecutedResultConfirmation && (!confirmExecuted || !executedResult.trim()))}>{pendingProposal.requiresExecutedResultConfirmation ? '确认实际行动与结果，审阅下一步' : '采用并继续写成故事'} <ArrowRight size={14} /></button>
                 {!pendingProposal.requiresExecutedResultConfirmation && currentTurn.canConclude && <button className="text-action" type="button" onClick={() => void session.confirmStoryActionProposal('conclude')} disabled={disabled}>接受并进入收束 <Check size={14} /></button>}
               </div>
             </div>
@@ -1165,12 +1263,12 @@ function ProgressSummary({ option, history, currentTurn, hasGeneratedStory }: {
   currentTurn: StoryTurn | undefined
   hasGeneratedStory?: boolean
 }) {
-  if (!option) return <AsideEmpty icon={<Route size={19} />} label="正在等你确认故事两端" detail="选定开场、关键行动和结尾后，故事才能逐步发展。" />
+  if (!option) return <AsideEmpty icon={<Route size={19} />} label="正在等你确认故事两端" detail="选定开场、关键行动和结尾后，才能写成故事。" />
 
   const currentLabel = hasGeneratedStory
     ? '完整故事已写成'
     : currentTurn?.isConclusion
-    ? '已收束，可以写成故事'
+    ? '已收束，可以整理完整故事'
     : history.length
       ? `已确认 ${history.length} 次行动`
       : currentTurn ? '首回合提案待审阅' : '正在生成第一个情境'

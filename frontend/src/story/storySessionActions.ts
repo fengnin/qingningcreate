@@ -23,6 +23,7 @@ import {
   requestAuthorInstruction,
   requestStoryActionProposal,
   requestStoryActionProposalConfirmation,
+  requestStoryWriting,
 } from './storyApi'
 import {
   type PendingTurnRequest,
@@ -44,6 +45,7 @@ import type {
   StoryAuthorClarificationAction,
   StoryCurveMutationResponse,
   StoryCurveRegenerationDecision,
+  StoryWritingRequest,
 } from './types'
 import type { StoryStageRequest } from './useStoryStageRequest'
 
@@ -86,7 +88,9 @@ export interface StorySessionActions {
     clarificationId?: string; targetBeatId?: string; prompt?: string; causalGap?: string; answerText?: string
   }) => Promise<boolean>
   confirmProvisionalCurve: (acceptedDesignProposalIds?: string[]) => Promise<void>
+  openStoryWriting: () => void
   startStorySpineFromCurve: () => Promise<void>
+  writeStory: (request: Omit<StoryWritingRequest, 'storyId' | 'revision'>) => Promise<void>
   showDifferentConflictCores: () => Promise<void>
   applyConflictCoreFeedback: (feedback: string) => Promise<void>
   applyConflictCoreContext: (context: StoryConflictCoreContext) => Promise<void>
@@ -139,6 +143,8 @@ export function createStorySessionActions(
   return {
     ...createStoryFoundationActions(context),
     ...coCreationActions,
+    openStoryWriting: () => state.setView('story-spine'),
+    ...createStoryWritingActions(context),
     ...createStoryPlanningActions(context),
     ...storyProgressActions,
     ...createNavigationActions(context, storyProgressActions.generateFullStory, coCreationActions.generateProvisionalCurve),
@@ -151,6 +157,19 @@ interface StorySessionActionContext {
   state: StorySessionState
   stage: StoryStageRequest
   loaders: StorySessionLoaders
+}
+
+function createStoryWritingActions({ state, stage }: StorySessionActionContext): Pick<StorySessionActions, 'writeStory'> {
+  return { writeStory: async request => {
+    if (!state.storyId) return
+    await runStorySessionStageRequest(state, stage,
+      () => requestStoryWriting({ ...request, storyId: state.storyId!, revision: state.revision }),
+      result => {
+        state.setWritingDraft(result.draft)
+        state.setGeneratedStory(result.story)
+        if (result.story) state.setView('complete')
+      })
+  } }
 }
 
 function createCoCreationActions(

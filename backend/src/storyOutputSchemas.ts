@@ -31,6 +31,9 @@ export const preparationOutputSchemas = {
   causalReview: s.object({ checks: s.array(bridgeReviewCheckSchema(), 1, 3) }),
   goal: s.object({ goalMaterialId: s.either(s.text, s.nil) }),
   suggestion: s.object({ suggestion: s.text }),
+  storyDirections: s.object({ directions: s.array(s.object({
+    id: s.text, title: s.text, choice: s.text, consequence: s.text,
+  }), 1, 2) }),
   // New model requests only select canonical IDs. Keep legacy decoding in the
   // domain parser, without inviting fresh rewording through an anyOf branch.
   arrangement: s.object({ steps: s.array(
@@ -38,6 +41,10 @@ export const preparationOutputSchemas = {
       candidateIds: refs, materialIds: refs, displayMaterialIds: refs }), 3, 5),
   supplements: s.array(s.object({ id: s.text, kind: s.enum('hypothesis', 'observation', 'criterion', 'condition'),
     text: s.text, question: s.text, materialIds: refs }), 0, 8) }),
+  storyDesign: s.object({ steps: s.array(s.object({
+    kind: s.enum('current-state', 'trigger', 'escalation', 'midpoint-turn', 'climax-choice', 'resolution'),
+    text: s.text, materialIds: refs,
+  }), 3, 6) }),
 }
 
 /** Bound reference encoding before generation, without treating IDs as proof

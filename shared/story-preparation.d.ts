@@ -70,6 +70,8 @@ export interface StoryPreparationCandidate {
 /** Author-reviewed wording; accepting a future design is never execution. */
 export interface StoryPreparationReview {
   originalText: string
+  /** Explicitly chosen future design, never an execution fact. */
+  selectedStoryDirection?: string
   candidates: { id: string; action: string; possibleResult: string; futureChoice?: string; resultBasisIds?: string[]; explanation?: StoryPreparationExplanation }[]
   /** Explicit author revision; originals remain in material for audit. */
   supersededMaterialIds?: string[]
@@ -83,6 +85,12 @@ export interface StoryPreparationSupplement {
   materialIds: string[]
   status: 'needs-review' | 'accepted-design' | 'rejected' | 'keep-unknown'
   authorText?: string
+}
+export interface StoryPreparationStoryDirection {
+  id: string
+  title: string
+  choice: string
+  consequence: string
 }
 export interface StoryPreparation {
   protocol: 1

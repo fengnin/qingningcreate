@@ -1,0 +1,237 @@
+import { createHash } from 'node:crypto'
+import { AppError, requestQwenJson } from './qwen.js'
+import { shape as s } from './modelOutputSchema.js'
+import { selectStoryEvidence } from './storyEvidence.js'
+import { activePreparationMaterial } from './storyPreparationContext.js'
+import { selectedExpansionNeeds, storyExpansionGuidance } from './storyBridgeReview.js'
+import type { ConfirmedCurve, StoryWritingDraft } from '../../shared/story-contract.js'
+
+type Entry = { id: string; sourceId: string; scope: 'author' | 'unknown' | 'future-design' | 'prose' | 'previous' | 'text'; quote: string; start: number; end: number }
+type Snapshot = NonNullable<StoryWritingDraft['continuity']>['snapshots'][number]
+const kinds = ['future-event', 'repeated-event', 'author-conflict', 'causal-break'] as const
+type Issue = { kind: typeof kinds[number]; textEvidenceId: string; referenceEvidenceId: string; reason: string }
+type WritingRepair = { kind: Issue['kind']; evidence: Entry[]; instruction: string }
+const factKinds = ['event', 'condition', 'location', 'possession', 'time', 'relationship', 'unknown'] as const
+const statuses = ['established', 'not-established', 'open'] as const
+const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+const invalid = (): never => { throw new AppError('正文审阅证据无效，尚未通过审阅，请重试。已采用正文仍保留。', 502, 'STORY_WRITING_INVALID_EVIDENCE') }
+
+/** Sentence spans are copied by the program, never retyped by the reviewer. */
+function excerpts(sourceId: string, scope: Entry['scope'], text: string): Entry[] {
+  return [...text.matchAll(/[^。！？\n]+[。！？]?[”’」』"']*|[^\n]+/gu)].filter(match => match[0].trim())
+    .map((match, i) => ({ id: `${sourceId}:${i}`, sourceId, scope, quote: match[0], start: match.index!, end: match.index! + match[0].length }))
+}
+
+// Keep confirmation evidence near the original selection and within its source/category.
+function evidenceWindow(catalog: Entry[], anchor: Entry): Entry[] {
+  const source = catalog.filter(entry => entry.sourceId === anchor.sourceId && entry.scope === anchor.scope)
+  const index = source.findIndex(entry => entry.id === anchor.id)
+  return source.slice(Math.max(0, index - 4), index + 5)
+}
+
+function resolveConfirmationEvidence(ids: unknown, candidates: Entry[], anchor: Entry): Entry[] {
+  const selected = selectStoryEvidence(ids, candidates, () => true, 1, 5, invalid)
+  const indices = selected.map(entry => candidates.indexOf(entry))
+  if (!selected.some(entry => entry.id === anchor.id)
+    || indices.some((index, i) => i > 0 && index <= indices[i - 1]!)) invalid()
+  return selected
+}
+
+export function writingAuthority(idea: string, curve: ConfirmedCurve) {
+  const p = curve.preparation
+  const parked = new Set(curve.design?.sourceFacts.filter(f => f.disposition === 'parked').map(f => f.id) ?? [])
+  const material = p ? activePreparationMaterial(p).filter(m => !parked.has(m.id)) : []
+  const superseded = new Set(p?.authorReview?.supersededMaterialIds ?? [])
+  const revisedSources = new Set(p?.material.filter(m => superseded.has(m.id) || parked.has(m.id)).map(m => m.sourceId))
+  // A retired source must not re-enter through idea, sourceFacts or another copy.
+  const sourceContext = p?.sources.length ? p.sources.map(source => ({ id: source.id,
+    text: revisedSources.has(source.id) ? material.filter(m => m.sourceId === source.id).map(m => m.quote).join('\n') : source.text,
+  })) : parked.size || superseded.size ? [] : [{ id: 'original-idea', text: idea }]
+  const authorMaterial = p ? material.filter(m => m.role !== 'unknown').map(m => ({ id: m.id, text: m.quote }))
+    : (curve.design?.sourceFacts.filter(f => f.disposition !== 'parked') ?? [])
+  const explicitUnknowns = material.filter(m => m.role === 'unknown')
+  const evidence = [
+    ...sourceContext.flatMap((source, i) => excerpts(`author-source-${i}`, 'author', source.text)),
+    ...authorMaterial.flatMap((source, i) => excerpts(`author-material-${i}`, 'author', source.text)),
+    ...explicitUnknowns.flatMap((source, i) => excerpts(`unknown-${i}`, 'unknown', source.quote)),
+  ]
+  return { sourceContext, authorMaterial, explicitUnknowns, evidence }
+}
+
+export const writingAuthorityGuidance = `authorMaterial/sourceContext是作者材料；明确事实、条件及explicitUnknowns不可被新细节推翻。发展要求依作者原句的时间和范围兑现，不当作已经发生。futureDesign只是未来设计，executed=false；continuity按段落顺序记录已采用正文的原句，含已发生、明确未发生及未定状态，不能提升为作者设定。已采用正文中的明确作者编辑优先于旧设计；但模型新正文不能自行推翻作者材料。状态可以通过正文实际写出的新行动改变，不能无过渡倒退或凭空完成；明确没拍照就不能直接使用那张照片，已进门不能无过渡重新进门。回忆、否定、设想、打算、尝试均不等于完成；同一物品的新动作、简短承接和呼应不算重演。保留未知只约束作者明确保留的内容，不把普通细节变成禁区。`
+
+/** Cache only exact source excerpts, bound to the complete accepted prefix and design. */
+export async function ensureWritingContinuity(idea: string, curve: ConfirmedCurve, draft: StoryWritingDraft) {
+  const previous = draft.continuity?.snapshots ?? []
+  const snapshots: Snapshot[] = []
+  const prefix: unknown[] = []
+  for (const segment of draft.segments) {
+    if (segment.status !== 'accepted') break
+    prefix.push({ id: segment.id, beatId: segment.beatId, text: segment.text, authorship: segment.authorship ?? 'model' })
+    const sourceHash = hash({ authority: writingAuthority(idea, curve), beats: curve.beats, prefix })
+    const catalog = excerpts(segment.id, 'prose', segment.text)
+    const cached = previous.find(item => item.segmentId === segment.id && item.sourceHash === sourceHash)
+    if (cached && cached.facts.every(f => factKinds.includes(f.kind) && statuses.includes(f.status)
+      && catalog.some(e => e.id === f.evidenceId && e.quote === f.quote))) {
+      snapshots.push(cached)
+      continue
+    }
+    let snapshot: Snapshot | undefined
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const output = await requestQwenJson({
+        systemPrompt: `从本段正文选择影响后续连续性的原句，严格输出JSON {facts:[{kind,status,evidenceId}]}。kind=event/condition/location/possession/time/relationship/unknown；status=established（已发生或明确成立）/not-established（明确没有发生或不成立）/open（明确未定、设想或打算）。必须特别记录否定行动、物品是否取得、人物到离场、先后时间及未完成事项。只选输入evidenceCatalog编号；不得概括改写、补设定或把计划当完成。普通修辞可省略；没有关键状态可以为空。同一句可含时间、位置等不同类别，每句每个kind至多选一次；状态只描述该类别，不能把部分动作的否定扩大到整句其他动作。`,
+        userPrompt: JSON.stringify({ evidenceCatalog: catalog, ...(attempt ? { retry: '上次证据编号无效，请重新选择目录中的不同编号。' } : {}) }),
+        outputSchema: s.object({ facts: s.array(s.object({ kind: s.enum(...factKinds), status: s.enum(...statuses), evidenceId: s.enum(...catalog.map(e => e.id)) }), 0, 24) }),
+        diagnosticStage: 'story-writing-state', temperature: 0.1, maxTokens: 1800,
+      }) as { facts: Array<{ kind: Snapshot['facts'][number]['kind']; status: Snapshot['facts'][number]['status']; evidenceId: string }> }
+      try {
+        if (new Set(output.facts.map(f => `${f.evidenceId}/${f.kind}`)).size !== output.facts.length) invalid()
+        for (const f of output.facts) selectStoryEvidence([f.evidenceId], catalog, () => true, 1, 1, invalid)
+        snapshot = { segmentId: segment.id, sourceHash, facts: output.facts.map(f => ({ ...f, quote: catalog.find(e => e.id === f.evidenceId)!.quote })) }
+        break
+      } catch (error) { if (attempt) throw error }
+    }
+    snapshots.push(snapshot!)
+  }
+  draft.continuity = { snapshots }
+}
+
+export function writingContext(idea: string, curve: ConfirmedCurve, draft: StoryWritingDraft, index: number, feedback?: string) {
+  const beats = curve.beats.filter(b => b.status !== 'rejected')
+  const beat = beats[index]!
+  const authority = writingAuthority(idea, curve)
+  const followingBeats = beats.slice(index + 1).map(({ id, kind, title, detail }) => ({ id, kind, title, detail }))
+  const acceptedProse = draft.segments.slice(0, index).filter(s => s.status === 'accepted').map(({ id, label, text, authorship }) => ({ id, label, text, authorship: authorship ?? 'model' }))
+  return {
+    brief: curve.brief, ...authority, currentBeat: { id: beat.id, kind: beat.kind, title: beat.title, detail: beat.detail },
+    nextBeatBoundary: followingBeats[0] ?? null,
+    followingBeats, futureDesign: { executed: false, beats: followingBeats },
+    isLast: index === beats.length - 1, acceptedProse,
+    continuity: draft.continuity?.snapshots.filter(s => acceptedProse.some(p => p.id === s.segmentId)) ?? [],
+    expansionNeeds: selectedExpansionNeeds(curve.preparation),
+    ...(draft.segments[index] ? { previousText: draft.segments[index]!.text, previousAuthorship: draft.segments[index]!.authorship ?? 'model',
+      rewriteContract: '替换本段，不是续写。只按feedback修改；风格意见不改变原段事件、结果、人物关系和时间顺序。已有错误必须修复，但不扩大为无关改写。' } : {}),
+    ...(feedback ? { feedback } : {}),
+  }
+}
+type Context = ReturnType<typeof writingContext>
+
+const repairProblems = {
+  'future-event': '本段停在当前节点范围内，把后续独有的新动作和结果留到后续；保留当前节点明确包含的直接结果。',
+  'repeated-event': '从已发生事件的结果承接并推进新内容，不再完整表演同一次事件；保留必要的简短承接。',
+  'author-conflict': '保留作者明确事实、条件和未知，修正冲突的新正文；不得发明例外来绕开边界。',
+  'causal-break': '核对前后事件、否定状态、物品、位置和时间；保留已有事实，通过当前节点允许的实际行动承接，不能凭空完成、撤销或倒退。',
+}
+
+export async function reviewWritingText(context: Context, text: string, mode: 'segment' | 'state' | 'final' = 'segment'): Promise<WritingRepair[]> {
+  const catalog: Entry[] = mode === 'final' ? [
+    ...context.evidence,
+    ...context.acceptedProse.flatMap(segment => excerpts(segment.id, 'text', segment.text)),
+  ] : [
+    ...context.evidence,
+    ...excerpts('current-text', 'text', text),
+    ...(mode === 'segment' ? context.followingBeats.flatMap(beat => excerpts(beat.id, 'future-design', beat.detail)) : []),
+    ...context.acceptedProse.flatMap(segment => excerpts(segment.id, 'prose', segment.text)),
+    ...('previousText' in context ? excerpts('previous-text', 'previous', context.previousText!) : []),
+  ]
+  // State/final audits cannot see future plans as evidence of executed events.
+  const reviewInput = mode === 'segment' ? context : {
+    sourceContext: context.sourceContext, authorMaterial: context.authorMaterial, explicitUnknowns: context.explicitUnknowns,
+    acceptedProse: context.acceptedProse, continuity: context.continuity,
+    ...(mode === 'state' && context.previousText ? { previousText: context.previousText, rewriteContract: context.rewriteContract, feedback: context.feedback } : {}),
+  }
+  const allowedKinds = kinds.filter(kind => kind === 'future-event' ? mode === 'segment' && catalog.some(e => e.scope === 'future-design')
+    : kind === 'author-conflict' ? catalog.some(e => mode === 'final' ? e.scope === 'unknown' : e.scope === 'author' || e.scope === 'unknown')
+    : mode === 'final' ? catalog.filter(e => e.scope === 'text').length > 1
+    : catalog.some(e => e.scope === 'prose' || kind === 'causal-break' && e.scope === 'previous'))
+  if (!allowedKinds.length) return []
+  const issueSchema = s.object({ kind: s.enum(...allowedKinds), textEvidenceId: s.enum(...catalog.filter(e => e.scope === 'text').map(e => e.id)),
+    referenceEvidenceId: s.enum(...catalog.filter(e => mode === 'final' ? ['text', 'unknown'].includes(e.scope) : e.scope !== 'text').map(e => e.id)), reason: s.text })
+  let issues: Issue[] = []
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const output = await requestQwenJson({
+      systemPrompt: `你是正文连续性审阅者。严格输出JSON {issues:[{kind,textEvidenceId,referenceEvidenceId,reason}]}。只从evidenceCatalog选择两条不同的原句编号，不重抄引用。textEvidenceId必须来自text。${mode === 'segment' ? 'future-event参照future-design；repeated-event参照prose；author-conflict参照author/unknown；causal-break仅参照prose或previous。currentBeat.detail是本段创作范围，不是已发生事实的证据。后续人物首次到场/离场、取得关键物品和完成结果都要逐项对照。' : mode === 'state' ? '没有future-event类别。repeated-event与causal-break只能参照prose或previous；author-conflict只能参照author/unknown。照片等结果无过渡出现用causal-break，不是future-event。' : '没有future-event类别。repeated-event与causal-break参照另一个text原句；author-conflict仅用于unknown明确保留的未知。'}reason仅解释具体矛盾，不给改写指令。${mode === 'final' ? '本次是完整正文终审；text包含按顺序排列的全部已采用段落。只检查正文内部的事实衔接和明确保留的未知，不以旧设计否定作者编辑。' : ''}
+${mode === 'state' ? '本次专查跨段状态，不检查节点分工：逐项对照continuity中已完成、明确未完成和未定状态，检查本段是否无过渡把未发生当已发生、物品凭空取得、人物重复到离场、时间倒退或撤销结果。' : '检查实质抢写后续节点、完整重演同一次事件、作者边界冲突与关键因果断裂。节点范围以currentBeat.detail为准，不按kind机械截断。'}
+${writingAuthorityGuidance}
+只报告有双方原句支持、影响理解的具体问题；普通细节、比喻、呼应、合理新行动、后续尚未展开及写作偏好不算问题；不要求补背景或情感分析。找不到问题输出issues:[]。`,
+      userPrompt: JSON.stringify({ ...reviewInput, allowedIssueKinds: allowedKinds, evidenceCatalog: catalog, text,
+        ...(attempt ? { retry: '上次引用无效。重新审阅同一正文，只选择目录内且来源类别正确的编号，不得将无效审阅当作通过。' } : {}) }),
+      outputSchema: s.object({ issues: s.array(issueSchema, 0, 5) }),
+      diagnosticStage: `story-writing-${mode === 'segment' ? 'review' : mode === 'state' ? 'state-review' : 'final-review'}`,
+      temperature: 0.1, maxTokens: 1700,
+    }) as { issues: Issue[] }
+    try {
+      for (const issue of output.issues) {
+        if (!kinds.includes(issue.kind) || !issue.reason.trim() || issue.reason.length > 500) invalid()
+        const pair = selectStoryEvidence([issue.textEvidenceId, issue.referenceEvidenceId], catalog, () => true, 2, 2, invalid)
+        const [current, reference] = pair as [Entry, Entry]
+        if (current.scope !== 'text') invalid()
+        if (mode === 'final') {
+          if (reference.scope !== 'text' && reference.scope !== 'unknown') invalid()
+          if (issue.kind === 'future-event' || issue.kind === 'author-conflict' && reference.scope !== 'unknown') invalid()
+        } else if (!(issue.kind === 'future-event' ? reference.scope === 'future-design' && mode !== 'state'
+          : issue.kind === 'repeated-event' ? reference.scope === 'prose'
+          : issue.kind === 'author-conflict' ? reference.scope === 'author' || reference.scope === 'unknown'
+          : ['prose', 'previous'].includes(reference.scope))) invalid()
+      }
+      issues = output.issues
+      break
+    } catch (error) { if (attempt) throw error }
+  }
+  if (!issues.length) return []
+  // Review reasons are not sent to either confirmation or generation.
+  const grounded = issues.map(issue => ({ kind: issue.kind,
+    evidence: [catalog.find(e => e.id === issue.textEvidenceId)!, catalog.find(e => e.id === issue.referenceEvidenceId)!] }))
+  const confirmationIssues = grounded.map((issue, index) => ({ index, ...issue,
+    textCandidates: evidenceWindow(catalog, issue.evidence[0]!), referenceCandidates: evidenceWindow(catalog, issue.evidence[1]!),
+    // Complete source passages, not model-selected excerpts: omitted sentences
+    // remain visible even when the selected evidence is sparse or far apart.
+    contextPassages: issue.evidence.map(anchor => ({ sourceId: anchor.sourceId, scope: anchor.scope,
+      sentences: catalog.filter(entry => entry.sourceId === anchor.sourceId && entry.scope === anchor.scope) })) }))
+  type Assessment = { index: number; textEvidenceIds: string[]; referenceEvidenceIds: string[]; analysis: string; relation: string }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const confirmation = await requestQwenJson({
+      systemPrompt: `你是独立的故事连续性复核员。严格输出JSON {assessments:[{index,textEvidenceIds,referenceEvidenceIds,analysis,relation}]}。每个问题只评估一次，不新增问题。evidence[0]是当前正文原始锚点，evidence[1]是参照原始锚点。不重抄原句：textEvidenceIds只能选该问题textCandidates中的编号，referenceEvidenceIds只能选referenceCandidates中的编号；每侧必须包含原始锚点编号，按原文顺序选择1至5条，可以不连续。每条是独立证据，不能拼成一段连续引文，不能跨来源或类别。contextPassages是程序提供的完整来源原句，含未被选中的中间句；text和acceptedProse还提供跨段正文顺序。判断前必须检查完整上下文：两处状态之间是否有找回、归还、修补、重新取得、读取或到离场等实际过渡。analysis说明是否存在改变结论的过渡及其原句编号；存在有效过渡应判later-action或compatible，不能仅凭两端状态不同判矛盾。不存在过渡才进一步判断是否确有矛盾，不把计划、假设、否定当作实际完成。relation只能为compatible、later-action、retelling、contradiction、boundary-crossed、unrelated-evidence、uncertain；请根据原文的时间顺序、动作和状态判断。unrelated-evidence表示所选原句本身不支持所述判断。${writingAuthorityGuidance}`,
+      userPrompt: JSON.stringify({ text, currentBeat: mode === 'segment' ? context.currentBeat : undefined,
+        acceptedProse: context.acceptedProse, feedback: context.feedback, rewriteContract: context.rewriteContract,
+        issues: confirmationIssues,
+        ...(attempt ? { retry: '上次复核证据无效。仅选择各问题对应候选目录的编号，包含原始锚点并按原文顺序选择独立证据，可不连续。核对完整上下文中的过渡；审阅尚未完成，不得把失败当通过。' } : {}) }),
+      diagnosticStage: 'story-writing-review-confirmation', temperature: 0.1, maxTokens: 1600,
+      outputSchema: s.object({ assessments: s.array(s.object({ index: s.enum(...issues.map((_, i) => i)),
+        textEvidenceIds: s.array(s.enum(...new Set(confirmationIssues.flatMap(issue => issue.textCandidates.map(entry => entry.id)))), 1, 5),
+        referenceEvidenceIds: s.array(s.enum(...new Set(confirmationIssues.flatMap(issue => issue.referenceCandidates.map(entry => entry.id)))), 1, 5),
+        analysis: s.text,
+        relation: s.enum('compatible', 'later-action', 'retelling', 'contradiction', 'boundary-crossed', 'unrelated-evidence', 'uncertain') }), issues.length, issues.length) }),
+    }) as { assessments: Assessment[] }
+    try {
+      if (new Set(confirmation.assessments.map(a => a.index)).size !== issues.length
+        || confirmation.assessments.some(a => !Number.isInteger(a.index) || !issues[a.index] || !a.analysis.trim() || a.analysis.length > 700)) invalid()
+      return confirmation.assessments.flatMap(a => {
+        const issue = confirmationIssues[a.index]!
+        const evidence = [...resolveConfirmationEvidence(a.textEvidenceIds, issue.textCandidates, issue.evidence[0]!),
+          ...resolveConfirmationEvidence(a.referenceEvidenceIds, issue.referenceCandidates, issue.evidence[1]!)]
+        if (a.relation === 'unrelated-evidence') invalid()
+        return a.relation === (issue.kind === 'repeated-event' ? 'retelling' : issue.kind === 'future-event' ? 'boundary-crossed' : 'contradiction')
+          ? [{ kind: issue.kind, evidence, instruction: repairProblems[issue.kind] }] : []
+      })
+    } catch (error) { if (attempt) throw error }
+  }
+  return invalid()
+}
+
+export async function auditCompleteWriting(idea: string, curve: ConfirmedCurve, draft: StoryWritingDraft) {
+  const context = writingContext(idea, curve, draft, draft.segments.length - 1)
+  context.acceptedProse = draft.segments.map(({ id, label, text, authorship }) => ({ id, label, text, authorship: authorship ?? 'model' }))
+  context.continuity = draft.continuity?.snapshots ?? []
+  const issues = await reviewWritingText(context, draft.segments.map(s => s.text).join('\n\n'), 'final')
+  if (issues.length) throw new AppError(`全文尚未通过连续性审阅，请修改或重写相关段落后重试：${issues.slice(0, 3).map(i => i.evidence.filter(e => e.scope === 'text')
+    .map(e => `${draft.segments.find(s => s.id === e.sourceId)?.label ?? '正文'}：${e.quote.slice(0, 160)}`).join(' / ')).join('；')}`,
+    502, 'STORY_WRITING_REVIEW_FAILED')
+  draft.continuity!.auditedHash = writingDraftHash(curve, draft)
+}
+
+export function writingDraftHash(curve: ConfirmedCurve, draft: StoryWritingDraft) {
+  return hash({ curve, segments: draft.segments })
+}
+
+export { storyExpansionGuidance }
