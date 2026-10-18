@@ -48,6 +48,10 @@ DEVELOPMENT_PLAN.md
 /frontend/scripts/
 *.test.ts
 *.test.mjs
+!/backend/src/*.test.ts
+/backend/src/storyPreparation.test.ts
+/backend/src/storyPreparationDesign.test.ts
+/backend/src/storyPreparationExplanation.test.ts
 lizi.txt
 测试.txt
 老白.txt
