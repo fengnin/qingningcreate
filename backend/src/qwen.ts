@@ -101,6 +101,7 @@ const QWEN_RETRY_MAX_DELAY_MS = 5_000
 interface QwenRequestBudget {
   remaining: number
   maximum: number
+  parent?: QwenRequestBudget
 }
 
 // A model workflow can issue more than one request through retries, format
@@ -242,7 +243,7 @@ export async function withQwenRequestBudget<T>(
   operation: () => Promise<T>,
 ): Promise<T> {
   if (!Number.isSafeInteger(maximumRequests) || maximumRequests < 1) return operation()
-  return qwenRequestBudgetStorage.run({ remaining: maximumRequests, maximum: maximumRequests }, operation)
+  return qwenRequestBudgetStorage.run({ remaining: maximumRequests, maximum: maximumRequests, parent: qwenRequestBudgetStorage.getStore() }, operation)
 }
 
 /**
@@ -324,10 +325,10 @@ async function sendRequestWithRetry(
 }
 
 function consumeQwenRequestBudget(diagnosticStage: string): void {
-  const budget = qwenRequestBudgetStorage.getStore()
-  if (!budget) return
-
-  if (budget.remaining <= 0) {
+  const budgets: QwenRequestBudget[] = []
+  for (let current = qwenRequestBudgetStorage.getStore(); current; current = current.parent) budgets.push(current)
+  const budget = budgets.find(current => current.remaining <= 0)
+  if (budget) {
     throw new AppError(
       '本次 API 请求已达到模型上游调用上限，请稍后重试。',
       429,
@@ -344,7 +345,8 @@ function consumeQwenRequestBudget(diagnosticStage: string): void {
     )
   }
 
-  budget.remaining -= 1
+  // A local single-call limit must not reset the enclosing API request cap.
+  for (const current of budgets) current.remaining -= 1
 }
 
 async function sendRequest(request: QwenRequest, apiKey: string): Promise<unknown> {

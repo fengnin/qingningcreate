@@ -4,6 +4,7 @@ import { shape as s } from './modelOutputSchema.js'
 import { selectStoryEvidence } from './storyEvidence.js'
 import { activePreparationMaterial } from './storyPreparationContext.js'
 import { selectedExpansionNeeds, storyExpansionGuidance } from './storyBridgeReview.js'
+import { storyWritingMainlineReviewSchema } from './storyOutputSchemas.js'
 import type { ConfirmedCurve, StoryWritingDraft } from '../../shared/story-contract.js'
 
 type Entry = { id: string; sourceId: string; scope: 'author' | 'unknown' | 'future-design' | 'prose' | 'previous' | 'text'; quote: string; start: number; end: number }
@@ -103,7 +104,9 @@ export function writingContext(idea: string, curve: ConfirmedCurve, draft: Story
   const followingBeats = beats.slice(index + 1).map(({ id, kind, title, detail }) => ({ id, kind, title, detail }))
   const acceptedProse = draft.segments.slice(0, index).filter(s => s.status === 'accepted').map(({ id, label, text, authorship }) => ({ id, label, text, authorship: authorship ?? 'model' }))
   return {
-    brief: curve.brief, ...authority, currentBeat: { id: beat.id, kind: beat.kind, title: beat.title, detail: beat.detail },
+    brief: curve.brief, ...authority, designContract: curve.designContract ?? null,
+    designMainlineReview: curve.mainlineReview ?? null,
+    currentBeat: { id: beat.id, kind: beat.kind, title: beat.title, detail: beat.detail },
     nextBeatBoundary: followingBeats[0] ?? null,
     followingBeats, futureDesign: { executed: false, beats: followingBeats },
     isLast: index === beats.length - 1, acceptedProse,
@@ -115,6 +118,70 @@ export function writingContext(idea: string, curve: ConfirmedCurve, draft: Story
   }
 }
 type Context = ReturnType<typeof writingContext>
+
+export type WritingMainlineReview = {
+  verdict: 'supported' | 'drift' | 'uncertain'
+  reason: string
+  evidenceIds: string[]
+}
+
+/** Review the current proposal's relationship to the confirmed design only. */
+export async function reviewWritingMainline(context: Context, text: string, mode: 'segment' | 'complete' = 'segment'): Promise<WritingMainlineReview> {
+  const contract = context.designContract
+  if (!contract) return { verdict: 'supported', reason: '当前故事没有结构化设计契约，沿用既有正文流程。', evidenceIds: [] }
+  if (context.designMainlineReview?.status === 'unavailable' || context.designMainlineReview?.status === 'repair-failed') {
+    return { verdict: 'supported', reason: '故事设计主线审阅暂不可用，沿用正文流程；可稍后重试审阅。', evidenceIds: [] }
+  }
+  const catalog = [
+    { id: 'design-contract:goal', text: contract.goal.text, scope: 'goal' },
+    ...(contract.selectedDirection ? [{ id: 'design-contract:selected-direction', text: contract.selectedDirection, scope: 'direction' }] : []),
+    ...(contract.causalBridge ? [{ id: 'design-contract:causal-bridge', text: `${contract.causalBridge.method}；${contract.causalBridge.change}`, scope: 'causal-bridge' }] : []),
+    { id: `design-contract:node:${context.currentBeat.id}`, text: context.currentBeat.detail, scope: 'current-node' },
+    ...context.acceptedProse.map(segment => ({ id: `accepted:${segment.id}`, text: segment.text, scope: 'accepted-prose' })),
+  ]
+  const allowed = new Set(catalog.map(item => item.id))
+  let output: WritingMainlineReview
+  try {
+    output = await requestQwenJson({
+      systemPrompt: `你是故事正文的主线审阅员。${mode === 'complete' ? '现在审阅已经拼接完成的完整正文。' : '现在审阅当前段正文提案。'}只判断正文是否仍服务已确认的故事主线，严格输出JSON {verdict,reason,evidenceIds}。\n` +
+        `supported：当前段服务原始目标、作者选定方向、当前节点，或通过有动机的绕路/取舍继续让目标、风险、承诺或代价产生作用。新事件不因未逐字出现在设计里而失败。\n` +
+        `drift：${mode === 'complete' ? '完整正文的主要篇幅或结尾已经被无关任务接管，原目标只剩装饰性提及，且' : '新事件已经接管故事，替代原目标和当前节点，而且'}没有目标、风险、承诺、代价或动机上的连接。不能因为${mode === 'complete' ? '目标没有成功、结尾开放或' : '本段尚未完成目标、出现普通交通/服务/交流过程、或'}目标没有逐字复述而判drift。\n` +
+        `uncertain：输入不足以判断。未来节点只是停笔边界，不是已发生事实；不能把它当成正文事实。reason简要说明判断。evidenceIds只能从目录中选择；没有必要时为空。`,
+      userPrompt: JSON.stringify({
+        designContract: {
+          goal: contract.goal,
+          mainlineGoals: contract.mainlineGoals,
+          mainlineAnchors: contract.mainlineAnchors,
+          selectedDirection: contract.selectedDirection ?? null,
+          causalBridge: contract.causalBridge,
+          currentNode: contract.nodes.find(node => node.beatId === context.currentBeat.id) ?? null,
+        },
+        currentBeat: context.currentBeat,
+        acceptedProse: context.acceptedProse,
+        proposal: text,
+        evidenceCatalog: catalog,
+      }),
+      outputSchema: storyWritingMainlineReviewSchema,
+      diagnosticStage: 'story-writing-mainline-review', temperature: 0.1, maxTokens: 1200,
+    }) as WritingMainlineReview
+  } catch (error) {
+    const unavailableCodes = new Set(['QWEN_NOT_CONFIGURED', 'QWEN_TIMEOUT', 'QWEN_NETWORK_ERROR', 'QWEN_UPSTREAM_ERROR', 'QWEN_RATE_LIMITED', 'QWEN_REQUEST_BUDGET_EXHAUSTED'])
+    if (error instanceof AppError && unavailableCodes.has(error.code)) return {
+      verdict: 'supported',
+      reason: '本段主线审阅暂不可用，未作主线裁决；可在当前段重试审阅。',
+      evidenceIds: [],
+    }
+    if (error instanceof AppError) throw new AppError('本段主线审阅返回无效结果，请重试当前段。已采用正文仍保留。', 502, 'STORY_WRITING_MAINLINE_REVIEW_INVALID')
+    throw error
+  }
+  if (!['supported', 'drift', 'uncertain'].includes(output.verdict)
+    || typeof output.reason !== 'string'
+    || !Array.isArray(output.evidenceIds)
+    || output.evidenceIds.some(id => typeof id !== 'string' || !allowed.has(id))) {
+    throw new AppError('本段主线审阅返回了无效证据，请重试当前段。已采用正文仍保留。', 502, 'STORY_WRITING_MAINLINE_REVIEW_INVALID')
+  }
+  return output
+}
 
 const repairProblems = {
   'future-event': '本段停在当前节点范围内，把后续独有的新动作和结果留到后续；保留当前节点明确包含的直接结果。',

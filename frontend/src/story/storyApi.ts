@@ -91,6 +91,10 @@ export function requestStoryCoCreationStart(request: StoryCoCreationStartRequest
 export function requestPreparationAcceptance(request: import('../../../shared/story-preparation-request.js').StoryPreparationAcceptanceRequest): Promise<StoryCurveMutationResponse> {
   return postJson('/api/story/preparation/accept', request, parseStoryCurveMutationResponse)
 }
+
+export function requestDesignMainlineRetry(request: { storyId: string; revision: number; curveId: string }): Promise<StoryCurveMutationResponse> {
+  return postJson('/api/story/curve/mainline/retry', request, parseStoryCurveMutationResponse)
+}
 export function requestPreparationStoryDirections(request: import('../../../shared/story-preparation-request.js').StoryPreparationAcceptanceRequest): Promise<import('../../../shared/story-preparation.js').StoryPreparationStoryDirection[]> {
   return postJson('/api/story/preparation/story-directions', request, payload => {
     const r = expectRecord(payload)
@@ -703,7 +707,7 @@ function parseConfirmedCurve(value: unknown): ConfirmedCurve {
 
 type ParsedCurveFields = Pick<
   ProvisionalCurve,
-  'id' | 'title' | 'brief' | 'beats' | 'rejectedProposals' | 'design' | 'foundation' | 'generation' | 'clarifications' | 'reasoning' | 'preparation'
+  'id' | 'title' | 'brief' | 'beats' | 'rejectedProposals' | 'design' | 'designContract' | 'foundation' | 'generation' | 'clarifications' | 'reasoning' | 'preparation' | 'mainlineReview'
 >
 
 function parseCurveFields(record: Record<string, unknown>): ParsedCurveFields {
@@ -724,7 +728,44 @@ function parseCurveFields(record: Record<string, unknown>): ParsedCurveFields {
     ...(record.foundation === undefined ? {} : { foundation: parseStoryCurveFoundation(record.foundation) }),
     ...(record.generation === undefined ? {} : { generation: parseCurveGenerationMetadata(record.generation) }),
     ...(record.clarifications === undefined ? {} : { clarifications: parseClarifications(record.clarifications) }),
+    ...(record.mainlineReview === undefined ? {} : { mainlineReview: parseDesignMainlineReview(record.mainlineReview) }),
+    ...(record.designContract === undefined ? {} : { designContract: parseDesignContract(record.designContract) }),
   }
+}
+
+function parseDesignContract(value: unknown): NonNullable<ProvisionalCurve['designContract']> {
+  const record = expectRecord(value), goal = expectRecord(record.goal)
+  if (record.protocol !== 1 || record.authority !== 'future-design' || !Array.isArray(record.nodes)
+    || !Array.isArray(record.mainlineGoals) || !Array.isArray(record.mainlineAnchors)) throwInvalidResponse()
+  const quote = (value: unknown) => {
+    const entry = expectRecord(value)
+    return { sourceId: readText(entry, 'sourceId'), quote: readText(entry, 'quote') }
+  }
+  const bridge = record.causalBridge === null ? null : expectRecord(record.causalBridge)
+  return { protocol: 1, authority: 'future-design', sourceHash: readText(record, 'sourceHash'), goal: { text: readText(goal, 'text'), sourceIds: readIdentifierList(goal, 'sourceIds') },
+    mainlineGoals: record.mainlineGoals.map(quote),
+    mainlineAnchors: record.mainlineAnchors.map(value => ({ ...quote(value), kind: readText(expectRecord(value), 'kind') })),
+    ...(record.selectedDirection === undefined ? {} : { selectedDirection: readText(record, 'selectedDirection') }),
+    causalBridge: bridge ? { method: readText(bridge, 'method'), change: readText(bridge, 'change') } : null,
+    nodes: record.nodes.map(value => {
+      const node = expectRecord(value), kind = node.kind
+      if (kind !== 'current-state' && kind !== 'character-tension' && kind !== 'trigger' && kind !== 'escalation'
+        && kind !== 'midpoint-turn' && kind !== 'climax-choice' && kind !== 'resolution') throwInvalidResponse()
+      return { beatId: readText(node, 'beatId'), kind, text: readText(node, 'text'), objective: readText(node, 'objective'),
+        dependsOn: readIdentifierList(node, 'dependsOn'), sourceIds: readIdentifierList(node, 'sourceIds'),
+        ...(node.action === undefined ? {} : { action: node.action === null ? null : readText(node, 'action') }),
+        ...(node.expectedChange === undefined ? {} : { expectedChange: node.expectedChange === null ? null : readText(node, 'expectedChange') }) }
+    }) }
+}
+
+function parseDesignMainlineReview(value: unknown): NonNullable<ProvisionalCurve['mainlineReview']> {
+  const record = expectRecord(value)
+  if (!['supported', 'repaired', 'mainline-drift', 'uncertain', 'unavailable', 'repair-failed'].includes(String(record.status)) || !Array.isArray(record.reviewedSteps)) throwInvalidResponse()
+  return { status: record.status as NonNullable<ProvisionalCurve['mainlineReview']>['status'], message: readText(record, 'message'),
+    repairedBeatKinds: readIdentifierList(record, 'repairedBeatKinds'), reviewedSteps: record.reviewedSteps.map(value => {
+      const step = expectRecord(value)
+      return { kind: readText(step, 'kind'), text: readText(step, 'text') }
+    }) }
 }
 
 function parseClarifications(value: unknown): StoryAuthorClarification[] {

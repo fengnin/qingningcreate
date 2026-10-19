@@ -247,6 +247,8 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
   }
   if (curve.preparation?.status === 'needs-review') return <PreparationReview session={session} />
   const acceptedFutureChoice = curve.preparation?.candidates.find(candidate => curve.preparation?.acceptedCandidateIds.includes(candidate.id))?.futureChoice
+  const mainlineReview = curve.mainlineReview
+  const mainlineReviewCurrent = mainlineReview && JSON.stringify(mainlineReview.reviewedSteps) === JSON.stringify(curve.beats.map(beat => ({ kind: beat.kind, text: beat.detail })))
 
   const beginEdit = (beat: CurveBeat) => {
     setEditingBeatId(beat.id)
@@ -342,6 +344,7 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
             <div className="curve-brief-summary"><span>创意方向</span><strong>{getBriefSummary(curve.brief)}</strong></div>
           </div>
           {session.stageError && <p className="cocreation-error" role="alert"><CircleAlert size={16} /> {session.stageError}</p>}
+          {mainlineReview && !session.confirmedCurve && <div className="curve-generation-notice" role="status"><CircleAlert size={15} /><span><strong>故事设计主线检查</strong>{mainlineReviewCurrent ? mainlineReview.message : '设计已修改，上次主线审阅不再代表当前版本。'}{!isLoading && (!mainlineReviewCurrent || !['supported', 'repaired'].includes(mainlineReview.status)) && <button className="text-action" type="button" onClick={() => void session.retryDesignMainline()} disabled={Boolean(session.pendingCurveRegeneration)}><RefreshCcw size={14} /> 重试主线审阅</button>}</span></div>}
           {curve.generation && <div className={`curve-generation-notice ${curve.generation.origin === 'fact-preserving-fallback' ? 'is-fallback' : ''}`}><Sparkles size={15} /><span><strong>{curve.generation.origin === 'fact-preserving-fallback' ? '已使用保留原始材料的结构草案' : '已完成一版结构提案'}</strong>{curve.generation.notice ?? '新增内容仍是提案，尚未成为故事事实。'}</span></div>}
           {(curve.preparation?.authorReview?.selectedStoryDirection || acceptedFutureChoice) && <p className="curve-future-choice"><strong>{curve.preparation?.authorReview?.selectedStoryDirection ? '你选定的故事走向' : '选定方向可能推向'}</strong><span>{curve.preparation?.authorReview?.selectedStoryDirection || acceptedFutureChoice}</span><small>这是本版构思的起点；后续可以通过编辑和局部重做调整。</small></p>}
           {curve.preparation && <details className="story-review-details"><summary>查看已确认的创意方向</summary>{curve.preparation.candidates.filter(c => curve.preparation!.acceptedCandidateIds.includes(c.id)).map(c => {

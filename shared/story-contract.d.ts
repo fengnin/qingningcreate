@@ -281,6 +281,31 @@ export interface CurveBeat {
   causalAnchor?: string
 }
 
+/** Server-owned design contract compiled before the author confirms the curve.
+ * It describes proposed dependencies and changes; it is never execution state. */
+export interface StoryDesignContract {
+  protocol: 1
+  authority: 'future-design'
+  /** Fingerprint of active source material and selected design, not prose. */
+  sourceHash: string
+  goal: { text: string; sourceIds: string[] }
+  mainlineGoals: { sourceId: string; quote: string }[]
+  mainlineAnchors: { sourceId: string; quote: string; kind: string }[]
+  selectedDirection?: string
+  causalBridge: { method: string; change: string } | null
+  nodes: Array<{
+    beatId: string
+    kind: CurveBeatKind
+    /** Version binding: a changed node text makes this entry historical. */
+    text: string
+    objective: string
+    dependsOn: string[]
+    action?: string | null
+    expectedChange?: string | null
+    sourceIds: string[]
+  }>
+}
+
 export type AuthorInstructionKind = 'replace' | 'remove' | 'regenerate' | 'author-revision' | 'park-fact'
 
 /** A deliberate author-level edit. It is never a character action. */
@@ -299,6 +324,13 @@ export type ProvisionalCurveStatus = 'draft' | 'confirmed' | 'superseded'
  * never path facts, until the author confirms the whole curve.
  */
 export interface ProvisionalCurve {
+  /** Advisory design-only review; never a gate for prose or author confirmation. */
+  mainlineReview?: {
+    status: 'supported' | 'repaired' | 'mainline-drift' | 'uncertain' | 'unavailable' | 'repair-failed'
+    message: string
+    reviewedSteps: { kind: string; text: string }[]
+    repairedBeatKinds: string[]
+  }
   preparation?: import('./story-preparation.js').StoryPreparation
   /** Absent in historical/local-disabled curves. Never auto-upgrade history. */
   reasoning?: import('./story-reasoning-contract.js').StoryReasoningProposal
@@ -316,6 +348,8 @@ export interface ProvisionalCurve {
   instructions: AuthorInstruction[]
   clarifications?: StoryAuthorClarification[]
   design?: StoryDesignRecord
+  /** Compiled proposal dependencies; does not assert that any event occurred. */
+  designContract?: StoryDesignContract
   /** Concrete foundation assembled before confirmation; legacy sessions may omit it. */
   foundation?: StoryCurveFoundation
   generation?: CurveGenerationMetadata
@@ -334,6 +368,9 @@ export interface ConfirmedCurve {
   rejectedProposals?: CurveBeat[]
   clarifications?: StoryAuthorClarification[]
   design?: StoryDesignRecord
+  designContract?: StoryDesignContract
+  /** Advisory preparation mainline review status; unavailable must not deadlock writing. */
+  mainlineReview?: NonNullable<ProvisionalCurve['mainlineReview']>
   /** Frozen design foundation reviewed with the provisional curve. */
   foundation?: StoryCurveFoundation
   generation?: CurveGenerationMetadata

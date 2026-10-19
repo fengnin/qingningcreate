@@ -43,7 +43,7 @@ export const preparationOutputSchemas = {
     text: s.text, question: s.text, materialIds: refs }), 0, 8) }),
   storyDesign: s.object({ steps: s.array(s.object({
     kind: s.enum('current-state', 'trigger', 'escalation', 'midpoint-turn', 'climax-choice', 'resolution'),
-    text: s.text, materialIds: refs,
+    text: s.text, materialIds: refs, action: s.either(s.text, s.nil), expectedChange: s.either(s.text, s.nil),
   }), 3, 6) }),
 }
 
@@ -77,6 +77,11 @@ export function factReviewOutputSchema(candidateIds: string[], materialIds: stri
 export const qualityOutputSchema = (criteria: string[], issue: OutputSchema = s.text): OutputSchema => s.object({
   checks: s.array(s.object({ criterion: s.enum(...criteria), passed: s.bool, evidence: s.text }), criteria.length, criteria.length),
   issues: s.array(issue, 0, 8),
+})
+export const storyWritingMainlineReviewSchema = s.object({
+  verdict: s.enum('supported', 'drift', 'uncertain'),
+  reason: s.text,
+  evidenceIds: refs,
 })
 export const preparationQualitySchema = qualityOutputSchema(['facts', 'causality', 'requirements', 'author-control', 'questions'])
 export const clarificationReviewSchema = s.object({ grounded: s.bool, dependsOnUnconfirmedPremise: s.bool })

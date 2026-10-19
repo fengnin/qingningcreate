@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { currentStoryDesignContract } from './storyDesignContract.js'
 import { attachReasoningQuestions, previewReasoningRecovery, acceptReasoningRecovery } from './storyReasoningRecovery.js'
 import { generateInitialReasoningCurve, mapInitialReasoningProposal } from './storyInitialReasoning.js'
 import { acceptStoryReasoningDesign } from './storyReasoningContract.js'
@@ -1541,7 +1542,9 @@ export function confirmProvisionalCurve(curve: ProvisionalCurve, acceptedDesignP
       provisionalCurveId: confirmed.id,
       title: confirmed.title,
       ...(confirmed.preparation ? { preparation: structuredClone(confirmed.preparation) } : {}),
+      ...(currentStoryDesignContract(confirmed) ? { designContract: structuredClone(currentStoryDesignContract(confirmed)!) } : {}),
       ...(confirmed.reasoning ? { reasoning: structuredClone(confirmed.reasoning) } : {}),
+      ...(confirmed.mainlineReview ? { mainlineReview: structuredClone(confirmed.mainlineReview) } : {}),
       brief: confirmed.brief,
       beats: confirmed.beats,
       ...(confirmed.design ? { design: confirmed.design } : {}),

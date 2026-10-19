@@ -7,6 +7,7 @@ import {
   requestStoryTurnOptionRefinement,
   requestStoryCoCreationStart,
   requestPreparationAcceptance,
+  requestDesignMainlineRetry,
   requestPreparationRevision,
   requestPreparationSupplement,
   requestCurveBeatUpdate,
@@ -69,6 +70,7 @@ interface ConflictCoreGenerationOptions {
 }
 
 export interface StorySessionActions {
+  retryDesignMainline: () => Promise<void>
   reviewPreparationSupplement: (supplementId: string, decision: 'accepted-design' | 'rejected' | 'keep-unknown', authorText: string) => Promise<void>
   acceptPreparation: (candidateIds: string[], authorReview?: import('../../../shared/story-preparation.js').StoryPreparationReview) => Promise<void>
   revisePreparation: (decision: 'reject' | 'regenerate' | 'revise', candidateId?: string, authorAction?: string) => Promise<void>
@@ -199,6 +201,7 @@ function createCoCreationActions(
   | 'updateCreativeBrief'
   | 'generateProvisionalCurve'
   | 'acceptPreparation'
+  | 'retryDesignMainline'
   | 'revisePreparation'
   | 'reviewPreparationSupplement'
   | 'updateCurveBeat'
@@ -264,6 +267,9 @@ function createCoCreationActions(
 
   const acceptPreparation = async (candidateIds: string[], authorReview?: import('../../../shared/story-preparation.js').StoryPreparationReview) => {
     await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => requestPreparationAcceptance({ storyId, revision, curveId, acceptedCandidateIds: candidateIds, ...(authorReview ? { authorReview } : {}) }))
+  }
+  const retryDesignMainline = async () => {
+    await runCurveMutationRequest(state, stage, requestDesignMainlineRetry)
   }
   const reviewPreparationSupplement = async (supplementId: string, decision: 'accepted-design' | 'rejected' | 'keep-unknown', authorText: string) => {
     await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => requestPreparationSupplement({ storyId, revision, curveId, supplementId, decision, authorText }))
@@ -408,6 +414,7 @@ function createCoCreationActions(
     updateCreativeBrief: state.setCreativeBrief,
     generateProvisionalCurve,
     acceptPreparation,
+    retryDesignMainline,
     revisePreparation,
     reviewPreparationSupplement,
     updateCurveBeat,

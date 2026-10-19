@@ -41,6 +41,7 @@ import {
 } from './storyClarification.js'
 import { randomUUID } from 'node:crypto'
 import { generateStoryPreparation, generateCurveFromPreparation, parsePreparationReview, reviseStoryPreparation, acceptPreparation } from './storyPreparation.js'
+import { retryPreparationMainline } from './storyPreparationDesign.js'
 import { suggestPreparationStoryDirections } from './storyPreparationDirections.js'
 import { assembleWrittenStory, reviseWritingDraft } from './storyWriting.js'
 import { parseExplanationWording, suggestPreparationExplanation } from './storyPreparationExplanation.js'
@@ -3100,6 +3101,18 @@ export async function acceptSessionPreparation(request: StoryPreparationAcceptan
   next.seed = { ...next.seed, lockedGoal: mapped.reasoning?.goal?.text ?? null }
   const saved = commitClarificationSessionChanges(current, next)
   return createCurveMutationResponse(saved, { curve: mapped, affectedBeatIds: mapped.beats.map(b => b.id) })
+}
+
+export async function retrySessionDesignMainline(request: StoryCurveStartSpineRequest): Promise<StoryCurveMutationResponse> {
+  const current = getStorySession(request.storyId, request.revision)
+  const curve = requireDraftCurve(current, request.curveId)
+  if (current.confirmedCurve || current.pendingCurveRegeneration) throw new AppError('请先处理当前设计版本；已确认故事不会被主线修复覆盖。', 409, 'STORY_DESIGN_MAINLINE_LOCKED')
+  const mapped = await retryPreparationMainline(curve)
+  assertStorySessionRevision(current, request.revision)
+  const next = structuredClone(current)
+  next.provisionalCurve = mapped
+  const saved = commitClarificationSessionChanges(current, next)
+  return createCurveMutationResponse(saved, { curve: mapped, affectedBeatIds: mapped.beats.filter((beat, i) => beat.detail !== curve.beats[i]?.detail).map(beat => beat.id) })
 }
 
 export async function suggestSessionStoryDirections(request: StoryPreparationAcceptanceRequest) {

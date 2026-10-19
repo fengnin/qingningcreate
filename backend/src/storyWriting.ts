@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { AppError, requestQwenJson } from './qwen.js'
 import { shape as s } from './modelOutputSchema.js'
 import { storyCreativeIntentGuidance } from './storyCreativeIntent.js'
-import { writingContext, writingAuthorityGuidance, storyExpansionGuidance } from './storyWritingProtection.js'
+import { reviewWritingMainline, writingContext, writingAuthorityGuidance, storyExpansionGuidance } from './storyWritingProtection.js'
 import type { ConfirmedCurve, GeneratedStory, StoryWritingDraft, StoryWritingRequest } from '../../shared/story-contract.js'
 
 export const storySegmentWritingPrompt = `你是与作者合作的故事写作者。只将当前节点展开为可以直接阅读的故事正文，严格输出JSON {text}，不写提纲、分析、标签或给作者的任务。
@@ -41,7 +41,7 @@ export async function reviseWritingDraft(
     const index = draft.segments.length
     const beat = beats[index]
     if (!beat) throw new AppError('故事段落与当前设计不一致，请返回设计查看。', 409, 'STORY_WRITING_NOT_READY')
-    const text = await generateSegment(idea, curve, draft, index)
+    const text = await generateAndReviewSegment(idea, curve, draft, index)
     draft.segments.push({ id: `segment-${randomUUID()}`, beatId: beat.id, label: beat.title, text, status: 'pending', authorship: 'model' })
     return draft
   }
@@ -52,14 +52,23 @@ export async function reviseWritingDraft(
     if (draft.segments.slice(0, index).some(s => s.status !== 'accepted')) {
       throw new AppError('请按顺序采用正文。', 409, 'STORY_SESSION_CONFLICT')
     }
-    segment.status = 'accepted'
-    draft.complete = draft.segments.length === beats.length && draft.segments.every(item => item.status === 'accepted')
-    return draft
+    const candidate = structuredClone(draft)
+    candidate.segments[index]!.status = 'accepted'
+    const isComplete = candidate.segments.length === beats.length && candidate.segments.every(item => item.status === 'accepted')
+    if (isComplete) {
+      const finalContext = { ...writingContext(idea, curve, candidate, index),
+        acceptedProse: candidate.segments.map(({ id, label, text, authorship }) => ({ id, label, text, authorship: authorship ?? 'model' })) }
+      const review = await reviewWritingMainline(finalContext, candidate.segments.map(item => item.text).join('\n\n'), 'complete')
+      if (review.verdict === 'drift') throw new AppError(`完整故事偏离已确认主线：${review.reason} 请重写或修改最后一段。已采用正文仍保留。`, 502, 'STORY_WRITING_COMPLETE_MAINLINE_DRIFT')
+      if (review.verdict === 'uncertain') throw new AppError(`完整故事主线关系暂时无法确认：${review.reason} 请重试最终审阅或修改正文。已采用正文仍保留。`, 502, 'STORY_WRITING_COMPLETE_MAINLINE_UNCERTAIN')
+    }
+    candidate.complete = isComplete
+    return candidate
   }
   // Rewriting an earlier segment invalidates dependent prose and state, after success only.
   const prefix: StoryWritingDraft = { segments: draft.segments.slice(0, index + 1), complete: false,
     continuity: { snapshots: (draft.continuity?.snapshots ?? []).filter(s => draft.segments.slice(0, index).some(p => p.id === s.segmentId)) } }
-  const text = request.action === 'edit' ? request.text! : await generateSegment(idea, curve, prefix, index, request.feedback)
+  const text = request.action === 'edit' ? request.text! : await generateAndReviewSegment(idea, curve, prefix, index, request.feedback)
   if (typeof text !== 'string' || !text.trim() || text.length > 6000) throw new AppError('请填写1至6000字的正文。', 400, 'INVALID_REQUEST')
   return { ...prefix, segments: [...prefix.segments.slice(0, index), { ...segment, text, status: 'pending', authorship: request.action === 'edit' ? 'author' : 'model' }] }
 }
@@ -73,6 +82,18 @@ async function generateSegment(idea: string, curve: ConfirmedCurve, draft: Story
     throw new AppError('本段未生成有效正文，请重试。已采用正文仍保留。', 502, 'INVALID_MODEL_OUTPUT')
   }
   return raw.text
+}
+
+async function generateAndReviewSegment(idea: string, curve: ConfirmedCurve, draft: StoryWritingDraft, index: number, feedback?: string): Promise<string> {
+  const text = await generateSegment(idea, curve, draft, index, feedback)
+  const review = await reviewWritingMainline(writingContext(idea, curve, draft, index, feedback), text)
+  if (review.verdict === 'drift') {
+    throw new AppError(`本段提案偏离已确认主线：${review.reason} 请重试当前段。已采用正文仍保留。`, 502, 'STORY_WRITING_MAINLINE_DRIFT')
+  }
+  if (review.verdict === 'uncertain') {
+    throw new AppError(`本段主线关系暂时无法确认：${review.reason} 请重试当前段或人工修改。已采用正文仍保留。`, 502, 'STORY_WRITING_MAINLINE_UNCERTAIN')
+  }
+  return text
 }
 
 function beatScope(kind: ConfirmedCurve['beats'][number]['kind']): string {
