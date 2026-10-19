@@ -83,6 +83,14 @@ export const storyWritingMainlineReviewSchema = s.object({
   reason: s.text,
   evidenceIds: refs,
 })
+export const storyWritingConsistencyReviewSchema = s.object({
+  verdict: s.enum('supported', 'conflict', 'uncertain'),
+  issues: s.array(s.object({
+    kind: s.enum('state-reversal', 'repeated-completion', 'time-order', 'location-reversal', 'possession-reversal'),
+    evidenceIds: refs,
+    reason: s.text,
+  }), 0, 6),
+})
 export const preparationQualitySchema = qualityOutputSchema(['facts', 'causality', 'requirements', 'author-control', 'questions'])
 export const clarificationReviewSchema = s.object({ grounded: s.bool, dependsOnUnconfirmedPremise: s.bool })
 export const headTailReviewSchema = s.object({ reviews: s.array(s.object({ optionId: s.text,

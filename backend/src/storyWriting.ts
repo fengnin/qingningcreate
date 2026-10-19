@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { AppError, requestQwenJson } from './qwen.js'
 import { shape as s } from './modelOutputSchema.js'
 import { storyCreativeIntentGuidance } from './storyCreativeIntent.js'
-import { reviewWritingMainline, writingContext, writingAuthorityGuidance, storyExpansionGuidance } from './storyWritingProtection.js'
+import { reviewCompleteWritingConsistency, reviewWritingMainline, writingContext, writingAuthorityGuidance, storyExpansionGuidance } from './storyWritingProtection.js'
 import type { ConfirmedCurve, GeneratedStory, StoryWritingDraft, StoryWritingRequest } from '../../shared/story-contract.js'
 
 export const storySegmentWritingPrompt = `你是与作者合作的故事写作者。只将当前节点展开为可以直接阅读的故事正文，严格输出JSON {text}，不写提纲、分析、标签或给作者的任务。
@@ -61,6 +61,9 @@ export async function reviseWritingDraft(
       const review = await reviewWritingMainline(finalContext, candidate.segments.map(item => item.text).join('\n\n'), 'complete')
       if (review.verdict === 'drift') throw new AppError(`完整故事偏离已确认主线：${review.reason} 请重写或修改最后一段。已采用正文仍保留。`, 502, 'STORY_WRITING_COMPLETE_MAINLINE_DRIFT')
       if (review.verdict === 'uncertain') throw new AppError(`完整故事主线关系暂时无法确认：${review.reason} 请重试最终审阅或修改正文。已采用正文仍保留。`, 502, 'STORY_WRITING_COMPLETE_MAINLINE_UNCERTAIN')
+      const consistency = await reviewCompleteWritingConsistency(finalContext, candidate.segments.map(item => item.text).join('\n\n'))
+      if (consistency.verdict === 'conflict') throw new AppError(`完整故事存在前后事实矛盾：${consistency.issues.map(issue => issue.reason).join('；')} 请修改相关段落。已采用正文仍保留。`, 502, 'STORY_WRITING_COMPLETE_CONSISTENCY_CONFLICT')
+      if (consistency.verdict === 'uncertain') throw new AppError('完整故事事实关系暂时无法确认，请重试最终审阅或人工检查。已采用正文仍保留。', 502, 'STORY_WRITING_COMPLETE_CONSISTENCY_UNCERTAIN')
     }
     candidate.complete = isComplete
     return candidate

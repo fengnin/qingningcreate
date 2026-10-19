@@ -4,7 +4,7 @@ import { shape as s } from './modelOutputSchema.js'
 import { selectStoryEvidence } from './storyEvidence.js'
 import { activePreparationMaterial } from './storyPreparationContext.js'
 import { selectedExpansionNeeds, storyExpansionGuidance } from './storyBridgeReview.js'
-import { storyWritingMainlineReviewSchema } from './storyOutputSchemas.js'
+import { storyWritingConsistencyReviewSchema, storyWritingMainlineReviewSchema } from './storyOutputSchemas.js'
 import type { ConfirmedCurve, StoryWritingDraft } from '../../shared/story-contract.js'
 
 type Entry = { id: string; sourceId: string; scope: 'author' | 'unknown' | 'future-design' | 'prose' | 'previous' | 'text'; quote: string; start: number; end: number }
@@ -123,6 +123,43 @@ export type WritingMainlineReview = {
   verdict: 'supported' | 'drift' | 'uncertain'
   reason: string
   evidenceIds: string[]
+}
+
+export type WritingConsistencyReview = {
+  verdict: 'supported' | 'conflict' | 'uncertain'
+  issues: Array<{ kind: 'state-reversal' | 'repeated-completion' | 'time-order' | 'location-reversal' | 'possession-reversal'; evidenceIds: string[]; reason: string }>
+}
+
+/** Final-only, conservative factual audit. It does not judge style or plot quality. */
+export async function reviewCompleteWritingConsistency(context: Context, text: string): Promise<WritingConsistencyReview> {
+  if (!context.designContract) return { verdict: 'supported', issues: [] }
+  const catalog = excerpts('complete-text', 'text', text)
+  const allowed = new Set(catalog.map(entry => entry.id))
+  try {
+    const output = await requestQwenJson({
+      systemPrompt: `你是完整故事的事实连续性审阅员。严格输出JSON {verdict,issues}。只找有明确正文证据的前后矛盾，不审文风、不审主线、不要求目标成功。\n` +
+        `conflict仅用于：已明确完成的动作又被当作未完成；明确否定后直接肯定同一事实；人物位置、物品持有状态或时间顺序直接反转；同一阶段的同一动作重复完成且没有新阶段或重新尝试。\n` +
+        `不要把合理的新动作、重新确认、回忆、设想、尝试、开放结尾或有阶段变化的重复判为矛盾。无法确认时用uncertain。每个issue最多引用4个目录编号，必须来自同一正文目录。没有明确矛盾时verdict=supported且issues为空。`,
+      userPrompt: JSON.stringify({
+        designContract: context.designContract,
+        evidenceCatalog: catalog,
+        completeText: text,
+      }),
+      outputSchema: storyWritingConsistencyReviewSchema,
+      diagnosticStage: 'story-writing-consistency-review', temperature: 0.1, maxTokens: 1600,
+    }) as WritingConsistencyReview
+    if (!['supported', 'conflict', 'uncertain'].includes(output.verdict) || !Array.isArray(output.issues)
+      || output.issues.some(issue => !Array.isArray(issue.evidenceIds) || issue.evidenceIds.length > 4
+        || issue.evidenceIds.some(id => typeof id !== 'string' || !allowed.has(id)))) {
+      throw new AppError('完整故事事实审阅返回了无效证据，请重试。', 502, 'STORY_WRITING_CONSISTENCY_INVALID')
+    }
+    return output
+  } catch (error) {
+    const unavailableCodes = new Set(['QWEN_NOT_CONFIGURED', 'QWEN_TIMEOUT', 'QWEN_NETWORK_ERROR', 'QWEN_UPSTREAM_ERROR', 'QWEN_RATE_LIMITED', 'QWEN_REQUEST_BUDGET_EXHAUSTED'])
+    if (error instanceof AppError && unavailableCodes.has(error.code)) return { verdict: 'supported', issues: [] }
+    if (error instanceof AppError) throw new AppError('完整故事事实审阅暂不可用，请重试最终审阅。已采用正文仍保留。', 502, 'STORY_WRITING_CONSISTENCY_REVIEW_INVALID')
+    throw error
+  }
 }
 
 /** Review the current proposal's relationship to the confirmed design only. */
