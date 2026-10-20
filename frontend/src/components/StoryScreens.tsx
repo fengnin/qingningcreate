@@ -80,9 +80,8 @@ export function OpeningScreen({ session }: { session: StorySession }) {
         <span className="model-label"><span className="status-dot" /> 共创助手</span>
       </header>
       <section className="opening-content">
-        {session.restoreError && <p className="cocreation-error" role="alert"><CircleAlert size={16} /> {session.restoreError} <button className="text-action" type="button" onClick={() => void session.retryRestoreSession()}>重试恢复</button></p>}
         <p className="opening-kicker"><Sparkles size={15} /> 从一句话开始</p>
-        <h1>时光川行<br />青柠创作平台</h1>
+        <h1>青柠时光创作平台</h1>
         <p>先由你定下创作方向，再一起选择故事走向、审阅故事设计；确认主线后，系统才按这条路径逐段写成故事。</p>
         <label className="idea-field">
           <span className="idea-field-label">此刻浮现的想法</span>
@@ -91,15 +90,14 @@ export function OpeningScreen({ session }: { session: StorySession }) {
               onChange={(event) => session.updateIdea(event.target.value)}
               placeholder="例如：青柠想在家里给朋友准备一场寻宝生日惊喜。"
               maxLength={maximumStoryIdeaLength}
-              disabled={session.restoreLoading}
             />
           <span className="field-footer">
             <button className="text-action" type="button" onClick={session.useExample}><RefreshCcw size={15} /> 换个示例</button>
             <small>{session.idea.length} / {maximumStoryIdeaLength}</small>
           </span>
         </label>
-        <button className="primary-action opening-action" type="button" onClick={session.openCreativeBrief} disabled={!session.trimmedIdea || session.restoreLoading}>
-          {session.restoreLoading ? '正在恢复上次会话…' : '先定创意方向'} {!session.restoreLoading && <ArrowRight size={18} />}
+        <button className="primary-action opening-action" type="button" onClick={session.openCreativeBrief} disabled={!session.trimmedIdea}>
+          先定创意方向 <ArrowRight size={18} />
         </button>
       </section>
       <footer className="opening-footer"><StoryJourney current={0} /></footer>
@@ -1269,5 +1267,5 @@ function StageIcon({ step, size }: { step: StoryStep; size: number }) {
 }
 
 function Brand({ compact = false }: { compact?: boolean }) {
-  return <div className={`brand ${compact ? 'brand-compact' : ''}`}><span className="brand-mark"><BookOpen size={compact ? 17 : 20} /></span><span><strong>时光川行</strong><small>青柠创作平台</small></span></div>
+  return <div className={`brand ${compact ? 'brand-compact' : ''}`}><span className="brand-mark"><BookOpen size={compact ? 17 : 20} /></span><span><strong>青柠时光创作平台</strong></span></div>
 }

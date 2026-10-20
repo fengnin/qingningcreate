@@ -49,7 +49,6 @@ import type {
   StorySeed,
   StorySourceFact,
   StoryTransition,
-  StoryVariationAxis,
 } from '../../shared/story-contract.js'
 
 const maximumCurveBeatLength = 220
@@ -198,13 +197,6 @@ const dramaticForceLabels: Record<DramaticForce, string> = {
   surprise: '意外',
   contrast: '反差',
   'relationship-tension': '关系拉扯',
-}
-
-const variationAxisLabels: Record<StoryVariationAxis, string> = {
-  time: '时机',
-  resource: '资源',
-  relationship: '关系',
-  commitment: '承诺',
 }
 
 interface FallbackStoryMaterial {
@@ -1695,8 +1687,6 @@ export function materializeConfirmedCurve(
   const climaxAction = createConfirmedClimaxAction(foundation, beats.climax)
   const approach = createConfirmedApproach(foundation)
   const predicament = createConfirmedPredicament(
-    confirmedCurve,
-    beats,
     foundation,
     confirmedGoal,
     curveFacts,
@@ -1860,10 +1850,6 @@ function getInitialCurveBeatIds(curve: ConfirmedCurve, beatIds: readonly string[
   })
 }
 
-function isInitialCurveBeat(kind: CurveBeatKind): boolean {
-  return initialNarrativeBeatKinds.includes(kind)
-}
-
 function createConfirmedClimaxAction(
   foundation: NonNullable<ConfirmedCurve['foundation']>,
   climax: CurveBeat,
@@ -1887,8 +1873,6 @@ function createConfirmedApproach(foundation: NonNullable<ConfirmedCurve['foundat
 }
 
 function createConfirmedPredicament(
-  curve: ConfirmedCurve,
-  beats: ConfirmedCurveBeats,
   foundation: NonNullable<ConfirmedCurve['foundation']>,
   confirmedGoal: string,
   facts: StoryFact[],
@@ -3120,10 +3104,6 @@ function getCreativeDirectionEvidenceRequirements(brief: CreativeBrief): Creativ
   return requirements
 }
 
-function hasStableCreativeDirection(beats: readonly CurveBeat[], brief: CreativeBrief): boolean {
-  return !getCreativeDirectionValidationFailure(beats, brief)
-}
-
 function parseModelCurveFoundation(value: unknown): StoryCurveFoundation | undefined {
   if (!isRecord(value)) return undefined
   const conflictCore = isRecord(value.conflictCore) ? value.conflictCore : undefined
@@ -3534,7 +3514,6 @@ function getFallbackTension(subject: string, goal: string, brief: CreativeBrief,
   const anchor = hasMaterial ? getConcreteMaterialHandle(material, goal, brief) : getDirectionAnchor(brief, goal)
   const goalPhrase = getGoalPhrase(goal)
   const goalDecision = getGoalDecisionPhrase(goal)
-  const goalObject = getGoalObject(goal)
   const goalAction = getWantGoal(goal)
   const commitment = hasCommitment
     ? getConcreteMaterialHandle(commitmentSource, goal, brief)
@@ -3642,7 +3621,6 @@ function getFallbackEscalation(subject: string, goal: string, brief: CreativeBri
   const hasCommitment = !isPlaceholderMaterial(commitmentSource, goal)
   const anchor = hasMaterial ? getConcreteMaterialHandle(material, goal, brief) : getDirectionAnchor(brief, goal)
   const goalPhrase = getGoalPhrase(goal)
-  const goalObject = getGoalObject(goal)
   const commitment = hasCommitment
     ? getConcreteMaterialHandle(commitmentSource, goal, brief)
     : getDirectionAnchor(brief, goal)
@@ -4083,19 +4061,8 @@ function getDirectionAnchor(brief: CreativeBrief, goal: string): string {
   return `主角原本最依赖的${goalPhrase}安排方式`
 }
 
-function stripLeadingLocationMarker(value: string): string {
-  return value.replace(/^(?:在|于)/u, '')
-}
-
 function shortenCurveContext(value: string): string {
   return compactCausalMaterial(value, '此前的作者决定')
-}
-
-function extractCausalConsequence(value: string): string {
-  // System proposals usually quote the material they build on. Removing that
-  // quoted premise before selecting a clause keeps the next node focused on
-  // the consequence, instead of recursively embedding the whole prior node.
-  return compactCausalMaterial(value, '上一步暴露的后果')
 }
 
 function getCausalAnchor(curve: ProvisionalCurve, target: CurveBeat, fallback: string): string {
@@ -4172,20 +4139,6 @@ function compactGeneratedConsequence(value: string, fallback: string): string {
   return compactAuthorMaterial(candidate) || compactCausalMaterial(candidate, fallback)
 }
 
-function getCurveVariationAxis(brief: CreativeBrief): StoryVariationAxis {
-  if (brief.dramaticForces.includes('relationship-tension')) return 'relationship'
-  if (brief.dramaticForces.includes('cost')) return 'commitment'
-  if (brief.dramaticForces.includes('surprise')) return 'time'
-  return 'commitment'
-}
-
-function joinCurveDetails(beats: Array<CurveBeat | undefined>): string {
-  return beats
-    .filter((beat): beat is CurveBeat => Boolean(beat))
-    .map((beat) => beat.detail)
-    .join(' ')
-}
-
 function getStorySubject(seed: StorySeed): string {
   return seed.subject.trim() || '主角'
 }
@@ -4216,24 +4169,6 @@ function applyCurrentCurveEditToSeed<TCurve extends Pick<ProvisionalCurve | Conf
 
 function getCurrentState(seed: StorySeed, fallback: string): string {
   return seed.activeSituation.trim() || fallback.trim()
-}
-
-function getFallbackCurrentStateDetail(
-  seed: StorySeed,
-  fallback: string,
-  sourceFacts: readonly StorySourceFact[] = [],
-): string {
-  const currentState = getCurrentState(seed, fallback)
-  const lockedGoal = seed.lockedGoal?.trim()
-  if (!lockedGoal) return currentState
-  const isRichSource = sourceFacts.length >= 3 || currentState.length > 48
-  if (!isRichSource && currentState.length <= 72) return currentState
-  const conciseMaterial = sourceFacts.length
-    ? sourceFacts.slice(0, 2).map((fact) => fact.text.trim()).filter(Boolean).join('；')
-    : currentState
-  return conciseMaterial && conciseMaterial !== currentState
-    ? `${conciseMaterial}；当前要决定：${lockedGoal}`
-    : `${currentState}（当前目标：${lockedGoal}）`
 }
 
 function getShortIdeaLabel(value: string): string {
@@ -4310,36 +4245,10 @@ function isLocalFallbackAllowed(): boolean {
   return isModelDisabled()
 }
 
-const curveGenerationSystemPrompt = `你是故事共创编辑。你的职责是把用户的模糊想法整理成一条可讨论、可编辑的暂定故事曲线，而不是写小说或代替用户决定主线。
-
-只输出 JSON 对象，不要 Markdown。第一次请严格给出恰好 5 个 beats，kind 按 current-state、trigger、escalation、climax-choice、resolution 排列；不要添加 character-tension 或 midpoint-turn。每个 beat 只能是一个结构假设，不写连续场景、对白、角色回合、既定结果或固定路径事实。每个 detail 最多 110 个汉字。除 current-state 外，每个 detail 必须以“暂定：”开头，并且只写一个抽象因果句。
-
-所有不是用户原文的内容都是系统提案：可以提出人物弱点、钩子、阻碍、代价与结局方向，但不要把它们写成已发生事实。除 current-state 外，提案只可引用目标、期限、承诺和关系的抽象因果，不要重复原文中的具体器物或文件名称。提案中绝对不要出现引号、对白、消息、文件、屏幕、便签、设备操作、具体场景动作、连续步骤、精确时间/数量、工作人员或机构流程；不要用这些细节替作者决定因果。foundation 的每个字段控制在 50 个汉字以内，predicament.immediateSituation 控制在 70 个汉字以内，只写设计关系，不写场景道具。若 allowSystemNamedCharacters 为 false，绝不新增任何具名人物，使用“陌生人”“同行者”等匿名指代。不要默认写成悬疑，除非 brief 明确选择 mystery。
-
-安全写法示例：trigger 用“暂定：既有归还期限使原计划无法继续”这类抽象阻碍；escalation 用“暂定：继续目标会触碰已确认的承诺”这类取舍；climax-choice 用“暂定：主角必须在保留目标与承担承诺之间选择”。不要把“归还期限”扩写成便签、消息、倒计时或具体时刻。
-
-输出：{"title":"简短标题","beats":[{"kind":"current-state","title":"节点标题","detail":"节点内容","dependsOn":[],"sourceFactIds":["source-fact-1"],"causalAnchor":"一句短因果承接"},{"kind":"trigger","title":"节点标题","detail":"暂定：抽象阻碍","dependsOn":["beat-current-state"],"sourceFactIds":["source-fact-1"],"causalAnchor":"一句短因果承接"},{"kind":"escalation","title":"节点标题","detail":"暂定：抽象升级","dependsOn":["beat-trigger"],"sourceFactIds":["source-fact-1"],"causalAnchor":"一句短因果承接"},{"kind":"climax-choice","title":"节点标题","detail":"暂定：主动选择","dependsOn":["beat-escalation"],"sourceFactIds":["source-fact-1"],"causalAnchor":"一句短因果承接"},{"kind":"resolution","title":"节点标题","detail":"暂定：抽象变化","dependsOn":["beat-climax-choice"],"sourceFactIds":["source-fact-1"],"causalAnchor":"一句短因果承接"}],"foundation":{"conflictCore":{"goal":"保留的目标","obstacle":"具体阻碍如何卡住目标","tradeoff":"主角必须承担的取舍"},"preservedGoal":"保留的目标","predicament":{"title":"具体困境标题","variationAxis":"time|resource|relationship|commitment","immediateSituation":"当前处境","obstacle":"当前阻碍","tradeoff":"取舍","urgency":"为什么现在要处理","choice":"主角要作的选择","plausibleCost":"选择的代价"},"middleDevelopment":{"escalation":"阻碍如何升级","midpoint":"中段如何改变原办法","climaxPressure":"高潮压力"},"storyEnds":{"opening":"故事开端","openingClue":"开端钩子","climax":"高潮选择","resolution":"结局变化","cost":"承担的代价","promise":"故事承诺"},"approach":{"intent":"第一步设计方向","cost":"第一步代价"}}}`
-
 const curveBeatRegenerationSystemPrompt = `你是故事共创编辑。只重写一条暂定故事曲线节点，不写连续剧情。返回 JSON：{"detail":"暂定：一句可编辑的系统提案"}。detail 必须以“暂定：”开头，不得把提案写成既定事实、行动结果或长场景；未允许新增具名人物时不得新增名字。只提取上游节点的核心后果，用新的短语推进下一层；不要复制上游整句，不要出现嵌套引号。`
 
 const editedBeatPlanSystemPrompt = `你是作者编辑后的节点事实选择器。只返回 JSON 对象，顶层只允许 beatPlan；beatPlan 只允许 authorAnchorId、constraintFactId 两个字段。两个字段只能输出允许 ID 列表中的字符串，绝不能输出 text 文案或增加字段。
 authorAnchorId 从 allowedAuthorAnchorIds 逐字选择，constraintFactId 从 allowedConstraintFactIds 逐字选择。authorAnchors、constraints 的 text 只用于理解选择，不能作为返回值。作者编辑的 status=proposal 表示待审提案，不是已确认事实；条件句不能解释为必然。选择与 targetKind 最相关的已有约束，不得从旧节点、常识或作者偏好补事实。服务端会分开呈现行动、约束和未知代价，并继续事实与差异校验。`
-
-const curveGenerationRepairSystemPrompt = `你是故事结构校验修复器，不是小说作者。你必须把候选曲线改写成可审阅的抽象因果提案。
-
-只输出 JSON。严格只保留 5 个 beat，kind 必须按 current-state、trigger、escalation、climax-choice、resolution 各出现一次；不要添加其他 kind。current-state 可以逐字保留用户材料；其余 beat 的 detail 必须以“暂定：”开头，只写一个因果关系或取舍，不得出现任何场景动作、对白、引号、消息、文件、屏幕、便签、设备、工作人员、机构流程、具体数字/时间/人数、精确结果或永久后果。不要把“投影仪”“手机”等具体物件换成“设备”来规避规则；直接写“既有期限”“已确认承诺”“作品归属”等抽象关系。foundation 每个字段不超过 50 个汉字，不能写场景物件；sourceFactIds 和 dependsOn 必须使用输入中给出的真实 ID；dependsOn 固定为 current-state→trigger→escalation→climax-choice→resolution 的链条。
-
-合格例子：
-- trigger：暂定：既有归还期限使原计划无法继续。
-- escalation：暂定：继续目标会触碰主角已经确认的承诺。
-- midpoint-turn：暂定：主角意识到旧办法无法同时保留目标和承诺。
-- climax-choice：暂定：主角必须在保留目标与承担承诺之间作出选择。
-- resolution：暂定：这次选择改变主角对目标和承诺关系的理解。
-
-不合格例子：新增“打开/看到/收到/听见/倒计时/导出”等场景操作，或新增某人说、某设备、某文件、12小时、三个人、永久等内容。若“提交”或其他动作词已经逐字出现在作者材料中，可以作为抽象目标条件照抄，但不能扩写成现场操作链。
-
-输出结构必须完整，不能省略 foundation：
-{"title":"简短标题","beats":[{"kind":"current-state|character-tension|trigger|escalation|midpoint-turn|climax-choice|resolution","title":"节点标题","detail":"节点内容","dependsOn":[],"sourceFactIds":["输入中的 source-fact ID"],"causalAnchor":"一句短因果承接"}],"foundation":{"conflictCore":{"goal":"保留目标","obstacle":"阻碍","tradeoff":"取舍"},"preservedGoal":"保留目标","predicament":{"title":"困境标题","variationAxis":"time|resource|relationship|commitment","immediateSituation":"当前处境","obstacle":"阻碍","tradeoff":"取舍","urgency":"紧迫性","choice":"选择","plausibleCost":"代价"},"middleDevelopment":{"escalation":"升级","midpoint":"中段转折","climaxPressure":"高潮压力"},"storyEnds":{"opening":"开端","openingClue":"开场线索","climax":"高潮选择","resolution":"结局变化","cost":"代价","promise":"故事承诺"},"approach":{"intent":"第一步方向","cost":"第一步代价"}}}`
 
 // Qwen follows a small, closed JSON contract much more reliably than a
 // combined beat/foundation schema. The server derives the shared foundation
@@ -4358,7 +4267,6 @@ const compactCurveGenerationRepairSystemPrompt = `你是故事结构修复器。
 只输出一个 JSON 对象，不能有 Markdown、解释或额外键。对象必须严格是：{"curvePlan":{"triggerFactId":"source-fact ID","escalationFactId":"source-fact ID","choiceFactId":"source-fact ID","resolutionMode":"allowed mode"}}。不得输出 title、beats、foundation 或任何自然语言故事内容。上一版若输出 beats，本轮必须改为 curvePlan。
 
 triggerFactId 和 escalationFactId 必须是两个不同的允许压力事实；choiceFactId 必须来自允许目标事实；resolutionMode 必须来自 allowed modes。只根据用户消息中提供的逐字原文锚点选择，不得新增人物意图、价值、权限、关系结论、场景、结果、物件或时间。`
-
 
 function buildCurveGenerationPrompt(
   idea: string,
@@ -4411,40 +4319,6 @@ function buildCompactCurveGenerationPrompt(
   ].join('\n')
 }
 
-interface CompactCurveRepairSlots {
-  trigger: StorySourceFact
-  escalation: StorySourceFact
-  goal: StorySourceFact
-}
-
-function getCompactCurveRepairSlots(
-  design: StoryDesignRecord,
-  seed: StorySeed,
-): CompactCurveRepairSlots | undefined {
-  const sourceFacts = design.sourceFacts.filter((fact) => fact.disposition !== 'parked')
-  const goal = sourceFacts.find((fact) => (
-    Boolean(seed.lockedGoal) && hasModelSourceFactEvidence(seed.lockedGoal!, fact.text)
-  )) ?? sourceFacts.at(-1)
-  if (!goal) return undefined
-
-  const trigger = sourceFacts.find((fact) => (
-    fact.id !== goal?.id
-      && /(?:今晚|明早|明天|周[一二三四五六日天]|归还|截止|期限|倒数|必须在[^，。！？；]{0,24}前|要在[^，。！？；]{0,24}前)/u.test(fact.text)
-  )) ?? sourceFacts.find((fact) => (
-    fact.id !== goal?.id
-      && /(?:答应|承诺|约定|保证|不再|缺失|卖掉|无法|不能|冲突|分歧)/u.test(fact.text)
-  )) ?? sourceFacts.find((fact) => fact.id !== goal?.id)
-  const escalation = sourceFacts.find((fact) => (
-    fact.id !== trigger?.id && /(?:缺失|卖掉|无法|不能|冲突|分歧|答应|承诺|约定|保证|不再|关系|姐姐|朋友|队友|家人|不知道|是否|按承诺)/u.test(fact.text)
-  )) ?? sourceFacts.find((fact) => fact.id !== trigger?.id) ?? trigger
-  if (!trigger || !escalation) return undefined
-  return { trigger, escalation, goal }
-}
-
-function getCompactCurveRepairAnchor(fact: StorySourceFact): string {
-  return getModelCurveFactAnchor(fact.text)
-}
-
 function buildCompactCurveRepairPrompt(
   idea: string,
   seed: StorySeed,
@@ -4471,13 +4345,6 @@ function buildCompactCurveRepairPrompt(
     ...(excludedProposalDetails.length ? ['作者已经拒绝的提案不得通过选择同一事实角色或处理方式重新出现。'] : []),
     '严格输出形状：{"curvePlan":{"triggerFactId":"source-fact-2","escalationFactId":"source-fact-3","choiceFactId":"source-fact-1","resolutionMode":"adjust-goal-under-constraint"}}',
   ].join('\n')
-}
-
-function buildModelFactRepairMap(design: StoryDesignRecord): string {
-  return `事实 ID 修复表（只可照抄对应短语）：${JSON.stringify(design.sourceFacts.map((fact) => ({
-    id: fact.id,
-    exactAnchor: getModelCurveFactAnchor(fact.text),
-  })))}。若某个节点没有照抄某一行的 exactAnchor，就不要在该节点列出那个 ID；不要为了覆盖清单把 ID 挂到近义句上。`
 }
 
 function getModelCurveFactAnchor(value: string): string {
@@ -4785,40 +4652,10 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 }
 
-function getCurvePlanChoicePressure(
-  pressure: string,
-): string {
-  const normalized = pressure.trim().replace(/^(?:先处理|暂缓处理|面对|先面对)\s*/u, '')
-  // The pressure is already an author phrase. Prefixing it with an execution
-  // verb creates accidental action chains such as “先面对不再改动作品”. Keep
-  // the choice sides nominal and let the resolution sentence carry the chosen
-  // mode.
-  return normalized
-}
-
 function getCurvePlanDecisionPhrase(goal: string): string {
   const normalized = goal.trim()
   if (/^(?:是否|要不要)/u.test(normalized)) return normalized
   return `是否${normalized}`
-}
-
-function getCurvePlanChoiceDetail(
-  subject: string,
-  goal: string,
-  pressure: string,
-  mode: ModelCurveResolutionMode,
-  suffix: string,
-): string {
-  const pressureSide = getCurvePlanChoicePressure(pressure)
-  // The goal is represented as one compact decision phrase. The pressure side
-  // is an unfinished handling choice, so the beat never turns either side into
-  // an already-executed result.
-  const modeHint = mode === 'address-pressure-before-goal'
-    ? '，先回应这项压力'
-    : mode === 'keep-goal-open-under-pressure'
-      ? '，保留目标的决定空间'
-      : ''
-  return `暂定：${subject}必须在${goal}与${pressureSide}之间作出选择${modeHint}${suffix}`
 }
 
 function getCurvePlanDirectionLanguage(brief: CreativeBrief): {
@@ -4883,126 +4720,6 @@ function getCurvePlanResolutionDetail(
     case 'adjust-goal-under-constraint':
       return `暂定：这次选择让${subject}调整${goal}的取舍，同时面对${pressure}${suffix}`
   }
-}
-
-function buildModelCurveFactAnchoringContract(
-  design: StoryDesignRecord,
-  seed: StorySeed,
-): string {
-  const sourceFacts = design.sourceFacts
-  const goalFact = sourceFacts.find((fact) => (
-    Boolean(seed.lockedGoal) && hasModelSourceFactEvidence(seed.lockedGoal!, fact.text)
-  ))
-  // A scene observation belongs in current-state. It can inform the author's
-  // review, but should not become the structure card's causal premise just
-  // because it appears first in the input. Prefer the facts that actually
-  // constrain a decision: deadline, commitment, or an explicit blocking fact.
-  const urgencyFacts = sourceFacts.filter((fact) => (
-    /(?:今晚|明早|周[一二三四五六日天]|归还|截止|期限|倒数|必须在[^，。！？；]{0,24}前|要在[^，。！？；]{0,24}前)/u.test(fact.text)
-  ))
-  const commitmentFacts = sourceFacts.filter((fact) => (
-    /(?:答应|承诺|约定|保证|不再|不要|不得|必须)/u.test(fact.text)
-  ))
-  const blockingFacts = sourceFacts.filter((fact) => (
-    /(?:缺失|卖掉|无法|不能|冲突|分歧|阻碍|失去|取消|拒绝|失败)/u.test(fact.text)
-  ))
-  const relationshipFacts = sourceFacts.filter((fact) => (
-    /(?:姐姐|哥哥|弟弟|妹妹|朋友|队友|家人|同事|伴侣|父亲|母亲)/u.test(fact.text)
-  ))
-  const sceneObservationFacts = new Set(sourceFacts.filter((fact) => (
-    /(?:看到|发现|听见|收到|拿到|在[^，。！？；]{0,28}(?:里|中))/u.test(fact.text)
-  )))
-  const nonSceneFacts = sourceFacts.filter((fact) => !sceneObservationFacts.has(fact))
-  const pickFirst = (...groups: Array<readonly StorySourceFact[]>): StorySourceFact | undefined => (
-    groups.flat().find((fact) => Boolean(fact))
-  )
-  const nonGoalUrgencyFacts = urgencyFacts.filter((fact) => fact.id !== goalFact?.id)
-  const nonGoalCommitmentFacts = commitmentFacts.filter((fact) => fact.id !== goalFact?.id)
-  const nonGoalBlockingFacts = blockingFacts.filter((fact) => fact.id !== goalFact?.id)
-  const nonGoalRelationshipFacts = relationshipFacts.filter((fact) => fact.id !== goalFact?.id)
-  const triggerFact = pickFirst(
-    nonGoalUrgencyFacts,
-    nonGoalBlockingFacts,
-    nonGoalCommitmentFacts,
-    nonGoalRelationshipFacts,
-    nonSceneFacts.filter((fact) => fact.id !== goalFact?.id),
-    // A single source fact is valid for sparse material; rich material should
-    // reach this branch only when the author supplied no second constraint.
-    urgencyFacts,
-    commitmentFacts,
-    blockingFacts,
-    relationshipFacts,
-    nonSceneFacts,
-  )
-  const escalationFact = pickFirst(
-    blockingFacts.filter((fact) => fact.id !== triggerFact?.id),
-    commitmentFacts.filter((fact) => fact.id !== triggerFact?.id),
-    relationshipFacts.filter((fact) => fact.id !== triggerFact?.id),
-    urgencyFacts.filter((fact) => fact.id !== triggerFact?.id),
-    nonSceneFacts.filter((fact) => fact.id !== triggerFact?.id && fact.id !== goalFact?.id),
-    nonSceneFacts.filter((fact) => fact.id !== triggerFact?.id),
-  )
-    ?? triggerFact
-    ?? sourceFacts[0]
-  const goal = goalFact ?? sourceFacts.at(-1) ?? sourceFacts[0]
-
-  if (!triggerFact || !escalationFact || !goal) {
-    return '事实锚点规则：没有可逐字核对的作者材料时，不要编造 sourceFactIds 或补出新事件。'
-  }
-
-  return [
-    '按以下事实锚点写（并按槽位分配），sourceFactIds 必须与槽位中的逐字锚点一一对应，不要只复述 ID：',
-    `- trigger 槽位：只列 ${triggerFact.id}；detail 必须照抄“${getModelCurveFactAnchor(triggerFact.text)}”，再说明它怎样让目标停住。`,
-    `- escalation 槽位：只列 ${escalationFact.id}；detail 必须照抄“${getModelCurveFactAnchor(escalationFact.text)}”，再说明继续目标的具体取舍。`,
-    `- climax-choice 槽位：优先只列 ${goal.id}；detail 必须照抄“${getModelCurveFactAnchor(goal.text)}”，并写出主角在两端之间的主动选择。`,
-    `- resolution 槽位：优先只列 ${goal.id}；detail 必须照抄“${getModelCurveFactAnchor(goal.text)}”，并写出选择后的抽象变化。`,
-    'current-state 可以列出全部 sourceFactIds 以保留完整原始处境；其余节点不要为了覆盖清单而挂上没有写进 detail 的 ID。',
-  ].join('\n')
-}
-
-function getModelDirectionRequirements(brief: CreativeBrief): string {
-  return getCreativeDirectionEvidenceRequirements(brief)
-    .map((requirement) => (
-      `${requirement.label}：${requirement.earlyKinds.join('/')} 要写出${requirement.earlyInstruction}；${requirement.lateKinds.join('/')} 要写出${requirement.lateInstruction}`
-    ))
-    .join('；')
-}
-
-function getModelDirectionMarkerInstruction(brief: CreativeBrief): string {
-  const markers: string[] = []
-  for (const force of brief.dramaticForces) {
-    if (force === 'contrast') {
-      markers.push('反差：trigger 或 escalation 必须把作者条件写成“[作者条件]让[作者目标]无法按已确认条件推进/反而让目标停住”的因果句；climax-choice 或 resolution 必须写“[作者目标]不能再按[作者条件]继续/调整[作者目标]在[作者条件]下的处理方式”。不要孤立写“失效”或“重新理解……要不要……”')
-    } else if (force === 'cost') {
-      markers.push('代价：trigger 或 escalation 出现“承担/放弃/失去/保留/取舍”之一，climax-choice 或 resolution 出现“在……与……之间选择/取舍”或明确写出承担、放弃的一端')
-    } else if (force === 'relationship-tension') {
-      markers.push('关系：trigger 或 escalation 写出已确认的承诺/关系/分歧，climax-choice 或 resolution 写出主角如何回应该关系')
-    } else if (force === 'misunderstanding') {
-      markers.push('误会：trigger 或 escalation 写出信息缺口/疑问，climax-choice 或 resolution 写出澄清或理解的选择')
-    } else if (force === 'surprise') {
-      markers.push('意外：trigger 或 escalation 写出已确认条件造成的打断/变化，climax-choice 或 resolution 写出调整或重新选择')
-    }
-  }
-  return markers.join('；') || '每个方向词都必须紧贴作者锚点并推进不同因果。'
-}
-
-function getCurveBriefQualityInstruction(brief: CreativeBrief): string {
-  const forceHints = brief.dramaticForces.map((force) => {
-    if (force === 'relationship-tension') return '关系、承诺、回应或分歧'
-    if (force === 'misunderstanding') return '误会、信息差或澄清'
-    if (force === 'cost') return '代价、放弃或承担'
-    if (force === 'surprise') return '意外、变化或时机'
-    return '反差、旧办法的局限或重新选择'
-  })
-  const toneHints = brief.tones.map((tone) => {
-    if (tone === 'growth') return '改变、重新或承担'
-    if (tone === 'friendship' || tone === 'romance') return '信任、心意或关系'
-    if (tone === 'mystery') return '信息、疑问或解释'
-    if (tone === 'comedy') return '尴尬、体面或反差'
-    if (tone === 'warm') return '理解、照顾或彼此'
-    return '规则、边界或未知'
-  })
-  return `至少三条非 current-state 节点要明确承接戏剧机制（可使用：${[...forceHints, ...toneHints].join('、')}），并让每一条的因果作用不同；不要只重复同一句。请按不同层次推进：character-tension 写关系/承诺如何形成牵制，trigger 写该牵制如何让目标停住，escalation 写继续目标要承担的代价或分歧，midpoint-turn 写旧办法为何失效并需要重新理解，climax-choice 写主角在两端之间的主动选择，resolution 写选择带来的关系或自我改变。至少两条节点各自明确出现戏剧力量词，至少两条各自明确出现故事感觉词；这些词必须服务于不同因果，不要机械重复。`
 }
 
 function buildCurveBeatRegenerationPrompt(

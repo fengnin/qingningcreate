@@ -104,41 +104,24 @@ export interface StorySessionState {
   pendingCurveRegeneration: StoryCurveRegenerationPreview | undefined
   setPendingCurveRegeneration: (preview: StoryCurveRegenerationPreview | undefined) => void
   applySessionSnapshot: (snapshot: StorySessionSnapshot) => void
-  restoreAttempted: boolean
-  restoreLoading: boolean
-  setRestoreLoading: (loading: boolean) => void
-  markRestoreAttempted: () => void
-  resetRestoreAttempted: () => void
-  restoreError: string | undefined
-  setRestoreError: (message: string | undefined) => void
 }
 
 const activeStoryStorageKey = 'story-lens.active-story-id'
 
-export function readPersistedStoryId(): string | undefined {
+export function clearLegacyStoryPersistence(): void {
   try {
-    const queryStoryId = new URLSearchParams(window.location.search).get('story')?.trim()
-    return queryStoryId || window.localStorage.getItem(activeStoryStorageKey)?.trim() || undefined
+    window.localStorage.removeItem(activeStoryStorageKey)
   } catch {
-    return undefined
+    // Storage may be unavailable in embedded/private contexts.
   }
-}
-
-export function persistStoryId(storyId: string | undefined): void {
   try {
-    if (storyId) {
-      window.localStorage.setItem(activeStoryStorageKey, storyId)
-      const url = new URL(window.location.href)
-      url.searchParams.set('story', storyId)
-      window.history.replaceState({}, '', url)
-    } else {
-      window.localStorage.removeItem(activeStoryStorageKey)
-      const url = new URL(window.location.href)
+    const url = new URL(window.location.href)
+    if (url.searchParams.has('story')) {
       url.searchParams.delete('story')
       window.history.replaceState({}, '', url)
     }
   } catch {
-    // Storage and history may be unavailable in embedded/private contexts.
+    // Clear the URL independently even when local storage is unavailable.
   }
 }
 
@@ -171,9 +154,6 @@ export function useStorySessionState(): StorySessionState {
   const [pendingActionProposal, setPendingActionProposal] = useState<StoryActionProposal>()
   const [pendingActionConfirmation, setPendingActionConfirmation] = useState<PendingActionConfirmation>()
   const [pendingCurveRegeneration, setPendingCurveRegeneration] = useState<StoryCurveRegenerationPreview>()
-  const [restoreAttempted, setRestoreAttempted] = useState(false)
-  const [restoreLoading, setRestoreLoading] = useState(false)
-  const [restoreError, setRestoreError] = useState<string>()
 
   const trimmedIdea = idea.trim()
 
@@ -246,7 +226,7 @@ export function useStorySessionState(): StorySessionState {
   }
 
   const resetStoryFoundation = () => {
-    persistStoryId(undefined)
+    clearLegacyStoryPersistence()
     setStoryId(undefined)
     setRevision(0)
     setSeed(undefined)
@@ -254,7 +234,6 @@ export function useStorySessionState(): StorySessionState {
     setCurveVersions([])
     setActiveCurveVersionId(undefined)
     setPendingActionProposal(undefined)
-    setRestoreError(undefined)
     clearCoCreation()
     clearConflictCoreSelection()
     resetPlanAfter('conflict-core')
@@ -290,12 +269,7 @@ export function useStorySessionState(): StorySessionState {
     setSelectedTurnOptionId(undefined)
     setPendingTurnRequest(undefined)
     setView(snapshot.resumeStage)
-    setRestoreAttempted(true)
-    setRestoreError(undefined)
   }
-
-  const markRestoreAttempted = () => setRestoreAttempted(true)
-  const resetRestoreAttempted = () => setRestoreAttempted(false)
 
   return {
     view,
@@ -362,13 +336,6 @@ export function useStorySessionState(): StorySessionState {
     pendingCurveRegeneration,
     setPendingCurveRegeneration,
     applySessionSnapshot,
-    restoreAttempted,
-    restoreLoading,
-    setRestoreLoading,
-    markRestoreAttempted,
-    resetRestoreAttempted,
-    restoreError,
-    setRestoreError,
   }
 }
 

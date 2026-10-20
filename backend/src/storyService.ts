@@ -13,14 +13,13 @@ import { decideContinuation, composeContinuation, auditContinuation, type Contin
 import { hasProposalProtocolLeak } from './storyProposalProse.js'
 import { storyCreativeIntentGuidance, storyCreativeFocusGuidance, preparationCreativeFocus } from './storyCreativeIntent.js'
 import { storySemanticReviewGuidance } from './storySemanticReview.js'
-import { preparationOutputSchemas, headTailReviewSchema, openingContinuationReviewSchema } from './storyOutputSchemas.js'
+import { preparationOutputSchemas, headTailReviewSchema } from './storyOutputSchemas.js'
 import type { OutputSchema } from './modelOutputSchema.js'
 import {
   confirmProvisionalCurve,
   generateProvisionalCurve,
   materializeConfirmedCurve,
   parseCreativeBrief,
-  regenerateAffectedCurveBeats,
   previewAffectedCurveBeats,
   resolveAffectedCurveBeats,
   regenerateCurveBeat,
@@ -98,7 +97,6 @@ import type {
   StoryReviewItem,
   StorySessionVersion,
   ConfirmedCurve,
-  CreativeBrief,
   ProvisionalCurve,
   StoryCoCreationResponse,
   StoryCoCreationStartRequest,
@@ -115,7 +113,6 @@ import type {
   StoryCurveRegenerationDecision,
   StoryCurveRegenerationPreview,
   StoryCurveRegenerationResolutionRequest,
-  StoryCurveRegenerationPreviewItem,
   StorySourceFactDispositionRequest,
   StoryCurveVersion,
   StoryCurveVersionSelectionRequest,
@@ -326,7 +323,6 @@ const systemDraftCreativeHookUnsupportedDetailRules: readonly UnsupportedDetailR
   { label: '未经建立的长期关系或过去经历', pattern: /(?:从前|以前|那年|当年|小时候|童年|多年以前|曾经)[^，。！？；\n]{0,24}/gu },
   { label: '未经建立的外部结果', pattern: /(?:(?:交给|交由|转交)[^，。！？；\n]{0,16}(?:他人|别人|某人|其他(?:团队|部门|人))|(?:导致|造成|意味着)[^，。！？；\n]{1,18}(?:失去|错过|破裂|恶化|拒绝|受伤|泄露|暴露|转交|带走))/gu },
 ]
-
 
 // The second layer may establish a small current scene, but anything that
 // becomes a durable fact, route prerequisite, or stated consequence needs a
@@ -3227,7 +3223,7 @@ export function parseStoryPreparationSupplementRequest(body: unknown): StoryPrep
 
 export async function reviewSessionPreparationSupplement(request: StoryPreparationSupplementRequest): Promise<StoryCurveMutationResponse> {
   const current = getStorySession(request.storyId, request.revision)
-  const curve = requireDraftCurve(current, request.curveId)
+  requireDraftCurve(current, request.curveId)
   if (current.confirmedCurve || current.currentTurn || current.history.length) throw new AppError('已确认路径不能原地改写，请显式建立新版本。', 409, 'STORY_CURVE_NOT_DRAFT')
   const next = structuredClone(current), draft = next.provisionalCurve!
   const supplement = draft.preparation?.supplements?.find(s => s.id === request.supplementId)
@@ -4589,8 +4585,6 @@ interface RichSystemDraftPlanItem {
   tradeoffFactId: string
 }
 
-type RichSystemDraftMechanismFactIds = ReadonlyMap<ConflictCoreMechanismType, readonly string[]>
-
 /**
  * Rich-input direction generation is a closed role-selection contract. The
  * model chooses which author facts carry each mechanism; the server renders
@@ -4623,7 +4617,6 @@ function parseRichSystemDraftDirectionPlan(
   const byId = new Map(ledger.map((fact) => [fact.id, fact]))
   const pressureFactIds = getRichSystemDraftPressureFactIds(seed, ledger)
   const tradeoffFactIds = getRichSystemDraftTradeoffFactIds(seed, ledger, pressureFactIds)
-  const pressureFacts = pressureFactIds.map((id) => byId.get(id)).filter((fact): fact is RichSystemDraftFactLedgerItem => Boolean(fact))
   const tradeoffFacts = tradeoffFactIds.map((id) => byId.get(id)).filter((fact): fact is RichSystemDraftFactLedgerItem => Boolean(fact))
   const mechanismFactIds = getRichSystemDraftMechanismFactIds(seed, ledger, pressureFactIds)
   const allowedMechanismTypes = getRichSystemDraftAllowedMechanismTypes(seed, ledger, pressureFactIds, mechanismFactIds)
@@ -4777,15 +4770,6 @@ function hasRichSystemDraftConcreteTradeoffSignal(value: string): boolean {
   return /(?:今晚|明早|明天|后天|今天|周[一二三四五六日天]|本周|下周|月底|月末|展出前|布置前|交接前|期限|截止|答应|承诺|约定|保证|不再|不得|必须|缺失|卖掉|无法|不能|冲突|分歧|不知道|不确定|犹豫|是否|要不要|准备|决定|选择|判断|删掉|保住|归还|提交|交给|改动)/u.test(value)
 }
 
-function getRichSystemDraftWindowPressureFactIds(
-  seed: Pick<StorySeed, 'lockedGoal' | 'lockedFacts'>,
-  ledger = getRichSystemDraftFactLedger(seed),
-): string[] {
-  return ledger
-    .filter((fact) => isRichDirectionTimeFact(fact.text))
-    .map((fact) => fact.id)
-}
-
 /**
  * Give the model a role-specific subset of the author's ledger. A generic
  * pressure list is still useful for the tradeoff side, but the premise must
@@ -4905,10 +4889,6 @@ function isRichDirectionTimeFact(value: string): boolean {
   // phrases such as "前队友" and "父亲留下的书店", which then lets the
   // model select a window-pressure mechanism without an author deadline.
   return /(?:今晚|明早|明天|后天|今天|周[一二三四五六日天](?:前|后|之前|之后)?|本周(?:前|后)?|下周(?:前|后)?|月底|月末|期限|截止|展出前|布置前|交接前|仪式前|(?:在|于)[^，。！？；\n]{1,16}前(?=(?:要|需|把|将|提交|归还|决定|选择|判断|完成|交给)))/u.test(value)
-}
-
-function isRichDirectionCommitmentFact(value: string): boolean {
-  return /(?:答应|承诺|约定|保证|不再|不得|必须|姐姐|哥哥|妹妹|弟弟|朋友|队友|家人|同事|伴侣|关系)/u.test(value)
 }
 
 function getRichDirectionLabel(
@@ -5316,7 +5296,6 @@ function collectSystemDraftMinimalAssumptionIssues(
       if (tradeoffAnchor) richDirectionEvidence.add(tradeoffAnchor)
       if (premiseAnchor) richPremiseAnchors.push(normalizeGoalText(premiseAnchor))
 
-
       const ungroundedLanguage = findRichSystemDraftUngroundedLanguage(
         direction,
         establishedSourceTexts,
@@ -5411,7 +5390,6 @@ function countNormalizedPhraseOccurrences(value: string, phrase: string): number
   }
   return count
 }
-
 
 /**
  * Rich inputs must remain an author's material ledger, not a second place for
@@ -6549,84 +6527,6 @@ function getOpeningContinuationDecisions(request: StoryTurnRequest) {
 function getOpeningContinuationFacts(request: StoryTurnRequest, state: StoryNarrativeState) {
   const authorFacts = getConfirmedCurveOpeningAuthorSourceTexts(request)
   return state.facts.filter((fact) => authorFacts.includes(fact.statement))
-}
-
-function validateOpeningContinuationDecisions(
-  request: StoryTurnRequest, state: StoryNarrativeState, record: Record<string, unknown>, turn: StoryTurn,
-) {
-  const allowedFactIds = new Set(getOpeningContinuationFacts(request, state).map((fact) => fact.id))
-  const decisions = getOpeningContinuationDecisions(request)
-  const rawTurn = expectRecord(record.turn ?? record, '第二回合结构不正确。', invalidModelOutputContext)
-  const rawOptions = rawTurn.options as unknown[]
-  const seen = new Set<string>()
-  turn.options.forEach((option, index) => {
-    const action = option.narrativeAction, transition = option.transition
-    if ([...action.preconditions, ...transition.consumedFacts].some((id) => !allowedFactIds.has(id))) {
-      throw new AppError('第二回合引用了作者原文以外的事实，旧模板不能作为行动前提。', 502, 'INVALID_MODEL_OUTPUT')
-    }
-    if (!decisions) return
-    const raw = expectRecord(rawOptions[index], '第二回合选项结构不正确。', invalidModelOutputContext)
-    const decision = decisions.find((candidate) => candidate.kind === raw.decisionKind)
-    if (!decision || seen.has(decision.kind) || option.action !== decision.statement
-      || action.intent !== decision.statement || option.immediateConsequence !== decision.statement
-      || action.effects.length || transition.changedFacts.length || transition.introducedFacts.length !== 1
-      || transition.introducedFacts[0]!.statement !== decision.statement) {
-      throw new AppError('第二回合只能提出作者已写明行动的决定、保留或暂缓；不得补解法或把决定写成已经执行的结果。',
-        502, 'INVALID_MODEL_OUTPUT')
-    }
-    seen.add(decision.kind)
-  })
-}
-
-async function reviewConfirmedOpeningContinuation(request: StoryTurnRequest, turn: StoryTurn) {
-  const authorFacts = getConfirmedCurveOpeningAuthorSourceTexts(request).map((text, index) => ({ id: `author-${index + 1}`, text }))
-  const claims = [
-    { id: 'scene', role: 'current-scene', content: { event: turn.node.event, purpose: turn.node.purpose } },
-    { id: 'conflict', role: 'pending-conflict', content: turn.conflict },
-    { id: 'question', role: 'question', content: turn.question },
-    ...turn.options.map((option, index) => ({ id: `choice-${index + 1}`, role: 'unselected-option',
-      content: { label: option.label, action: option.action, immediateConsequence: option.immediateConsequence,
-        laterEffect: option.laterEffect, proposedDecision: option.narrativeAction.intent,
-        conditionalNewFacts: option.transition.introducedFacts.map((fact) => fact.statement) } })),
-  ]
-  const review = await requestModelRecord({
-    systemPrompt: confirmedOpeningContinuationReviewPrompt,
-    userPrompt: JSON.stringify({ authorFacts,
-      authorDecision: getOpeningContinuationDecision(request),
-      allowedDecisions: getOpeningContinuationDecisions(request),
-      selectedFocus: request.history[0]!.selectedOption, claims }),
-    temperature: 0, maxTokens: 1_600, diagnosticStage: 'opening-continuation-review', outputSchema: openingContinuationReviewSchema,
-  }, '第二回合的事实核对没有返回有效结果。')
-  if (typeof review.continuesSelectedFocus !== 'boolean'
-    || typeof review.distinctChoices !== 'boolean' || !Array.isArray(review.checks) || review.checks.length !== claims.length
-    || !Array.isArray(review.missingAuthorDetails)) {
-    throw new AppError('第二回合的事实核对格式不正确。', 502, 'INVALID_MODEL_OUTPUT')
-  }
-  const checks = review.checks.map((value) => {
-    const check = expectRecord(value, '第二回合的事实核对格式不正确。', invalidModelOutputContext)
-    const id = readIdentifier(check, 'id', '事实核对缺少字段 ID。', invalidModelOutputContext)
-    const sourceIds = readIdentifierList(check, 'sourceIds', 0, authorFacts.length,
-      '事实核对缺少作者来源。', invalidModelOutputContext)
-    if (!claims.some((claim) => claim.id === id) || !['supported', 'unsupported'].includes(String(check.verdict))
-      || sourceIds.some((sourceId) => !authorFacts.some((fact) => fact.id === sourceId))
-      || (check.verdict === 'supported' && !sourceIds.length)) {
-      throw new AppError('事实核对必须逐项说明作者来源，不能默认判为通过。', 502, 'INVALID_MODEL_OUTPUT')
-    }
-    return { id, verdict: check.verdict, reason: readText(check, 'reason', '事实核对缺少理由。', 240, invalidModelOutputContext) }
-  })
-  ensureUniqueValues(checks.map((check) => check.id), '事实核对遗漏或重复了字段。', invalidModelOutputContext)
-  const missing = readRequiredTextList(review, 'missingAuthorDetails', 0, 3, 140,
-    '第二回合的事实核对格式不正确。', invalidModelOutputContext)
-  if (missing.length) throw new AppError(`继续前需要作者补充事实：${missing.join('；')}。当前选择和 revision 未提交。`,
-    422, 'STORY_TURN_NEEDS_AUTHOR_DETAIL')
-  const unsupported = checks.filter((check) => check.verdict === 'unsupported')
-  if (!review.continuesSelectedFocus || !review.distinctChoices || unsupported.length) {
-    throw new AppError(`第二回合未通过作者事实、选项承接或选择差异核对${unsupported.length ? `：${unsupported.map((check) => `${check.id}：${check.reason}`).join('；')}` : ''}，不能写入当前路径。`, 502, 'INVALID_MODEL_OUTPUT',
-      undefined, undefined, undefined, { stage: 'opening-continuation-review',
-        reason: unsupported.length ? '候选回合依赖未确认事实' : !review.continuesSelectedFocus ? '没有承接所选首回合判断'
-          : !review.distinctChoices ? '选项没有实质差异或把约束当成另一个行动' : '内容未由作者事实支持',
-        response: summarizeModelResponse(review) })
-  }
 }
 
 function getOpeningContinuationDecision(request: StoryTurnRequest) {
@@ -9220,21 +9120,6 @@ const storyTurnSystemPrompt = `你是一位擅长互动短篇故事的中文编�
 
 生成顺序提示：先写 node 和 conflict，再写 question；非收束时逐个完成每个 option。若本次要求详细状态结构，再补齐每个 option 中的 narrativeAction 和 transition，收束时补齐顶层 narrativeAction 和 transition；若本次要求紧凑叙事结构，则绝不输出这些内部字段。详细状态结构中 transition.introducedFacts 即使为空也必须保留为空数组 []。`
 
-const confirmedOpeningContinuationSystemPrompt = `你是故事共创的中文编辑。作者刚从首回合选择了一个判断焦点，尚未执行动作、归还物品、联系他人或改变事实。只生成紧接这个判断的第二回合，严格返回详细 turn JSON；不要生成大纲或结局。
-authorFacts 是唯一故事事实。selectedFocus 是已选判断，不是已完成事件；首回合的旧描述只记录注意力，不能把“成为压力”扩写成时间变紧、资源失效、违反承诺等结果。期限、承诺、目标是不同事实，不能据此推断不可兼得。原文写出的“可能”必须仍是可能，不得擅自归因给某项行动。
-必须具体承接所选焦点，使用作者已有的行动或决定。三项选项必须在可观察行动或继续目标的方式上不同，不能只是换同义词；期限和承诺只能作为约束，不能与行动构成假二选一。只允许已知行动、保留或暂缓该行动，不补新解法、地点、普通物件、设备功能、兼容接口、操作步骤、通讯、借用/申请流程、他人回应、署名资格规则、不可逆结果。若不知道动作是否可行或具体代价，不得为了凑三个选项而补全；只返回 {"needsAuthorDetail":["向作者核对必要条件的问题"]}。
-若输入有 allowedDecisions，恰好选择其中 act、keep、defer 各一次，在每项选项的 decisionKind 填写对应 kind，并把该项 statement 原样复制到 action、immediateConsequence、narrativeAction.intent 和唯一 introducedFacts.statement。这三项只表示决定执行、决定保留、仍未决定，不表示已经拆除、删除或成功。不得添加别的动作或解法。其他文案由你生成，必须具体承接作者行动与所选焦点。两个期限并存不代表冲突，保留承诺与删名的关系未知也不代表能兼容；不得把未知关系写成事实。如果这些决定的成立依赖作者未回答的问题，请返回 needsAuthorDetail，不用其他解法绕过。
-必须保留每个选项的 narrativeAction 和 transition。每个选项是作者接下来可选择的决定或行动，尚未发生。preconditions 至少引用一个允许事实 ID，consumedFacts 覆盖它们；effects/changedFacts 只能修改 changeable 事实，原文事实都是 fixed，所以这两项都应为空数组。introducedFacts 必须有一条作者选中该选项后直接产生的行动或决定事实，mutability=changeable；不能只把已知事实换 ID 重写，不能包含设备已能运行、他人已回应、限制已消失等结果。立即后果也只能是这条行动或决定本身。所有具体文案由你生成，服务端只校验与分配 ID。`
-
-const confirmedOpeningContinuationReviewPrompt = `你是第二回合的严格事实核对员，不负责写故事。只返回 JSON，字段为 checks、continuesSelectedFocus、distinctChoices、missingAuthorDetails。不要默认通过。
-对输入 claims 中每个 id 恰好返回一项检查：{"id":"复制待核对ID","verdict":"supported或unsupported","sourceIds":["能支持本项全部内容的authorFacts ID"],"reason":"最多100字的依据或具体缺口"}。不得遗漏项目；只要一项含没有作者依据的前提或结果，该项 verdict=unsupported。unsupported 可以有空 sourceIds。supported 必须明确引用至少一项作者来源，不能仅因文案提到作者人物或物品就通过。
-只以 authorFacts 为故事事实依据。selectedFocus 只确认了判断焦点，没有执行动作或改变时间、物品、承诺与他人。旧模板的因果结论不能自动成为证据。
-逐项审查处境、冲突、问题、选项和选中后的行动事实。条件句与可能风险不能变成确定结果，风险不能被擅自归因给行动。已知有作品、展板或投影仪，不代表有工作室、接口匹配、导出流程、备用资源、联系渠道、署名资格规则或删名必须改作品。名字出现在纸质标签还是短片画面也未给出。任何这些假定都应判 unsupported。
-尚未选择的 options 可以提出作者已写出的行动、保留/暂缓该行动，并声明选中后直接发生的行动事实；不能预先写死成功、损失或他人回应。continuesSelectedFocus 要检查新情境是否由刚才的判断引出；distinctChoices 要检查三个选项是否为实质不同的行动，目标、期限、承诺不能互相冒充行动选项，也不能全部重复面对/判断。
-role=unselected-option 的所有字段，包括 immediateConsequence 和 conditionalNewFacts，是“如果作者选择这一项”的候选后果，不是在声称已经选中或已发生。allowedDecisions 由服务器从作者明确写出的“决定是否”提取，其中决定执行、决定保留、仍未决定是三个不同决定状态，都可由 authorDecision.source 支持；不要求原文已经作出决定，不要求作者额外授权暂缓，也不要求物理执行已经可行。它们只记录决定，不代表真正拆除、删除、通电或承诺已履行；但选项附带的具体成功或损失仍须逐项有原文依据。scene.purpose 与 conflict.action 表示待达成意图，不能当成已经完成的事件。只有在决定本身依赖未知事实时才要求作者补充。
-若有 authorDecision，必须在问题或选项中实质承接它；只把它留在“后续仍待处理”不算承接。“先周五送、周六还”与“同时守住周五送和周六还”是同一安排，distinctChoices=false；重新评估 fixed 期限是否可调整不是已有可行解法。三项都只重述期限的候选必须拒绝。
-两个日期存在先后不等于不可兼得。必须单独核对“冲突、失去机会、压力解除”的因果是否由作者给出；出现这些词而没有对应来源，必须判 unsupported。只有作者资料确实不足以提供成立的具体行动或其前提时，missingAuthorDetails 才填写最多三个明确向作者询问的问题；不能编答案，也不能因候选写坏了就要求作者补充本来已有的信息。缺少事实和不合格候选都不能判为通过。`
-
 function getConfirmedCurveFirstTurnSystemPrompt(): string {
   return `你是中文互动故事的开场事实选择器。现在只为作者确认主线后的第一个可选择情境选择事实锚点，不能写任何自由文本故事。必须严格返回 JSON，不要 Markdown、解释或额外字段。
 
@@ -11009,14 +10894,6 @@ function validatePredicamentNarrative(
   }
 }
 
-function requireNull(
-  value: unknown,
-  message: string,
-  context: ValidationErrorContext,
-): void {
-  if (value !== null) throw new AppError(message, context.statusCode, context.code)
-}
-
 function requireNullOrMissing(value: unknown, message: string): void {
   if (value !== undefined && value !== null) {
     throw new AppError(message, invalidModelOutputContext.statusCode, invalidModelOutputContext.code)
@@ -11048,20 +10925,6 @@ function parseStorySeedContextPrefill(
     ...(!fallback.goal && goal ? { goal } : {}),
     ...(stake ? { stake } : {}),
     ...(constraint ? { constraint } : {}),
-  }
-}
-
-function parseStorySeed(value: unknown, context: ValidationErrorContext): StorySeed {
-  const message = '故事种子格式不正确，请返回上一步重新生成。'
-  const record = expectRecord(value, message, context)
-  const expansionScope = readStoryExpansionScope(record.expansionScope)
-  if (!expansionScope) {
-    throw new AppError(message, context.statusCode, context.code)
-  }
-
-  return {
-    ...parseStorySeedFields(record, context, message),
-    expansionScope,
   }
 }
 
@@ -11903,22 +11766,6 @@ function parseStoryNode(
   }
 }
 
-function parseStoryConflict(
-  value: unknown,
-  context: ValidationErrorContext,
-  message = '冲突格式不正确，请重试。',
-): StoryConflict {
-  const record = expectRecord(value, message, context)
-  return {
-    nodeId: readText(record, 'nodeId', message, 40, context),
-    conflict: readText(record, 'conflict', message, 140, context),
-    action: readText(record, 'action', message, 140, context),
-    consequence: readText(record, 'consequence', message, 140, context),
-    intensity: readInteger(record, 'intensity', message, 1, 5, context),
-    anchor: readText(record, 'anchor', message, 32, context),
-  }
-}
-
 function ensureUniqueValues(values: string[], message: string, context: ValidationErrorContext) {
   if (new Set(values).size !== values.length) {
     throw new AppError(message, context.statusCode, context.code)
@@ -12165,15 +12012,6 @@ function isStoryTurnOptionRefinementFocus(value: unknown): value is StoryTurnOpt
 
 function getStoryTurnOptionRefinementFocusLabel(focus: StoryTurnOptionRefinementFocus): string {
   return storyTurnOptionRefinementFocusLabels[focus]
-}
-
-function readStoryTurnPhase(
-  value: unknown,
-  message: string,
-  context: ValidationErrorContext,
-): StoryTurnPhase {
-  if (value === 'opening' || value === 'development' || value === 'turn' || value === 'climax' || value === 'resolution') return value
-  throw new AppError(message, context.statusCode, context.code)
 }
 
 function readStoryGoalState(

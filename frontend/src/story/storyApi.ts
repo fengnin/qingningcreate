@@ -199,10 +199,6 @@ export function requestCurveStorySpine(request: StoryCurveStartSpineRequest): Pr
   return postJson('/api/story/curve/start-spine', request, parseStoryCurveSpineResponse)
 }
 
-export function requestStorySession(storyId: string): Promise<StorySessionSnapshot> {
-  return getJson(`/api/story/session/${encodeURIComponent(storyId)}`, parseStorySessionSnapshot)
-}
-
 export function requestStoryWriting(request: import('../../../shared/story-contract.js').StoryWritingRequest): Promise<StoryWritingResponse> {
   return postJson('/api/story/writing', request, parseStoryWritingResponse)
 }
@@ -324,19 +320,6 @@ async function postJson<T>(
     parseResponse,
     networkErrorMessage: '暂时连不上故事服务，请确认后端已启动。',
     responseErrorMessage: '生成没有完成，请稍后重试。',
-  })
-}
-
-async function getJson<T>(
-  path: string,
-  parseResponse: (payload: unknown) => T,
-): Promise<T> {
-  return requestJson({
-    path,
-    method: 'GET',
-    parseResponse,
-    networkErrorMessage: '暂时连不上故事服务，请确认后端已启动。',
-    responseErrorMessage: '读取故事会话没有完成，请稍后重试。',
   })
 }
 

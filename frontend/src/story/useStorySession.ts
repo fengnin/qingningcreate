@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { createStorySessionActions, type StorySessionActions } from './storySessionActions'
-import { persistStoryId, useStorySessionState } from './useStorySessionState'
+import { clearLegacyStoryPersistence, useStorySessionState } from './useStorySessionState'
 import { useStoryStageRequest } from './useStoryStageRequest'
 import type {
   GeneratedStory,
@@ -65,28 +65,20 @@ export interface StorySession extends StorySessionActions {
   activeCurveVersionId: string | undefined
   pendingActionProposal: import('./types').StoryActionProposal | undefined
   pendingCurveRegeneration: StoryCurveRegenerationPreview | undefined
-  restoreAttempted: boolean
-  restoreLoading: boolean
-  restoreError: string | undefined
-  retryRestoreSession: () => Promise<void>
 }
 
 export function useStorySession(): StorySession {
   const state = useStorySessionState()
   const stage = useStoryStageRequest()
   const actions = createStorySessionActions(state, stage)
-  const restoreStarted = useRef(false)
   const writingVisits = useRef(new Set<string>())
   const curveId = state.provisionalCurve?.id
   if (curveId && state.view === 'story-spine') writingVisits.current.add(curveId)
 
   useEffect(() => {
-    if (restoreStarted.current) return
-    restoreStarted.current = true
     // Each page load starts a new creation. Keep navigation within this page
     // in React state, but discard handles saved by earlier app versions.
-    persistStoryId(undefined)
-    state.markRestoreAttempted()
+    clearLegacyStoryPersistence()
   }, [])
 
   return {
@@ -128,9 +120,6 @@ export function useStorySession(): StorySession {
     activeCurveVersionId: state.activeCurveVersionId,
     pendingActionProposal: state.pendingActionProposal,
     pendingCurveRegeneration: state.pendingCurveRegeneration,
-    restoreAttempted: state.restoreAttempted,
-    restoreLoading: state.restoreLoading,
-    restoreError: state.restoreError,
     ...actions,
   }
 }

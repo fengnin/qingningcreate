@@ -20,7 +20,6 @@ import {
   requestCurveClarification,
   requestCurveConfirmation,
   requestCurveStorySpine,
-  requestStorySession,
   requestCurveVersionSelection,
   requestAuthorInstruction,
   requestStoryActionProposal,
@@ -30,8 +29,6 @@ import {
 import {
   type PendingTurnRequest,
   type StorySessionState,
-  readPersistedStoryId,
-  persistStoryId,
 } from './useStorySessionState'
 import { normalizeConflictCoreContext } from './conflictCoreContext'
 import { getNextStoryIdeaExample } from './storyIdeaExamples'
@@ -120,8 +117,6 @@ export interface StorySessionActions {
   goBack: () => void
   goBackToOpening: () => void
   restartStory: () => void
-  restoreSession: () => Promise<void>
-  retryRestoreSession: () => Promise<void>
   selectCurveVersion: (versionId: string) => Promise<void>
   applyAuthorInstruction: (targetBeatId: string, text: string) => Promise<void>
   proposeStoryAction: (action: string) => Promise<void>
@@ -171,7 +166,7 @@ export function createStorySessionActions(
     ...createStoryPlanningActions(context),
     ...storyProgressActions,
     ...createNavigationActions(context, storyProgressActions.generateFullStory, coCreationActions.generateProvisionalCurve),
-    ...createSessionRecoveryActions(context),
+    ...createCurveVersionActions(context),
     ...createAuthorControlActions(context),
   }
 }
@@ -788,45 +783,9 @@ function applyCurveMutationState(
   state.setActiveCurveVersionId(result.activeCurveVersionId)
 }
 
-function createSessionRecoveryActions(
+function createCurveVersionActions(
   { state, stage }: StorySessionActionContext,
-  ): Pick<StorySessionActions, 'restoreSession' | 'retryRestoreSession' | 'selectCurveVersion'> {
-  const loadPersistedSession = async () => {
-    state.setRestoreLoading(true)
-    const storyId = readPersistedStoryId()
-    if (!storyId) {
-      state.setRestoreLoading(false)
-      return
-    }
-
-    try {
-      const snapshot = await requestStorySession(storyId)
-      state.applySessionSnapshot(snapshot)
-    } catch (error) {
-      const code = typeof error === 'object' && error !== null && 'code' in error
-        ? (error as { code?: string }).code
-        : undefined
-      // A temporary network failure must not destroy the only handle to a
-      // persisted session. Remove it only when the server explicitly says the
-      // session no longer exists.
-      if (code === 'STORY_SESSION_NOT_FOUND') persistStoryId(undefined)
-      state.setRestoreError(error instanceof Error ? error.message : '无法恢复上次故事会话。')
-    } finally {
-      state.setRestoreLoading(false)
-    }
-  }
-
-  const restoreSession = async () => {
-    if (state.restoreAttempted) return
-    state.markRestoreAttempted()
-    await loadPersistedSession()
-  }
-
-  const retryRestoreSession = async () => {
-    state.markRestoreAttempted()
-    await loadPersistedSession()
-  }
-
+  ): Pick<StorySessionActions, 'selectCurveVersion'> {
   const selectCurveVersion = async (versionId: string) => {
     if (!state.storyId || versionId === state.activeCurveVersionId) return
     await runStorySessionStageRequest(
@@ -835,14 +794,13 @@ function createSessionRecoveryActions(
       () => requestCurveVersionSelection({ storyId: state.storyId!, revision: state.revision, versionId }),
       (snapshot) => {
         state.applySessionSnapshot(snapshot)
-        // Selecting a design version should display that design. Automatic
-        // session restoration still follows resumeStage to the latest progress.
+        // Selecting a design version should display that design.
         if (snapshot.curve) state.setView('provisional-curve')
       },
     )
   }
 
-  return { restoreSession, retryRestoreSession, selectCurveVersion }
+  return { selectCurveVersion }
 }
 
 function createAuthorControlActions(

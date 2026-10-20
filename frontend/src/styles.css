@@ -73,12 +73,7 @@ textarea:focus-visible {
   font-size: 18px;
   font-weight: 600;
   line-height: 1;
-}
-
-.brand small {
-  color: #9ca9a0;
-  font-size: 11px;
-  line-height: 1;
+  white-space: nowrap;
 }
 
 .brand-compact .brand-mark {
@@ -1734,9 +1729,10 @@ textarea:focus-visible {
   margin: 22px 0 16px;
   color: #f5f3ec;
   font-family: Georgia, "Songti SC", serif;
-  font-size: 60px;
+  font-size: clamp(28px, 4vw, 52px);
   font-weight: 500;
   line-height: 1.17;
+  white-space: nowrap;
 }
 
 .opening-content > p {
@@ -3664,7 +3660,7 @@ textarea:focus-visible {
   }
 
   .opening-content h1 {
-    font-size: 38px;
+    font-size: clamp(24px, 8vw, 38px);
   }
 
   .opening-footer {
