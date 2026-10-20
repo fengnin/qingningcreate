@@ -34,6 +34,7 @@ import {
   rejectSessionCurveBeat,
   regenerateSessionCurveDependencies,
   resolveSessionCurveDependencies,
+  retainSessionCurveBeats,
   updateSessionSourceFactDisposition,
   updateSessionCurveClarification,
   confirmSessionCurve,
@@ -48,6 +49,7 @@ import {
   parseStoryCurveBeatRegenerationRequest,
   parseStoryCurveBeatRejectRequest,
   parseStoryCurveDependenciesRegenerationRequest,
+  parseStoryCurveBeatRetentionRequest,
   parseStoryCurveRegenerationResolutionRequest,
   parseStorySourceFactDispositionRequest,
   parseStoryAuthorClarificationRequest,
@@ -162,6 +164,13 @@ registerStoryStage(
   '/api/story/curve/regenerate-affected',
   parseStoryCurveDependenciesRegenerationRequest,
   regenerateSessionCurveDependencies,
+  (result) => result satisfies StoryCurveMutationResponse,
+)
+
+registerStoryStage(
+  '/api/story/curve/retain-affected',
+  parseStoryCurveBeatRetentionRequest,
+  retainSessionCurveBeats,
   (result) => result satisfies StoryCurveMutationResponse,
 )
 

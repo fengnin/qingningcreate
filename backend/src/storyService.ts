@@ -29,6 +29,7 @@ import {
   rejectCurveBeat,
   updateCurveSourceFactDisposition,
   updateCurveBeat,
+  retainAffectedCurveBeats,
 } from './storyCoCreation.js'
 import {
   changeCurveClarification,
@@ -42,6 +43,7 @@ import {
 import { randomUUID } from 'node:crypto'
 import { generateStoryPreparation, generateCurveFromPreparation, parsePreparationReview, reviseStoryPreparation, acceptPreparation } from './storyPreparation.js'
 import { retryPreparationMainline } from './storyPreparationDesign.js'
+import { generateAuthorRevisedBeat } from './storyAuthorRevision.js'
 import { suggestPreparationStoryDirections } from './storyPreparationDirections.js'
 import { assembleWrittenStory, reviseWritingDraft } from './storyWriting.js'
 import { parseExplanationWording, suggestPreparationExplanation } from './storyPreparationExplanation.js'
@@ -109,6 +111,7 @@ import type {
   StoryCurveStartSpineRequest,
   StoryCurveBeatRejectRequest,
   StoryCurveDependenciesRegenerationRequest,
+  StoryCurveBeatRetentionRequest,
   StoryCurveRegenerationDecision,
   StoryCurveRegenerationPreview,
   StoryCurveRegenerationResolutionRequest,
@@ -892,6 +895,17 @@ export function parseStoryCurveDependenciesRegenerationRequest(body: unknown): S
     curveId: readIdentifier(record, 'curveId', '暂定故事曲线不完整，请刷新后重试。', invalidRequestContext),
     feedback: readOptionalText(record, 'feedback', 180),
   }
+}
+
+export function parseStoryCurveBeatRetentionRequest(body: unknown): StoryCurveBeatRetentionRequest {
+  const record = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'beatIds'])
+  if (!Array.isArray(record.beatIds) || !record.beatIds.length || record.beatIds.length > 7
+    || record.beatIds.some(id => typeof id !== 'string' || !id.trim())
+    || new Set(record.beatIds).size !== record.beatIds.length) {
+    throw new AppError('请明确选择要沿用的受影响节点。', 400, 'INVALID_REQUEST')
+  }
+  return { ...parseStorySessionReference(record),
+    curveId: readIdentifier(record, 'curveId', '请选择当前故事设计。', invalidRequestContext), beatIds: record.beatIds as string[] }
 }
 
 export function parseStoryCurveRegenerationResolutionRequest(body: unknown): StoryCurveRegenerationResolutionRequest {
@@ -2906,7 +2920,7 @@ export async function regenerateSessionCurveBeat(
   const blocked = getClarificationsAffectingBeat(curve, request.beatId)
   const hasAuthorDependency = curve.beats.some((beat) => beat.source === 'user-edit'
     && getDependentBeatIds(curve.beats, beat.id).includes(request.beatId))
-  if (blocked.length || hasAuthorDependency) {
+  if (blocked.length || hasAuthorDependency || curve.beats.find(beat => beat.id === request.beatId)?.source === 'user-edit') {
     const result = await previewClarificationCurveBeat(session.idea, session.seed, curve, request.beatId, request.feedback, request.replaceRejected === true)
     assertStorySessionRevision(session, request.revision)
     const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), pendingCurveRegeneration: result.preview })
@@ -2976,6 +2990,16 @@ export async function regenerateSessionCurveDependencies(
   }
 }
 
+export async function retainSessionCurveBeats(request: StoryCurveBeatRetentionRequest): Promise<StoryCurveMutationResponse> {
+  const session = getStorySession(request.storyId, request.revision)
+  const curve = requireDraftCurve(session, request.curveId)
+  const result = retainAffectedCurveBeats(curve, request.beatIds)
+  const saved = commitClarificationSessionChanges(session, {
+    ...structuredClone(session), provisionalCurve: result.curve, pendingCurveRegeneration: undefined,
+  })
+  return createCurveMutationResponse(saved, result)
+}
+
 export async function resolveSessionCurveDependencies(
   request: StoryCurveRegenerationResolutionRequest,
 ): Promise<StoryCurveMutationResponse> {
@@ -2994,7 +3018,7 @@ export async function resolveSessionCurveDependencies(
     if (request.decisions[item.id] !== 'accept') continue
     const clarifications = getClarificationsForBeat(curve, item.beatId)
     const original = curve.beats.find((beat) => beat.id === item.beatId)
-    if (original?.source !== 'system-proposal') {
+    if (original?.source !== 'system-proposal' && !(original?.source === 'user-edit' && original.kind !== 'current-state' && preview.authorReplacementBeatIds?.includes(original.id))) {
       throw new AppError('作者编辑的节点不能由系统覆盖。', 409, 'STORY_CLARIFICATION_AUTHOR_EDIT')
     }
     for (const clarification of clarifications) {
@@ -3316,6 +3340,11 @@ export async function applySessionAuthorInstruction(
   const target = originalCurve.beats.find((beat) => beat.id === request.targetBeatId && beat.status !== 'rejected')
   if (!target) throw new AppError('要调整的主线节点不存在，请刷新后重试。', 409, 'STORY_SESSION_CONFLICT')
 
+  // Generate before changing any session state. Failed or stale requests must
+  // leave the confirmed version and its existing prose available.
+  const revisedDetail = await generateAuthorRevisedBeat(session.idea, originalCurve, target, request.text)
+  assertStorySessionRevision(session, request.revision)
+
   // Preserve the confirmed path as a version before returning to author mode.
   syncActiveCurveVersion(session)
   const now = Date.now()
@@ -3329,20 +3358,13 @@ export async function applySessionAuthorInstruction(
         ? 'rejected'
         : beat.source === 'user-input' ? 'confirmed' : beat.source === 'user-edit' ? 'edited' : 'proposed',
     })),
-    instructions: [
-      ...originalCurve.instructions,
-      {
-        id: `instruction-${randomUUID()}`,
-        kind: 'author-revision',
-        text: request.text,
-        targetBeatId: request.targetBeatId,
-        createdAt: now,
-      },
-    ],
+    instructions: [...originalCurve.instructions],
     createdAt: now,
     updatedAt: now,
   }
-  const result = updateCurveBeat(draftCurve, request.targetBeatId, request.text)
+  const result = updateCurveBeat(draftCurve, request.targetBeatId, revisedDetail)
+  result.curve.instructions.push({ id: `instruction-${randomUUID()}`, kind: 'author-revision',
+    text: request.text, targetBeatId: request.targetBeatId, createdAt: now })
   const version = createCurveVersion(result.curve, getNextCurveVersionLabel(session.curveVersions))
   session.provisionalCurve = result.curve
   session.confirmedCurve = undefined
@@ -3367,7 +3389,7 @@ export async function createSessionStoryActionProposal(
     throw new AppError('当前情境已经变化，请刷新后再提出角色行动。', 409, 'STORY_SESSION_CONFLICT')
   }
   if (looksLikeAuthorInstruction(request.action)) {
-    throw new AppError('这更像是在改故事。请使用“作者调整主线”，不要把作者指令当成角色行动。', 400, 'AUTHOR_INSTRUCTION_REQUIRED')
+    throw new AppError('这更像是在改故事。请使用“调整故事设计”，不要把作者指令当成角色行动。', 400, 'AUTHOR_INSTRUCTION_REQUIRED')
   }
 
   if (session.workflow === 'co-creation' && currentTurn.presentation === 'author-review') throw new AppError('当前是作者问题审阅，请先补充、保留未知或调整主线；不能提交角色行动。', 409, 'STORY_AUTHOR_REVIEW_REQUIRED')

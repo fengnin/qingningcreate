@@ -14,6 +14,7 @@ import {
   requestCurveBeatRegeneration,
   requestCurveBeatRejection,
   requestAffectedCurveRegeneration,
+  requestCurveBeatRetention,
   requestCurveRegenerationResolution,
   requestSourceFactDisposition,
   requestCurveClarification,
@@ -84,6 +85,7 @@ export interface StorySessionActions {
   regenerateCurveBeat: (beatId: string, feedback?: string, replaceRejected?: boolean) => Promise<void>
   rejectCurveBeat: (beatId: string, reason?: string) => Promise<void>
   regenerateAffectedCurveBeats: (feedback?: string) => Promise<void>
+  retainAffectedCurveBeats: (beatIds: string[]) => Promise<void>
   resolveAffectedCurveBeats: (decisions: Record<string, StoryCurveRegenerationDecision>, independentUnknownIds?: string[], acceptedDesignProposalIds?: string[]) => Promise<void>
   setSourceFactDisposition: (factId: string, disposition: 'parked' | 'integrated') => Promise<void>
   changeCurveClarification: (action: StoryAuthorClarificationAction, fields?: {
@@ -208,6 +210,7 @@ function createCoCreationActions(
   | 'regenerateCurveBeat'
   | 'rejectCurveBeat'
   | 'regenerateAffectedCurveBeats'
+  | 'retainAffectedCurveBeats'
   | 'resolveAffectedCurveBeats'
   | 'setSourceFactDisposition'
   | 'changeCurveClarification'
@@ -334,6 +337,10 @@ function createCoCreationActions(
     )
   }
 
+  const retainAffectedCurveBeats = async (beatIds: string[]) => {
+    await runCurveMutationRequest(state, stage, reference => requestCurveBeatRetention({ ...reference, beatIds }))
+  }
+
   const setSourceFactDisposition = async (factId: string, disposition: 'parked' | 'integrated') => {
     await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => (
       requestSourceFactDisposition({ storyId, revision, curveId, factId, disposition })
@@ -421,6 +428,7 @@ function createCoCreationActions(
     regenerateCurveBeat,
     rejectCurveBeat,
     regenerateAffectedCurveBeats,
+    retainAffectedCurveBeats,
     resolveAffectedCurveBeats,
     setSourceFactDisposition,
     changeCurveClarification,
@@ -825,7 +833,12 @@ function createSessionRecoveryActions(
       state,
       stage,
       () => requestCurveVersionSelection({ storyId: state.storyId!, revision: state.revision, versionId }),
-      (snapshot) => state.applySessionSnapshot(snapshot),
+      (snapshot) => {
+        state.applySessionSnapshot(snapshot)
+        // Selecting a design version should display that design. Automatic
+        // session restoration still follows resumeStage to the latest progress.
+        if (snapshot.curve) state.setView('provisional-curve')
+      },
     )
   }
 

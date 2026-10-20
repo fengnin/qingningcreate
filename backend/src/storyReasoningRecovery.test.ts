@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { mapInitialReasoningProposal } from './storyInitialReasoning.js'
 import { createStoryDesignRecord, isStoryCurveFoundationCurrent } from './storyDesign.js'
 import { attachReasoningQuestions, createRecoveryContext, previewReasoningRecovery, acceptReasoningRecovery } from './storyReasoningRecovery.js'
-import { updateCurveBeat, confirmProvisionalCurve, materializeConfirmedCurve } from './storyCoCreation.js'
+import { updateCurveBeat, rejectCurveBeat, confirmProvisionalCurve, materializeConfirmedCurve } from './storyCoCreation.js'
 import { changeCurveClarification, confirmCurveClarification } from './storyClarification.js'
 import { AppError } from './qwen.js'
 import { storyReasoningWireExample } from './storyReasoningWire.js'
@@ -60,6 +60,94 @@ test('simple prepared story locally regenerates after an author edit and carries
  assert.equal(isStoryCurveFoundationCurrent(accepted.foundation,accepted.beats),true)
  assert.ok(confirmProvisionalCurve(accepted,requiredDesignProposalIds(accepted.reasoning!)).confirmedCurve)
  assert.deepEqual(edited,before)
+})
+test('accepting a regenerated early node restores dependency order in both beats and reasoning',async()=>{
+ model();const initial=curve()
+ const trigger=initial.beats.find(b=>b.kind==='trigger')!
+ const edited={...initial,beats:initial.beats.map(b=>b.id===trigger.id?{...b,status:'stale' as const}:b)}
+ const {preview}=await previewReasoningRecovery(idea,seed,edited,['beat-trigger'])
+ const accepted=acceptReasoningRecovery(edited,preview,Object.fromEntries(preview.items.map(i=>[i.id,'accept'])),[],requiredDesignProposalIds(preview.reasoning!)).curve
+ const order=accepted.beats.filter(b=>b.status!=='rejected').map(b=>b.kind)
+ assert.ok(order.indexOf('current-state')<order.indexOf('trigger'))
+ assert.ok(order.indexOf('trigger')<order.indexOf('escalation'))
+ assert.ok(order.indexOf('escalation')<order.indexOf('climax-choice'))
+ assert.ok(order.indexOf('climax-choice')<order.indexOf('resolution'))
+ assert.deepEqual(accepted.reasoning && 'steps' in accepted.reasoning ? accepted.reasoning.steps.map(s=>s.kind) : [],order)
+ assert.equal(isStoryCurveFoundationCurrent(accepted.foundation,accepted.beats),true)
+})
+test('explicit author-node rework previews first, requires adoption, preserves other edits and archives replaced text',async()=>{
+ model()
+ let c=updateCurveBeat(curve(),'beat-trigger','作者版本：先记录编号，保留图纸。').curve
+ c=updateCurveBeat(c,'beat-resolution','作者结尾：保留全部图纸并交付。').curve
+ const before=structuredClone(c)
+ const {preview}=await previewReasoningRecovery(idea,seed,c,['beat-trigger'],'让这次尝试更主动。')
+ assert.deepEqual(c,before)
+ assert.deepEqual(preview.authorReplacementBeatIds,['beat-trigger'])
+ const input=requests.at(-1)!
+ assert.equal(input.authorReplacementDrafts[0].text,c.beats.find(b=>b.id==='beat-trigger')!.detail)
+ assert.equal(input.feedback,'让这次尝试更主动。')
+ assert.ok(!input.context.protectedSteps.some((s:any)=>s.id==='beat-trigger'))
+ assert.ok(input.context.protectedSteps.some((s:any)=>s.id==='beat-resolution'))
+ const decisions=Object.fromEntries(preview.items.map(i=>[i.id,'accept' as const]))
+ assert.throws(()=>acceptReasoningRecovery(c,preview,decisions),code('STORY_DESIGN_REVIEW_REQUIRED'))
+ assert.throws(()=>acceptReasoningRecovery(c,{...preview,authorReplacementBeatIds:[]},decisions,[],requiredDesignProposalIds(preview.reasoning!)))
+ const declined=acceptReasoningRecovery(c,preview,Object.fromEntries(preview.items.map(i=>[i.id,'reject']))).curve
+ assert.deepEqual(declined.beats,c.beats)
+ const adopted=acceptReasoningRecovery(c,preview,decisions,[],requiredDesignProposalIds(preview.reasoning!)).curve
+ assert.equal(adopted.beats.find(b=>b.id==='beat-trigger')!.source,'system-proposal')
+ assert.equal(adopted.beats.find(b=>b.id==='beat-resolution')!.detail,c.beats.find(b=>b.id==='beat-resolution')!.detail)
+ assert.equal(adopted.beats.find(b=>b.id==='beat-resolution')!.status,'stale')
+ assert.ok(adopted.rejectedProposals!.some(b=>b.detail===c.beats.find(b=>b.id==='beat-trigger')!.detail))
+ assert.deepEqual(c,before)
+ await assert.rejects(()=>previewReasoningRecovery(idea,seed,c,['beat-current-state']),code('STORY_REASONING_REVIEW_CONFLICT'))
+})
+test('an author can reject and explicitly replace an edited node while keeping its original text',async()=>{
+ model();const c=updateCurveBeat(curve(),'beat-resolution','作者版本：把全部图纸交还。').curve
+ const rejected=rejectCurveBeat(c,'beat-resolution','想换一种结局。').curve
+ assert.equal(rejected.beats.find(b=>b.id==='beat-resolution')!.status,'rejected')
+ assert.equal(rejected.beats.find(b=>b.id==='beat-resolution')!.detail,c.beats.find(b=>b.id==='beat-resolution')!.detail)
+ await assert.rejects(()=>previewReasoningRecovery(idea,seed,rejected,['beat-resolution']),code('STORY_REASONING_REVIEW_CONFLICT'))
+ const {preview}=await previewReasoningRecovery(idea,seed,rejected,['beat-resolution'],undefined,true)
+ const adopted=acceptReasoningRecovery(rejected,preview,Object.fromEntries(preview.items.map(i=>[i.id,'accept'])),[],requiredDesignProposalIds(preview.reasoning!)).curve
+ assert.equal(adopted.beats.find(b=>b.id==='beat-resolution')!.status,'proposed')
+ const start=updateCurveBeat(curve(),'beat-current-state','作者修改起点。').curve
+ assert.throws(()=>rejectCurveBeat(start,'beat-current-state'),code('STORY_CURVE_USER_NODE_REJECT_FORBIDDEN'))
+})
+test('session API publishes an edited-node replacement only after explicit preview acceptance',async()=>{
+ model();const started=await service.startStoryCoCreation({idea,brief,operationId:'explicit-edited-node'})
+ const edited=await service.updateSessionCurveBeat({storyId:started.storyId,revision:started.revision,curveId:started.curve.id,beatId:'beat-resolution',detail:'作者版本：把完整图纸装好后归还。'})
+ const generated=await service.regenerateSessionCurveBeat({storyId:started.storyId,revision:edited.revision,curveId:started.curve.id,beatId:'beat-resolution',feedback:'保留归还，改变交接方式。'})
+ assert.equal(generated.curve.beats.find(b=>b.id==='beat-resolution')!.detail,edited.curve.beats.find(b=>b.id==='beat-resolution')!.detail)
+ const preview=generated.pendingCurveRegeneration!
+ assert.deepEqual(preview.authorReplacementBeatIds,['beat-resolution'])
+ const accepted=await service.resolveSessionCurveDependencies({storyId:started.storyId,revision:generated.revision,curveId:started.curve.id,previewId:preview.id,decisions:Object.fromEntries(preview.items.map(i=>[i.id,'accept'])),acceptedDesignProposalIds:requiredDesignProposalIds(preview.reasoning!)})
+ assert.equal(accepted.curve.beats.find(b=>b.id==='beat-resolution')!.detail,preview.items[0]!.newDetail)
+ assert.ok(accepted.curve.rejectedProposals!.some(b=>b.detail==='作者版本：把完整图纸装好后归还。'))
+})
+test('mapping and confirming a previously misordered draft repairs order without changing node text',()=>{
+ const c=curve()
+ const expected=c.beats.map(b=>b.id)
+ const trigger=c.beats.find(b=>b.kind==='trigger')!
+ c.beats=[...c.beats.filter(b=>b.id!==trigger.id),trigger]
+ assert.ok(c.reasoning && 'steps' in c.reasoning)
+ const proposal=structuredClone(c.reasoning)
+ assert.ok('steps' in proposal)
+ const step=proposal.steps.find(s=>s.id===trigger.id)!
+ proposal.steps=[...proposal.steps.filter(s=>s.id!==trigger.id),step]
+ proposal.designReview={required:true,acceptedProposalIds:[]}
+ c.reasoning=proposal
+ c.foundation!.reasoning=structuredClone(proposal)
+ const before=structuredClone(c)
+ const mapped=mapInitialReasoningProposal(proposal,c.design!,brief)
+ assert.deepEqual(mapped.beats.map(b=>b.id),expected)
+ const confirmed=confirmProvisionalCurve(c,requiredDesignProposalIds(c.reasoning)).confirmedCurve
+ assert.deepEqual(confirmed.beats.map(b=>b.id),expected)
+ assert.deepEqual(confirmed.beats.map(b=>b.detail),expected.map(id=>c.beats.find(b=>b.id===id)!.detail))
+ assert.deepEqual(c,before)
+ assert.equal(isStoryCurveFoundationCurrent(confirmed.foundation,confirmed.beats),true)
+ const cyclic=structuredClone(proposal)
+ cyclic.steps.find(s=>s.kind==='current-state')!.dependsOn=['beat-resolution']
+ assert.throws(()=>mapInitialReasoningProposal(cyclic,c.design!,brief),code('STORY_REASONING_INVALID_OUTPUT'))
 })
 test('edited preview preserves author nodes, reconstructs structure/foundation, and never makes a design fact',async()=>{
  model();const c=updateCurveBeat(curve(),'beat-trigger','作者编辑：先记录编号，不丢弃任何图纸。').curve,before=structuredClone(c)

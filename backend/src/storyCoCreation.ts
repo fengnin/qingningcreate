@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { currentStoryDesignContract } from './storyDesignContract.js'
-import { attachReasoningQuestions, previewReasoningRecovery, acceptReasoningRecovery } from './storyReasoningRecovery.js'
+import { currentStoryDesignContract, rebuildStoryDesignContract } from './storyDesignContract.js'
+import { attachReasoningQuestions, previewReasoningRecovery, acceptReasoningRecovery, reasoningFingerprint } from './storyReasoningRecovery.js'
 import { generateInitialReasoningCurve, mapInitialReasoningProposal } from './storyInitialReasoning.js'
 import { acceptStoryReasoningDesign } from './storyReasoningContract.js'
 import { reviewSelectedReasoningDesign, selectReasoningDesign } from './storyDesignReview.js'
@@ -322,8 +322,9 @@ function finalizeCurveMutation(
   // A terminal edit (or the last manually revised downstream node) needs no
   // model rewrite. Rebuild the proposal from explicit author edits so a simple
   // story cannot get stuck with an invalid foundation and no stale node to redo.
-  if (curve.preparation && curve.reasoning?.outcome === 'proposal' && 'steps' in curve.reasoning
-    && design && instruction.kind === 'replace' && !beats.some(b => b.status === 'stale')) {
+  if (curve.reasoning?.outcome === 'proposal' && 'steps' in curve.reasoning
+    && design && ((curve.preparation && instruction.kind === 'replace') || instruction.kind === 'author-revision')
+    && !beats.some(b => b.status === 'stale')) {
     const reasoning = structuredClone(curve.reasoning)
     const authoredIds = new Set(beats.filter(b => b.source === 'user-edit').map(b => b.id))
     for (const step of reasoning.steps) {
@@ -335,7 +336,7 @@ function finalizeCurveMutation(
     }
     const selected = selectReasoningDesign(reasoning, beats.filter(b => b.status !== 'rejected').map(b => b.id))
     if (selected.designReview) selected.designReview.acceptedProposalIds = selected.designReview.acceptedProposalIds.filter(id => !authoredIds.has(id))
-    const mapped = mapInitialReasoningProposal(selected, design, curve.brief, { allowSimplePlan: true })
+    const mapped = mapInitialReasoningProposal(selected, design, curve.brief, { allowSimplePlan: !!curve.preparation })
     const nextFoundation = mapped.foundation!
     nextFoundation.beatSignatures = Object.fromEntries(beats.filter(b => b.status !== 'rejected').map(b => [b.id, [b.kind, b.detail.trim(), b.causalAnchor?.trim() ?? '', [...(b.sourceFactIds ?? [])].sort().join(',')].join('|')]))
     return { ...curve, reasoning: selected, beats, foundation: nextFoundation, design: { ...mapped.design!, foundation: nextFoundation },
@@ -615,11 +616,29 @@ export function updateCurveBeat(
       }
     }
     return beat
-  }), affectedBeatIds)
+  }), affectedBeatIds, { preserveRejected: true })
 
   return {
     curve: finalizeCurveMutation(curve, beats, instruction),
     affectedBeatIds,
+  }
+}
+
+/** Retaining text is an author review decision, never model execution or a new fact. */
+export function retainAffectedCurveBeats(curve: ProvisionalCurve, beatIds: string[]): CurveMutationResult {
+  assertDraftCurve(curve)
+  if (!beatIds.length || new Set(beatIds).size !== beatIds.length
+    || beatIds.some(id => !curve.beats.some(b => b.id === id && b.status === 'stale' && b.source !== 'undecided'))) {
+    throw new AppError('请选择当前需要核对的节点；已拒绝或未确定的节点不能直接沿用。', 409, 'STORY_CURVE_RETENTION_CONFLICT')
+  }
+  const retained = new Set(beatIds)
+  const beats = curve.beats.map(beat => retained.has(beat.id)
+    ? { ...beat, status: beat.source === 'user-edit' ? 'edited' as const : beat.source === 'user-input' ? 'confirmed' as const : 'proposed' as const }
+    : beat)
+  return {
+    curve: finalizeCurveMutation(curve, beats, createAuthorInstruction('author-revision',
+      `作者已核对并沿用受影响节点的现有设计：${beatIds.join('、')}。仅保留设计，不表示动作已执行或结果已发生。`)),
+    affectedBeatIds: beatIds,
   }
 }
 
@@ -1072,6 +1091,7 @@ export async function regenerateCurveBeat(
   beatId: string,
   feedback?: string,
   replaceRejected = false,
+  authorPreview = false,
 ): Promise<CurveMutationResult> {
   assertLegacyRegenerationProtocol(curve)
   const target = requireCurveBeat(curve, beatId, '重推')
@@ -1083,7 +1103,7 @@ export async function regenerateCurveBeat(
   if (target.source === 'user-input' || target.kind === 'current-state') {
     throw new AppError('当前状态来自你的原始想法，请直接编辑它，不要让系统重写。', 400, 'STORY_CURVE_USER_NODE_REGENERATE_FORBIDDEN')
   }
-  if (target.source === 'user-edit') {
+  if (target.source === 'user-edit' && !authorPreview) {
     throw new AppError('这条内容是你的作者编辑。请继续编辑它，或先修改上游节点后再决定如何调整，系统不会覆盖它。', 400, 'STORY_CURVE_AUTHOR_NODE_REGENERATE_FORBIDDEN')
   }
 
@@ -1167,10 +1187,10 @@ export function rejectCurveBeat(
 ): CurveMutationResult {
   const target = requireCurveBeat(curve, beatId, '不采用')
   assertDraftCurve(curve)
-  if (target.source === 'user-input') {
+  if (target.source === 'user-input' || target.kind === 'current-state') {
     throw new AppError('这条内容来自你的原始想法，请编辑它或标记为暂不纳入，而不是删除。', 400, 'STORY_CURVE_USER_NODE_REJECT_FORBIDDEN')
   }
-  if (target.source !== 'system-proposal') {
+  if (target.source !== 'system-proposal' && target.source !== 'user-edit') {
     throw new AppError('只有系统提出的内容可以标记为不采用。你的编辑请直接修改或恢复。', 400, 'STORY_CURVE_AUTHOR_NODE_REJECT_FORBIDDEN')
   }
 
@@ -1180,7 +1200,7 @@ export function rejectCurveBeat(
   )), affectedBeatIds, { preserveRejected: true })
   const instruction = createAuthorInstruction(
     'remove',
-    reason?.trim() || `不采用“${target.title}”这条系统提案。`,
+    reason?.trim() || `不采用“${target.title}”这个节点。`,
     beatId,
   )
   return {
@@ -1290,24 +1310,26 @@ export async function previewClarificationCurveBeat(
   assertLegacyRegenerationProtocol(curve)
   const target = requireCurveBeat(curve, beatId, '重推')
   assertDraftCurve(curve)
+  const authorPreview = target.source === 'user-edit' && target.kind !== 'current-state'
   if (target.status === 'rejected' && !replaceRejected) {
     throw new AppError('这条提案已被你拒绝，不能重新生成。请编辑其他节点，或创建一个新的主线版本。', 409, 'STORY_CURVE_REJECTED_IMMUTABLE')
   }
-  if (target.source !== 'system-proposal') {
+  if ((target.source !== 'system-proposal' && !authorPreview) || target.kind === 'current-state') {
     throw new AppError('只有有效的系统提案可以生成替代预览。', 409, 'STORY_CLARIFICATION_AUTHOR_EDIT')
   }
   const blocking = getClarificationsForBeat(curve, beatId)
-  if ((!blocking.length && !getNearestAuthorEditedBeat(curve, target))
+  if ((!authorPreview && !blocking.length && !getNearestAuthorEditedBeat(curve, target))
     || blocking.some((item) => !item.resolution && item.status !== 'confirmed' && item.unknownHandling !== 'request-independent-proposal')) {
     throw new AppError('请先标记未知并选择生成独立提案。', 409, 'STORY_CLARIFICATION_REVIEW_REQUIRED')
   }
-  const result = await regenerateCurveBeat(idea, seed, curve, beatId, getClarificationFeedback(feedback, blocking), replaceRejected)
+  const result = await regenerateCurveBeat(idea, seed, curve, beatId, getClarificationFeedback(feedback, blocking), replaceRejected, authorPreview)
   const replacement = result.curve.beats.find((beat) => beat.id === beatId)!
   for (const clarification of blocking) await reviewClarificationReplacement(curve, clarification, replacement)
   return {
     affectedBeatIds: [beatId, ...result.affectedBeatIds],
     preview: {
       id: `regen-preview-${randomUUID()}`,
+      ...(authorPreview ? { authorReplacementBeatIds: [beatId], baseFingerprint: reasoningFingerprint(curve) } : {}),
       curveId: curve.id,
       ...(result.curve.generation ? { generation: result.curve.generation } : {}),
       items: [{
@@ -1339,6 +1361,16 @@ export function resolveAffectedCurveBeats(
   }
   if (!preview.items.length) {
     throw new AppError('没有可供审阅的重推提案。', 400, 'STORY_CURVE_REGENERATION_EMPTY')
+  }
+  if (preview.authorReplacementBeatIds?.length && preview.baseFingerprint !== reasoningFingerprint(curve)) {
+    throw new AppError('草案已变化，重推预览失效。', 409, 'STORY_REASONING_REVIEW_CONFLICT')
+  }
+  for (const item of preview.items) {
+    const target = curve.beats.find(beat => beat.id === item.beatId)
+    if (decisions[item.id] === 'accept' && target?.source === 'user-edit'
+      && (!preview.authorReplacementBeatIds?.includes(target.id) || target.kind === 'current-state')) {
+      throw new AppError('请先明确请求重新构思这个作者节点。', 409, 'STORY_CLARIFICATION_AUTHOR_EDIT')
+    }
   }
   const previewItemIds = new Set(preview.items.map((item) => item.id))
   const decisionIds = Object.keys(decisions)
@@ -1402,10 +1434,12 @@ export function resolveAffectedCurveBeats(
     return original?.detail !== replacement?.detail && replacement?.status === 'proposed'
   })
   return {
-    curve: markClarificationsResolved(finalizeCurveMutation(curve, beats, instruction, {
+    curve: markClarificationsResolved(finalizeCurveMutation(curve, markDependentBeatsStale(beats,
+      [...new Set([...acceptedBeatIds].flatMap(id => getDependentBeatIds(curve.beats, id)))].filter(id => !acceptedBeatIds.has(id)), { preserveRejected: true }), instruction, {
       ...(acceptedClarificationBeatIds.length && preview.generation ? { generation: preview.generation } : {}),
       rejectedProposals: [
         ...(curve.rejectedProposals ?? []),
+        ...curve.beats.filter(beat => beat.source === 'user-edit' && acceptedBeatIds.has(beat.id)).map(beat => ({ ...beat, id: `replaced-${randomUUID()}`, title: `${beat.title}（调整前版本）`, status: 'rejected' as const })),
         ...rejectedPreviewProposals,
       ],
     }), acceptedClarificationBeatIds),
@@ -1514,10 +1548,16 @@ export function confirmProvisionalCurve(curve: ProvisionalCurve, acceptedDesignP
     if (!curve.design) throw new AppError('设计材料不存在。', 409, 'STORY_DESIGN_REVIEW_REQUIRED')
     const mapped = mapInitialReasoningProposal(reasoning, curve.design, curve.brief, { allowSimplePlan: !!curve.preparation })
     if (mapped.foundation) mapped.foundation.beatSignatures = { ...priorFoundation.beatSignatures }
-    curve = { ...curve, reasoning,
+    curve = { ...curve, reasoning: mapped.reasoning,
+      beats: [...mapped.beats.map(beat => curve.beats.find(old => old.id === beat.id)!), ...curve.beats.filter(beat => beat.status === 'rejected' && !mapped.beats.some(mappedBeat => mappedBeat.id === beat.id))],
       foundation: mapped.foundation, design: mapped.design }
   }
   const design = validateCurveForConfirmation(curve)
+  // Compile only after the author has resolved all affected nodes and reviewed
+  // this exact version. Reading a historical contract never repairs it.
+  if (curve.preparation && !currentStoryDesignContract(curve)) {
+    curve = { ...curve, designContract: rebuildStoryDesignContract(curve), mainlineReview: undefined }
+  }
   const foundation = curve.foundation
     ?? design?.foundation
   if (!foundation) {

@@ -10,6 +10,20 @@ export function activePreparationMaterial(p: StoryPreparation): StoryPreparation
   }))]
 }
 
+/** Preserve every active requirement excerpt, independently of model-selected
+ * mainline anchors. Source labels describe author intent, never execution. */
+export function preparationAuthorRequirements(p: StoryPreparation) {
+  const kinds = { 'author-setting': 'setting', 'author-direction': 'development',
+    'author-boundaries': 'boundary', 'author-note': 'development' } as const
+  return activePreparationMaterial(p).flatMap(item => {
+    const kind = kinds[item.sourceId as keyof typeof kinds]
+    return kind ? [{ id: item.id, sourceId: item.sourceId, quote: item.quote, kind,
+      status: item.role === 'unknown' ? 'reserved-unknown' as const : 'required' as const }] : []
+  })
+}
+
+export const authorRequirementsGuidance = `authorRequirements由程序从作者有效补充原文保存，不依赖mainlineAnchors的选择。setting是已定设定；development是未来应兑现的发展要求，不是已发生结果；boundary是必须遵守的边界。status=reserved-unknown的内容继续保持未定，不擅自填成事实。按原文范围执行，不自行扩大：当前节点须保持相容，不要求每段重复要求或提前完成结尾；完整设计及完整正文须核对发展要求是否兑现。不能仅凭出现相同关键词判定兑现，需要故事中的行动及结果支持。`
+
 /** Classify existing author excerpts by their recorded role/source, without
  * inferring events, new unknowns, or authority from the candidate's wording. */
 export function preparationExplanationContext(p: StoryPreparation, candidate: StoryPreparationExplanationRequest['candidate']) {
@@ -21,6 +35,7 @@ export function preparationExplanationContext(p: StoryPreparation, candidate: St
   const revisedSources = new Set(p.material.filter(m => superseded.has(m.id)).map(m => m.sourceId))
   return {
     stage: 'direction-design' as const,
+    authorRequirements: preparationAuthorRequirements(p),
     authorMaterial: {
       authority: 'author-established-material' as const,
       settings: established.filter(m => m.role === 'fact'),

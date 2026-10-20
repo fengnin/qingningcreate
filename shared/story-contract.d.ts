@@ -289,6 +289,14 @@ export interface StoryDesignContract {
   /** Fingerprint of active source material and selected design, not prose. */
   sourceHash: string
   goal: { text: string; sourceIds: string[] }
+  /** Source-owned requirements; optional for historical saved contracts. */
+  authorRequirements?: Array<{
+    id: string
+    sourceId: string
+    quote: string
+    kind: 'setting' | 'development' | 'boundary'
+    status: 'required' | 'reserved-unknown'
+  }>
   mainlineGoals: { sourceId: string; quote: string }[]
   mainlineAnchors: { sourceId: string; quote: string; kind: string }[]
   selectedDirection?: string
@@ -761,6 +769,12 @@ export interface StoryCurveDependenciesRegenerationRequest extends StorySessionV
   feedback?: string
 }
 
+/** Explicit author receipt for keeping affected nodes without a model rewrite. */
+export interface StoryCurveBeatRetentionRequest extends StorySessionVersion {
+  curveId: string
+  beatIds: string[]
+}
+
 export type StoryCurveRegenerationDecision = 'accept' | 'reject'
 
 export interface StoryCurveRegenerationPreviewItem {
@@ -775,6 +789,8 @@ export interface StoryCurveRegenerationPreviewItem {
 }
 
 export interface StoryCurveRegenerationPreview {
+  /** Server-recorded permission for explicitly requested author-node replacements. */
+  authorReplacementBeatIds?: string[]
   reasoning?: import('./story-reasoning-contract.js').StoryReasoningProposal
   baseFingerprint?: string
   excludedUnknownIds?: string[]

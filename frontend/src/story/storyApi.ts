@@ -41,6 +41,7 @@ import type {
   StoryCurveBeatRegenerationRequest,
   StoryCurveBeatRejectRequest,
   StoryCurveDependenciesRegenerationRequest,
+  StoryCurveBeatRetentionRequest,
   StorySourceFactDispositionRequest,
   StoryCurveBeatUpdateRequest,
   StoryCurveConfirmationResponse,
@@ -172,6 +173,10 @@ export function requestCurveRegenerationResolution(
   request: StoryCurveRegenerationResolutionRequest,
 ): Promise<StoryCurveMutationResponse> {
   return postJson('/api/story/curve/regenerate-affected/resolve', request, parseStoryCurveMutationResponse)
+}
+
+export function requestCurveBeatRetention(request: StoryCurveBeatRetentionRequest): Promise<StoryCurveMutationResponse> {
+  return postJson('/api/story/curve/retain-affected', request, parseStoryCurveMutationResponse)
 }
 
 export function requestSourceFactDisposition(
@@ -742,7 +747,18 @@ function parseDesignContract(value: unknown): NonNullable<ProvisionalCurve['desi
     return { sourceId: readText(entry, 'sourceId'), quote: readText(entry, 'quote') }
   }
   const bridge = record.causalBridge === null ? null : expectRecord(record.causalBridge)
+  let authorRequirements: NonNullable<ProvisionalCurve['designContract']>['authorRequirements']
+  if (record.authorRequirements !== undefined) {
+    if (!Array.isArray(record.authorRequirements)) throwInvalidResponse()
+    authorRequirements = record.authorRequirements.map(value => {
+      const entry = expectRecord(value), kind = entry.kind, status = entry.status
+      if (kind !== 'setting' && kind !== 'development' && kind !== 'boundary') throwInvalidResponse()
+      if (status !== 'required' && status !== 'reserved-unknown') throwInvalidResponse()
+      return { id: readText(entry, 'id'), ...quote(value), kind, status }
+    })
+  }
   return { protocol: 1, authority: 'future-design', sourceHash: readText(record, 'sourceHash'), goal: { text: readText(goal, 'text'), sourceIds: readIdentifierList(goal, 'sourceIds') },
+    ...(authorRequirements === undefined ? {} : { authorRequirements }),
     mainlineGoals: record.mainlineGoals.map(quote),
     mainlineAnchors: record.mainlineAnchors.map(value => ({ ...quote(value), kind: readText(expectRecord(value), 'kind') })),
     ...(record.selectedDirection === undefined ? {} : { selectedDirection: readText(record, 'selectedDirection') }),
@@ -853,7 +869,9 @@ function parseStoryCurveFoundation(value: unknown): StoryCurveFoundation {
       promise: slot(storyEnds, 'promise'),
     },
     approach: {
-      intent: readText(approach, 'intent'),
+      // Author edits can remove all separate action proposals. The edited
+      // steps remain authoritative; do not require an invented display slot.
+      intent: slot(approach, 'intent'),
       cost: slot(approach, 'cost'),
     },
     ...(sourceFactIdsRecord ? {

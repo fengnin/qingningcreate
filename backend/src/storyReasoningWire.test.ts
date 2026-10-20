@@ -69,3 +69,21 @@ test('source references recover exact author and edit text without transcription
     assert.throws(() => parseStoryReasoningWire(input, { ...context, sources }), invalid, change)
   }
 })
+
+test('author-design quotations remain future proposals instead of becoming executed facts', () => {
+  const context = { ...reasoningEditExample.context }
+  const wire = storyReasoningWireExample(reasoningEditExample.output, context) as any
+  wire.steps[0].content = { kind: 'quote', sourceId: 'edit-beat-trigger', quote: '先分类，日期不清的保留待问。' }
+  const parsed = parseStoryReasoningWire(wire, context)
+  assert.ok('steps' in parsed)
+  assert.equal(parsed.steps[0]!.basis.kind, 'design-proposal')
+  assert.throws(() => acceptStoryReasoningDesign(parsed), (e: unknown) => e instanceof AppError && e.code === 'STORY_DESIGN_REVIEW_REQUIRED')
+  wire.steps[0].content.quote = '日期不清的照片已经扔掉了。'
+  assert.throws(() => parseStoryReasoningWire(wire, context), invalid)
+  wire.steps[0].content.quote = '日期不清的保留待问。'
+  assert.throws(() => parseStoryReasoningWire(wire, context), invalid, 'cannot omit the author condition')
+  wire.steps[0].content = { kind: 'source', sourceId: 'edit-beat-trigger' }
+  const sourceRef = parseStoryReasoningWire(wire, context)
+  assert.ok('steps' in sourceRef)
+  assert.equal(sourceRef.steps[0]!.basis.kind, 'design-proposal')
+})

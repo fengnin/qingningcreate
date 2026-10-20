@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { createStorySessionActions, type StorySessionActions } from './storySessionActions'
-import { useStorySessionState } from './useStorySessionState'
+import { persistStoryId, useStorySessionState } from './useStorySessionState'
 import { useStoryStageRequest } from './useStoryStageRequest'
 import type {
   GeneratedStory,
@@ -83,7 +83,10 @@ export function useStorySession(): StorySession {
   useEffect(() => {
     if (restoreStarted.current) return
     restoreStarted.current = true
-    void actions.restoreSession()
+    // Each page load starts a new creation. Keep navigation within this page
+    // in React state, but discard handles saved by earlier app versions.
+    persistStoryId(undefined)
+    state.markRestoreAttempted()
   }, [])
 
   return {

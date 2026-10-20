@@ -86,7 +86,7 @@ export const storyWritingMainlineReviewSchema = s.object({
 export const storyWritingConsistencyReviewSchema = s.object({
   verdict: s.enum('supported', 'conflict', 'uncertain'),
   issues: s.array(s.object({
-    kind: s.enum('state-reversal', 'repeated-completion', 'time-order', 'location-reversal', 'possession-reversal'),
+    kind: s.enum('state-reversal', 'repeated-completion', 'time-order', 'location-reversal', 'possession-reversal', 'causal-break', 'time-gap', 'scene-transition', 'material-purpose'),
     evidenceIds: refs,
     reason: s.text,
   }), 0, 6),
@@ -127,7 +127,11 @@ export const reasoningOutputSchema = (stage: 'initial-design' | 'edit-preview'):
     constraints: s.array(node()), actions: s.array(node({ constraintIds: refs, relationIds: refs, unknownIds: refs, respondsToEditIds: refs }), 0, 12),
     relations: s.array(node({ relation: s.enum('cause', 'conflict', 'compatible', 'sequence'), fromIds: refs, toIds: refs })),
     unknowns: s.array(s.object({ id: s.text, question: s.text, sourceIds: refs, dependentIds: refs })) }
-  return s.either(s.object({ ...common, outcome: s.enum('proposal'), steps: s.array(node({ kind: s.text, title: s.text,
-    actionIds: refs, relationIds: refs, dependsOn: refs, respondsToEditIds: refs }), 1, 7) }),
+  const stepFields = { kind: s.text, title: s.text, actionIds: refs, relationIds: refs, dependsOn: refs, respondsToEditIds: refs }
+  // Recovery must propose actual replacement scenes, not copy a source goal
+  // into every node. Source references remain available in proposal evidence.
+  const step = stage === 'edit-preview' ? s.object({ id: s.text,
+    content: s.object({ kind: s.enum('proposal'), text: s.text, evidence, unknownIds: refs }), ...stepFields }) : node(stepFields)
+  return s.either(s.object({ ...common, outcome: s.enum('proposal'), steps: s.array(step, 1, 7) }),
     s.object({ ...common, outcome: s.enum('questions'), questions: s.array(s.object({ unknownId: s.text, dependentIds: refs }), 1, 8) }))
 }

@@ -3,7 +3,7 @@ import { AppError, requestQwenJson, summarizeModelResponse, withModelDiagnostic 
 import { parseStoryReasoningWire } from './storyReasoningWire.js'
 import { storyReasoningSystemPrompt } from './storyReasoningPrompt.js'
 import { reasoningOutputSchema } from './storyOutputSchemas.js'
-import type { StoryReasoningProposal, StoryReasoningStatement, StoryReasoningValidationContext } from '../../shared/story-reasoning-contract.js'
+import type { StoryReasoningProposal, StoryReasoningDesignStep, StoryReasoningStatement, StoryReasoningValidationContext } from '../../shared/story-reasoning-contract.js'
 import type { CreativeBrief, CurveBeat, ProvisionalCurve, StoryCurveFoundation, StoryDesignRecord, StorySeed } from '../../shared/story-contract.js'
 
 export const initialReasoningSystemPrompt = storyReasoningSystemPrompt('initial-design')
@@ -29,7 +29,9 @@ export function mapInitialReasoningProposal(proposal: StoryReasoningProposal, de
     const refs = [...(linked.actionIds ?? []), ...(linked.relationIds ?? []), ...(linked.constraintIds ?? []), ...(linked.fromIds ?? []), ...(linked.toIds ?? [])]
     return [...new Set([...evidence, ...refs.flatMap((id: string) => byId.has(id) ? sourcesFor(byId.get(id)!, seen) : [])])]
   }
-  const steps = proposal.outcome === 'proposal' && 'steps' in proposal ? proposal.steps : []
+  const steps = proposal.outcome === 'proposal' && 'steps' in proposal ? orderReasoningSteps(proposal.steps) : []
+  const normalizedProposal = structuredClone(proposal)
+  if (normalizedProposal.outcome === 'proposal' && 'steps' in normalizedProposal) normalizedProposal.steps = steps
   const requiredKinds = options.allowSimplePlan ? ['current-state','trigger','resolution'] : ['current-state','trigger','escalation','climax-choice','resolution']
   if (steps.length && (steps.length < requiredKinds.length || new Set(steps.map(s => s.kind)).size !== steps.length
     || steps.some(s => s.id !== `beat-${s.kind}`)
@@ -45,7 +47,7 @@ export function mapInitialReasoningProposal(proposal: StoryReasoningProposal, de
   const conflicts = proposal.relations.filter(r => r.relation === 'conflict').map(r => r.text).join('\n')
   const goal = proposal.goal?.text ?? ''
   const foundation: StoryCurveFoundation | undefined = steps.length ? {
-    reasoning: structuredClone(proposal), preservedGoal: goal,
+    reasoning: structuredClone(normalizedProposal), preservedGoal: goal,
     conflictCore: { goal, obstacle: conflicts, tradeoff: '' },
     predicament: { title: text('trigger'), variationAxis: 'commitment', immediateSituation: text('current-state'),
       obstacle: conflicts, tradeoff: '', urgency: '', choice: text('climax-choice'), plausibleCost: '' },
@@ -62,8 +64,23 @@ export function mapInitialReasoningProposal(proposal: StoryReasoningProposal, de
   }) }
   const now = Date.now()
   return { id: `curve-${randomUUID()}`, title: '待审阅的故事设计', status: 'draft', brief, beats, instructions: [],
-    reasoning: structuredClone(proposal), design: nextDesign, foundation,
+    reasoning: structuredClone(normalizedProposal), design: nextDesign, foundation,
     generation: { origin: 'model', dramaticMechanism: '模型直接生成待审结构；引用只证明来源，不证明因果成立' }, createdAt: now, updatedAt: now }
+}
+
+/** Keep model/source order where possible while ensuring every dependency is shown first. */
+function orderReasoningSteps(steps: StoryReasoningDesignStep[]): StoryReasoningDesignStep[] {
+  const byId = new Map(steps.map(step => [step.id, step]))
+  const remaining = new Set(steps.map(step => step.id))
+  const ordered: StoryReasoningDesignStep[] = []
+  while (remaining.size) {
+    const next = steps.find(step => remaining.has(step.id)
+      && step.dependsOn.every(id => !byId.has(id) || !remaining.has(id)))
+    if (!next) throw new AppError('故事设计节点的先后依赖存在循环，无法确定展示顺序。', 502, 'STORY_REASONING_INVALID_OUTPUT')
+    ordered.push(next)
+    remaining.delete(next.id)
+  }
+  return ordered
 }
 
 export async function generateInitialReasoningCurve(idea: string, seed: StorySeed, brief: CreativeBrief, design: StoryDesignRecord,

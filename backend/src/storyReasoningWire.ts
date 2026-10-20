@@ -23,6 +23,15 @@ export function parseStoryReasoningWire(value: unknown, context: StoryReasoningV
     if (!source || !source.text.trim() || source.text.length > 240) return invalid(path)
     return { sourceId: source.id, quote: source.text }
   }
+  const basisForReference = (ref: { sourceId: string; quote: string }) => {
+    const source = context.sources.find(source => source.id === ref.sourceId)
+    // Edit recovery may repeat a protected author instruction as a proposal.
+    // Keep its entire condition/negation, and never grant it factual authority.
+    if (source?.authority === 'author-design' && context.stage === 'edit-preview' && ref.quote !== source.text) invalid('author-design.quote')
+    return source?.authority === 'author-design' && context.stage === 'edit-preview'
+      ? { kind: 'design-proposal' as const, evidence: [ref], unknownIds: [] }
+      : { kind: 'author-text' as const, evidence: [ref] }
+  }
   const evidence = (value: unknown, path: string) => {
     if (!Array.isArray(value)) return invalid(path)
     return value.map((entry, index) => {
@@ -39,11 +48,15 @@ export function parseStoryReasoningWire(value: unknown, context: StoryReasoningV
     if (c.kind === 'source') {
       exact(c, ['kind', 'sourceId'], `${path}.content`)
       const ref = sourceReference(c.sourceId, `${path}.content`)
-      return { ...rest, text: ref.quote, basis: { kind: 'author-text', evidence: [ref] } }
+      return { ...rest, text: ref.quote, basis: basisForReference(ref) }
     }
     if (c.kind === 'quote') {
       exact(c, ['kind', 'sourceId', 'quote'], `${path}.content`)
-      return { ...rest, text: c.quote, basis: { kind: 'author-text', evidence: [{ sourceId: c.sourceId, quote: c.quote }] } }
+      if (typeof c.sourceId !== 'string' || typeof c.quote !== 'string') return invalid(`${path}.content.quote`)
+      const ref = { sourceId: c.sourceId, quote: c.quote }
+      const source = context.sources.find(source => source.id === ref.sourceId)
+      if (!source || !source.text.includes(ref.quote)) return invalid(`${path}.content.quote`)
+      return { ...rest, text: ref.quote, basis: basisForReference(ref) }
     }
     if (c.kind === 'proposal') {
       exact(c, ['kind', 'text', 'evidence', 'unknownIds'], `${path}.content`)

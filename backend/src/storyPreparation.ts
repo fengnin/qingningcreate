@@ -522,13 +522,16 @@ export function preparationSources(idea: string, brief: CreativeBrief): StoryPre
 
 export function parseMainlineAnchors(value: unknown, sources: StoryPreparation['sources'], hasGoal: boolean,
   frames: ReturnType<typeof framePreparationSources> = []): StoryMainlineAnchor[] {
-  const anchors = splitReferenceEntries(value, frames, 'mainlineAnchors', 16, ['kind']).map((entry, index) => {
+  const anchors = splitReferenceEntries(value, frames, 'mainlineAnchors', 16, ['kind']).flatMap((entry, index) => {
     const item = object(entry, ['id', 'kind', ...(entry && typeof entry === 'object' && 'materialIds' in entry ? ['materialIds'] : ['sourceId', 'quote'])])
     const suppliedKind = String(item.kind)
     const kind = suppliedKind === 'condition' || suppliedKind === 'time' ? 'constraint' : suppliedKind
     if (!['character', 'relationship', 'place', 'action', 'object', 'constraint'].includes(kind)) invalid(`mainlineAnchors[${index}].kind 不合法。`)
+    // An empty selection asserts nothing. Omit optional elements rather than
+    // inventing a source; required action coverage is still checked below.
+    if (Array.isArray(item.materialIds) && item.materialIds.length === 0) return []
     const reference = resolvePreparationReference(item, sources, frames, `mainlineAnchors[${index}]`)
-    return { id: text(item.id, 80), kind: isAuthorRequirementSource(reference.sourceId) ? 'constraint' as const : kind as StoryMainlineAnchor['kind'], ...reference }
+    return [{ id: text(item.id, 80), kind: isAuthorRequirementSource(reference.sourceId) ? 'constraint' as const : kind as StoryMainlineAnchor['kind'], ...reference }]
   })
   unique(anchors)
   if (hasGoal && (!anchors.length || !anchors.some(anchor => anchor.kind === 'action'))) invalid('人物目标缺少可核对的主线行动。')
@@ -756,6 +759,7 @@ export async function generateStoryPreparation(idea: string, brief: CreativeBrie
     }
     const options = { systemPrompt: `${systemPrompt}\nauthor-direction、author-boundaries、author-note 都是作者创作要求，只能作为 constraint，不能写入 characterGoalIds 或 mainlineGoals。referenceContract.characterGoalMaterialIds 只是允许选择的范围，不表示这些片段已经是目标；仍须按语义判断。sourceGroups 列出同来源片段，目标及要素引用按组分项。\n输出另含 appealMaterialIds 数组：从原文选择零至三个最值得继续发展的人物互动、不同期待、习惯、反差或活动本身的片段 ID，保留原想法的看点。不编写解释、结局或人物成长要求；没有明确线索就给空数组。这只是创作参考，不是事实分类、人物目标或作者强制要求，不能影响前述分类。`, userPrompt: JSON.stringify({ sources, material: frames, referenceContract }), temperature: 0, maxTokens: 1600,
       diagnosticStage: 'preparation-character-intent', outputSchema: schemas.intent }
+    options.systemPrompt += '\n未明确指定的要素直接省略该项，例如未指定地点就不输出place。每个输出项的materialIds至少一个有效ID；不要为了凑齐kind输出空引用。'
     let output = await requestQwenJson(options)
     let parsed: ReturnType<typeof parseIntent>
     try { parsed = parseIntent(output) } catch (error) {

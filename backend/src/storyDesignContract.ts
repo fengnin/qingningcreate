@@ -1,6 +1,6 @@
 import { AppError } from './qwen.js'
 import { createHash } from 'node:crypto'
-import { activePreparationMaterial } from './storyPreparationContext.js'
+import { activePreparationMaterial, preparationAuthorRequirements } from './storyPreparationContext.js'
 import type { StoryPreparation } from '../../shared/story-preparation.js'
 import type { CurveBeatKind, StoryDesignContract, ProvisionalCurve, ConfirmedCurve } from '../../shared/story-contract.js'
 
@@ -39,6 +39,7 @@ export function compileStoryDesignContract(p: StoryPreparation, steps: DesignCon
     sourceHash: createHash('sha256').update(JSON.stringify({ active, selected, sources: p.sources,
       selectedDirection: p.authorReview?.selectedStoryDirection, mainlineGoals: p.mainlineGoals, mainlineAnchors: p.mainlineAnchors })).digest('hex'),
     goal: { text: goal, sourceIds: active.filter(item => item.quote === goal).map(item => item.id) },
+    authorRequirements: preparationAuthorRequirements(p),
     mainlineGoals: current(p.mainlineGoals ?? []).map(({ sourceId, quote }) => ({ sourceId, quote })),
     mainlineAnchors: current(p.mainlineAnchors ?? []).map(({ sourceId, quote, kind }) => ({ sourceId, quote, kind })),
     causalBridge: selected?.explanation
@@ -59,6 +60,35 @@ export function currentStoryDesignContract(curve: ProvisionalCurve | ConfirmedCu
     const node = contract.nodes[index]!
     return beat.id !== node.beatId || beat.kind !== node.kind || beat.detail !== node.text || beat.status === 'stale'
   })) return undefined
+  return contract
+}
+
+/** Explicit compilation at author confirmation, never an implicit read repair.
+ * Changed text has no trustworthy old action/change summaries to carry over. */
+export function rebuildStoryDesignContract(curve: ProvisionalCurve): StoryDesignContract {
+  if (!curve.preparation || curve.beats.some(b => b.status === 'stale')) {
+    throw new AppError('请先核对受影响的故事节点。', 409, 'STORY_CURVE_FOUNDATION_OUT_OF_DATE')
+  }
+  const activeIds = new Set(activePreparationMaterial(curve.preparation).filter(m => m.role !== 'unknown').map(m => m.id))
+  const beats = curve.beats.filter(b => b.status !== 'rejected')
+  const contract = compileStoryDesignContract(curve.preparation, beats.map(b => {
+    const prior = curve.designContract?.nodes.find(n => n.beatId === b.id && n.text === b.detail)
+    return { kind: b.kind, text: b.detail, materialIds: (prior?.sourceIds ?? []).filter(id => activeIds.has(id)),
+      ...(prior ? { action: prior.action, expectedChange: prior.expectedChange } : {}) }
+  }), curve.designContract?.goal.text ?? curve.foundation?.preservedGoal ?? curve.reasoning?.goal?.text)
+  contract.nodes = contract.nodes.map((n, i) => ({ ...n, beatId: beats[i]!.id, dependsOn: [...beats[i]!.dependsOn] }))
+  contract.authorRequirements = [...contract.authorRequirements ?? [], ...beats.filter(b => b.source === 'user-edit').map(b => ({
+    id: `edit-${b.id}`, sourceId: `edit-${b.id}`, quote: b.detail, kind: 'development' as const, status: 'required' as const,
+  }))]
+  // Carry the author's actual request, not just the model's interpretation.
+  // A later direct node edit supersedes this request for that node.
+  for (const beat of beats.filter(b => b.source === 'user-edit')) {
+    const instruction = [...curve.instructions].reverse().find(i => i.targetBeatId === beat.id)
+    if (instruction?.kind === 'author-revision') contract.authorRequirements.push({
+      id: `author-request-${beat.id}`, sourceId: `author-request-${beat.id}`, quote: instruction.text,
+      kind: 'development', status: 'required',
+    })
+  }
   return contract
 }
 

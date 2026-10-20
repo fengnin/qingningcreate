@@ -482,13 +482,14 @@ function WritingWorkspace({ session }: { session: StorySession }) {
   const activeSegment = segments.find(segment => segment.id === selectedSegmentId) ?? segments.find(segment => segment.status === 'pending')
   const [text, setText] = useState(activeSegment?.text ?? '')
   const [feedback, setFeedback] = useState('')
+  const [editMode, setEditMode] = useState<'edit' | 'rewrite'>()
   const [retryRequest, setRetryRequest] = useState<Parameters<StorySession['writeStory']>[0]>()
   const curve = session.confirmedCurve!
   const acceptedCount = segments.filter(segment => segment.status === 'accepted').length
   const beats = curve.beats.filter(beat => beat.status !== 'rejected')
   const busy = session.stageStatus === 'loading'
 
-  useEffect(() => setSelectedSegmentId(undefined), [draft])
+  useEffect(() => { setSelectedSegmentId(undefined); setEditMode(undefined) }, [draft])
 
   useEffect(() => {
     setText(activeSegment?.text ?? '')
@@ -530,30 +531,42 @@ function WritingWorkspace({ session }: { session: StorySession }) {
             {retryRequest && <button className="text-action" type="button" disabled={busy} onClick={() => void session.writeStory(retryRequest)}><RefreshCcw size={15} /> 重试本次操作</button>}
           </div>
         )}
-        {segments.filter(segment => segment.id !== activeSegment?.id).map(segment => (
+        {segments.map((segment, index) => segment.id !== activeSegment?.id ? (
           <article className="writing-segment is-accepted" key={segment.id}>
             <header><span>第 {segments.indexOf(segment) + 1} 段 · {segment.status === 'accepted' ? '已采用' : '待审阅'}</span><strong>{segment.label}</strong></header>
             <div className="writing-prose">{segment.text.split(/\n\s*\n/).map((paragraph, paragraphIndex) => <p key={paragraphIndex}>{paragraph}</p>)}</div>
-            <button type="button" className="text-action" disabled={busy} onClick={() => setSelectedSegmentId(segment.id)}><PencilLine size={15} /> 修改或重写这段</button>
-          </article>
-        ))}
-        {activeSegment ? (
-          <article className="writing-segment is-pending">
-            <header><span>当前段 · 待你审阅</span><strong>{activeSegment.label}</strong></header>
-            <label className="writing-editor-label" htmlFor="writing-segment-text">故事正文</label>
-            <textarea id="writing-segment-text" className="writing-segment-editor" value={text} maxLength={6000} disabled={busy} onChange={event => setText(event.target.value)} />
-            <label className="writing-editor-label" htmlFor="writing-segment-feedback">局部重写意见 <span>选填</span></label>
-            <textarea id="writing-segment-feedback" className="writing-feedback-editor" value={feedback} maxLength={600} disabled={busy} placeholder="例如：保留发生的事，把青柠的犹豫写得更细一些。" onChange={event => setFeedback(event.target.value)} />
-            <p className="writing-edit-note">一次说一项想调整的地方，其他内容会尽量保留。</p>
             <div className="writing-segment-actions">
-              {text !== activeSegment.text ? <button type="button" className="primary-action" disabled={busy || !text.trim()} onClick={() => run({ action: 'edit', segmentId: activeSegment.id, text })}><Check size={16} /> 保存修改</button>
-                : activeSegment.status === 'pending' && <button type="button" className="primary-action" disabled={busy} onClick={() => run({ action: 'accept', segmentId: activeSegment.id })}><Check size={16} /> 采用这段</button>}
-              <button type="button" className="text-action" disabled={busy || text !== activeSegment.text} onClick={() => run({ action: 'regenerate', segmentId: activeSegment.id, ...(feedback.trim() ? { feedback: feedback.trim() } : {}) })}><RefreshCcw size={15} /> 局部重写</button>
-              {selectedSegmentId && <button type="button" className="text-action" disabled={busy} onClick={() => setSelectedSegmentId(undefined)}>取消</button>}
+              <button type="button" className="text-action" disabled={busy} onClick={() => { setSelectedSegmentId(segment.id); setEditMode('edit') }}><PencilLine size={15} /> 直接修改正文</button>
+              <button type="button" className="text-action" disabled={busy} onClick={() => { setSelectedSegmentId(segment.id); setEditMode('rewrite') }}><RefreshCcw size={15} /> 让系统重写</button>
             </div>
-            {(text !== activeSegment.text || selectedSegmentId) && <p className="writing-edit-note">保存修改后再采用。修改或重写本段会移除后续正文，之后按新版本继续生成。</p>}
           </article>
-        ) : draft?.complete ? (
+        ) : activeSegment ? (
+          <article className="writing-segment is-pending" key={segment.id}>
+            <header><span>第 {index + 1} 段 · {activeSegment.status === 'accepted' ? '正在修改' : '待你审阅'}</span><strong>{activeSegment.label}</strong></header>
+            {editMode === 'edit' ? <>
+            <label className="writing-editor-label" htmlFor="writing-segment-text">直接修改正文</label>
+            <p className="writing-edit-note">可以直接在下方修改文字，改好后点击“保存正文修改”，再采用这一段。</p>
+            <textarea id="writing-segment-text" className="writing-segment-editor" value={text} maxLength={6000} disabled={busy} onChange={event => setText(event.target.value)} />
+            </> : <div className="writing-prose">{activeSegment.text.split(/\n\s*\n/).map((paragraph, paragraphIndex) => <p key={paragraphIndex}>{paragraph}</p>)}</div>}
+            {editMode === 'rewrite' && <div className="writing-rewrite-panel">
+              <label className="writing-editor-label" htmlFor="writing-segment-feedback">希望怎么调整？ <span>选填</span></label>
+              <textarea autoFocus id="writing-segment-feedback" className="writing-feedback-editor" value={feedback} maxLength={600} disabled={busy} placeholder="例如：保留发生的事，把青柠的犹豫写得更细一些。" onChange={event => setFeedback(event.target.value)} />
+              <p className="writing-edit-note">一次说一项想调整的地方，其他内容会尽量保留。</p>
+            </div>}
+            <div className="writing-segment-actions">
+              {!editMode && <>
+                <button type="button" className="text-action" disabled={busy} onClick={() => setEditMode('edit')}><PencilLine size={15} /> 直接修改正文</button>
+                <button type="button" className="text-action" disabled={busy} onClick={() => setEditMode('rewrite')}><RefreshCcw size={15} /> 让系统重写</button>
+                {activeSegment.status === 'pending' && <button type="button" className="primary-action" disabled={busy} onClick={() => run({ action: 'accept', segmentId: activeSegment.id })}><Check size={16} /> 采用这段</button>}
+              </>}
+              {editMode === 'edit' && <button type="button" className="primary-action" disabled={busy || !text.trim() || text === activeSegment.text} onClick={() => run({ action: 'edit', segmentId: activeSegment.id, text })}><Check size={16} /> 保存正文修改</button>}
+              {editMode === 'rewrite' && <button type="button" className="primary-action" disabled={busy} onClick={() => run({ action: 'regenerate', segmentId: activeSegment.id, ...(feedback.trim() ? { feedback: feedback.trim() } : {}) })}><RefreshCcw size={15} /> 按意见重写这段</button>}
+              {(editMode || selectedSegmentId) && <button type="button" className="text-action" disabled={busy} onClick={() => { setSelectedSegmentId(undefined); setEditMode(undefined); setText(activeSegment.text); setFeedback('') }}>取消</button>}
+            </div>
+            {editMode && <p className="writing-edit-note">修改或重写本段会移除后续正文，之后按新版本继续生成。</p>}
+          </article>
+        ) : null)}
+        {!activeSegment && (draft?.complete ? (
           <p className="writing-complete-note"><Check size={17} /> 所有段落已采用，完整故事已经整理完成。</p>
         ) : segments.length === 0 ? (
           <div className="writing-empty">
@@ -565,7 +578,7 @@ function WritingWorkspace({ session }: { session: StorySession }) {
             <p><Check size={16} /> 当前段已采用，可以继续。</p>
             <button type="button" className="primary-action" disabled={busy} onClick={() => run({ action: 'next' })}>{busy ? '正在写下一段…' : '继续生成下一段'} <ArrowRight size={17} /></button>
           </div>
-        )}
+        ))}
       </section>
     </StoryWorkspace>
   )
@@ -1048,7 +1061,7 @@ function StoryControlPanel({ session, currentTurn }: {
     <section className="story-control-panel" aria-label="作者控制与角色行动">
       <div className="author-control-block">
         <header className="control-block-heading">
-          <span><PencilLine size={15} /> 作者调整主线</span>
+          <span><PencilLine size={15} /> 调整故事设计</span>
           <small>修改故事设计，提交后回到主线确认</small>
         </header>
         <div className="author-control-fields">
@@ -1059,11 +1072,11 @@ function StoryControlPanel({ session, currentTurn }: {
             </select>
           </label>
           <label className="control-wide-field">
-            <span>作者指令</span>
-            <textarea value={authorText} onChange={(event) => setAuthorText(event.target.value)} maxLength={180} placeholder="例如：让这个转折先回应前面的承诺，再决定是否继续。" disabled={disabled} />
+            <span>调整要求 <small>写下你想调整的情节、人物行动或结局。</small></span>
+            <textarea value={authorText} onChange={(event) => setAuthorText(event.target.value)} maxLength={180} placeholder="例如：让主角先尝试自己的办法，遇到阻碍后再向朋友求助。" disabled={disabled} />
           </label>
           <button className="text-action" type="button" onClick={() => void submitAuthorInstruction()} disabled={disabled || !authorBeatId || !authorText.trim()}>
-            <PencilLine size={14} /> 提交作者调整
+            <PencilLine size={14} /> 提交调整
           </button>
         </div>
       </div>
@@ -1123,7 +1136,7 @@ function TurnActions({ canConclude, disabled, onContinue, onConclude, reviewMode
       {reviewMode === 'closure-review' ? <p className="conclusion-note">已没有新的待执行行动；请在作者调整入口提出下一目标，或直接结束当前主线。</p> : null}
       {reviewMode === 'closure-review' && canConclude && <button className="primary-action" type="button" onClick={onConclude} disabled={disabled}>按已确认路径收束 <Check size={15} /></button>}
       {reviewMode !== 'closure-review' && canConclude && <button className="text-action" type="button" onClick={onConclude} disabled={disabled}>确认这次选择，开始写结尾 <ArrowRight size={15} /></button>}
-      {reviewMode === 'author-review' && <p className="conclusion-note">请在“作者调整主线”中补充信息、明确保留未知或提出独立替代；重新审阅后继续。问题审阅不算角色执行。</p>}
+      {reviewMode === 'author-review' && <p className="conclusion-note">请在“调整故事设计”中补充信息、明确保留未知或提出独立替代；重新审阅后继续。问题审阅不算角色执行。</p>}
       {reviewMode !== 'closure-review' && reviewMode !== 'author-review' && <button className="primary-action" type="button" onClick={onContinue} disabled={disabled}>{reviewMode === 'focus-selection' ? '选择关注点，生成待审行动' : reviewMode === 'candidate-actions' ? '打开这项提案审阅' : '确认选择，继续发展'} <ArrowRight size={18} /></button>}
     </div>
   )

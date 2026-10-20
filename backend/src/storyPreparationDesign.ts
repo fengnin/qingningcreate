@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { AppError, requestQwenJson, withModelDiagnostic, withQwenRequestBudget } from './qwen.js'
-import { activePreparationMaterial, preparationExplanationContext, preparationMaterialAuthorityGuidance } from './storyPreparationContext.js'
+import { activePreparationMaterial, preparationExplanationContext, preparationMaterialAuthorityGuidance, authorRequirementsGuidance } from './storyPreparationContext.js'
 import { storyCreativeIntentGuidance, preparationCreativeFocus } from './storyCreativeIntent.js'
 import { storyDevelopmentGuidance, storyDevelopmentRepairGuidance, storySemanticReviewGuidance } from './storySemanticReview.js'
 import { preparationOutputSchemas, qualityOutputSchema } from './storyOutputSchemas.js'
@@ -27,6 +27,7 @@ export const preparationStoryDesignPrompt = `根据作者确认的方向，提�
 允许补充服务关键行动、转折和结果的新人物、道具、必要铺垫与回应；均属于可拒绝的未来提案。优先让已有要素发挥作用，不把每个普通省略补成新任务，不为了完整强行加秘密、故障、手续或危机。普通动作、对白、环境和无关紧要的细节留给后续正文；已采用解释中的重要待展开事项，只在确实支撑当前骨架时兑现。
 brief.allowSystemNamedCharacters=false时，不给新增人物起具体名字，保留作者已经提供的名字。人物称呼不需要另加身份往事来证明合理。
 ${preparationMaterialAuthorityGuidance}
+${authorRequirementsGuidance}
 materialIds只能引用referenceContract.knownMaterialIds中确实承接的作者片段；引用只说明从哪里出发，不证明新增情节是事实。可用空数组表示纯新增发展，尤其不能用原目标冒充结局已经成立的证明。已知背景和保留的替代路径可以在起点引用而不逐条复述；不能假装承接无关材料。保留的未知不作为已知引用或关键解决手段。
 ${storyDevelopmentGuidance}`
 
@@ -34,6 +35,7 @@ export const preparationStoryDesignReviewPrompt = `审阅一版待作者决定�
 boundaries核对作者已定条件、发展要求和明确保留的未知；continuity核对是否承接最新已选卡片的困难、选择、后续取舍和可能走向，人物尝试与回应是否仍影响后续；causality核对重要行动、变化与结果是否接得上；closure核对是否提出这一版具体暂定结果，而非重复原卡的分支预测。合理的开放结局不等于没有结局。
 核对命名开关：brief.allowSystemNamedCharacters=false时不得为新人物起具体名字；已有作者名字可保留。判断连续性时，已选行动不能一直推迟到最后才出现；trigger应写出实际尝试，后续变化由人物回应接起。只拿出工具或出现新麻烦还不算实际尝试。
 ${preparationMaterialAuthorityGuidance}
+${authorRequirementsGuidance}
 ${storySemanticReviewGuidance}
 新情境、必要铺垫、人物选择和结果都是可拒绝的未来设计，不能仅因原文没有它们而拒绝。接受方向允许进一步设计，但不得更换selectedStoryDirection所确定的关键分支。仅旧版未记录选择时允许提出暂定方案，不要求作者补答普通细节。作者明确保留的未知仍不得替作者决定。原方向的核心安排及明确边界须保留。
 普通互动、省略的动作对白、其他可选办法、没有大反转或人物成长都不是缺陷；必要因果过程有交代即可，不追问无关细节，不新增待办或标记。拒绝须指出具体冲突双方或哪段关键因果断裂及影响；不能用“不够精彩”或审阅者偏好的结局拒绝。所有项通过时issues=[]。`
@@ -138,7 +140,11 @@ function mapPreparationDesign(curve: ProvisionalCurve, p: StoryPreparation, goal
     designReview: { required: true, acceptedProposalIds: [] } }
   const beatIds = new Set(proposal.steps.map(s => s.id))
   const present = (...ks: string[]) => ks.map(k => `beat-${k}`).filter(id => beatIds.has(id))
-  const design: StoryDesignRecord = { id: `design-${randomUUID()}`, sourceFacts: known.map(m => ({ id: m.id, text: m.quote, source: 'user-input', disposition: 'needs-author-decision', coveredByBeatIds: [] })),
+  // Development requests and boundaries are carried by authorRequirements;
+  // they are not plot facts that must be "covered" by a beat. Only concrete
+  // author-established material participates in source-fact disposition.
+  const sourceFacts = known.filter(m => !['author-direction', 'author-boundaries', 'author-note'].includes(m.sourceId))
+  const design: StoryDesignRecord = { id: `design-${randomUUID()}`, sourceFacts: sourceFacts.map(m => ({ id: m.id, text: m.quote, source: 'user-input', disposition: 'needs-author-decision', coveredByBeatIds: [] })),
     conflictCoreBeatIds: present('current-state', 'trigger'), predicamentBeatIds: present('trigger', 'escalation'),
     storyEndBeatIds: present('current-state', 'climax-choice', 'resolution'), middleDevelopmentBeatIds: present('escalation', 'midpoint-turn', 'climax-choice') }
   validateStoryReasoningProposal(proposal, { stage: 'initial-design', sources: known.map(m => ({ id: m.id, text: m.quote, authority: 'author-material' })), protectedSteps: [], requiredEditIds: [] })

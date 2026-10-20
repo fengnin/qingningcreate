@@ -2,9 +2,10 @@ import { createHash } from 'node:crypto'
 import { AppError, requestQwenJson } from './qwen.js'
 import { shape as s } from './modelOutputSchema.js'
 import { selectStoryEvidence } from './storyEvidence.js'
-import { activePreparationMaterial } from './storyPreparationContext.js'
+import { activePreparationMaterial, preparationAuthorRequirements, authorRequirementsGuidance } from './storyPreparationContext.js'
 import { selectedExpansionNeeds, storyExpansionGuidance } from './storyBridgeReview.js'
 import { storyWritingConsistencyReviewSchema, storyWritingMainlineReviewSchema } from './storyOutputSchemas.js'
+import { serializeWritingInput, writingInputEncodingGuidance } from './storyWritingInput.js'
 import type { ConfirmedCurve, StoryWritingDraft } from '../../shared/story-contract.js'
 
 type Entry = { id: string; sourceId: string; scope: 'author' | 'unknown' | 'future-design' | 'prose' | 'previous' | 'text'; quote: string; start: number; end: number }
@@ -104,7 +105,14 @@ export function writingContext(idea: string, curve: ConfirmedCurve, draft: Story
   const followingBeats = beats.slice(index + 1).map(({ id, kind, title, detail }) => ({ id, kind, title, detail }))
   const acceptedProse = draft.segments.slice(0, index).filter(s => s.status === 'accepted').map(({ id, label, text, authorship }) => ({ id, label, text, authorship: authorship ?? 'model' }))
   return {
-    brief: curve.brief, ...authority, designContract: curve.designContract ?? null,
+    reviewIdentity: hash({ idea, curve }),
+    brief: curve.brief, ...authority,
+    authorRequirements: [...new Map([
+      ...curve.preparation ? preparationAuthorRequirements(curve.preparation) : [],
+      ...curve.designContract?.authorRequirements ?? [],
+    ].map(requirement => [requirement.id, requirement])).values()]
+      .filter(requirement => !curve.design?.sourceFacts.some(fact => fact.id === requirement.id && fact.disposition === 'parked')),
+    designContract: curve.designContract ?? null,
     designMainlineReview: curve.mainlineReview ?? null,
     currentBeat: { id: beat.id, kind: beat.kind, title: beat.title, detail: beat.detail },
     nextBeatBoundary: followingBeats[0] ?? null,
@@ -127,7 +135,35 @@ export type WritingMainlineReview = {
 
 export type WritingConsistencyReview = {
   verdict: 'supported' | 'conflict' | 'uncertain'
-  issues: Array<{ kind: 'state-reversal' | 'repeated-completion' | 'time-order' | 'location-reversal' | 'possession-reversal'; evidenceIds: string[]; reason: string }>
+  issues: Array<{ kind: 'state-reversal' | 'repeated-completion' | 'time-order' | 'location-reversal' | 'possession-reversal' | 'causal-break' | 'time-gap' | 'scene-transition' | 'material-purpose'; evidenceIds: string[]; reason: string }>
+}
+
+type PassedReview = WritingMainlineReview | WritingConsistencyReview
+// Process-local and bounded: retries can reuse a successful stage even when
+// another stage failed, without mutating or committing a rejected draft.
+const passedFinalReviews = new Map<string, { expiresAt: number; review: PassedReview }>()
+const finalReviewCacheLimit = 128
+const finalReviewCacheTtlMs = 30 * 60 * 1000
+
+function finalReviewKey(context: Context, options: Parameters<typeof requestQwenJson>[0]): string | undefined {
+  if (/^(?:1|true|yes)$/iu.test(process.env.STORY_DISABLE_MODEL?.trim() ?? '') || !process.env.DASHSCOPE_API_KEY?.trim()) return undefined
+  return hash({ identity: context.reviewIdentity, options,
+    provider: { model: process.env.QWEN_MODEL?.trim() || 'qwen-plus',
+      baseUrl: process.env.DASHSCOPE_BASE_URL?.trim() ?? '', credential: hash(process.env.DASHSCOPE_API_KEY.trim()) } })
+}
+
+function cachedFinalReview<T extends PassedReview>(key: string | undefined): T | undefined {
+  if (!key) return undefined
+  const entry = passedFinalReviews.get(key)
+  if (!entry) return undefined
+  if (entry.expiresAt <= Date.now()) { passedFinalReviews.delete(key); return undefined }
+  return structuredClone(entry.review) as T
+}
+
+function rememberFinalReview(key: string | undefined, review: PassedReview) {
+  if (!key || review.verdict !== 'supported' || 'issues' in review && review.issues.length) return
+  if (passedFinalReviews.size >= finalReviewCacheLimit) passedFinalReviews.delete(passedFinalReviews.keys().next().value!)
+  passedFinalReviews.set(key, { expiresAt: Date.now() + finalReviewCacheTtlMs, review: structuredClone(review) })
 }
 
 /** Final-only, conservative factual audit. It does not judge style or plot quality. */
@@ -136,23 +172,28 @@ export async function reviewCompleteWritingConsistency(context: Context, text: s
   const catalog = excerpts('complete-text', 'text', text)
   const allowed = new Set(catalog.map(entry => entry.id))
   try {
-    const output = await requestQwenJson({
+    const options = {
       systemPrompt: `你是完整故事的事实连续性审阅员。严格输出JSON {verdict,issues}。只找有明确正文证据的前后矛盾，不审文风、不审主线、不要求目标成功。\n` +
-        `conflict仅用于：已明确完成的动作又被当作未完成；明确否定后直接肯定同一事实；人物位置、物品持有状态或时间顺序直接反转；同一阶段的同一动作重复完成且没有新阶段或重新尝试。\n` +
-        `不要把合理的新动作、重新确认、回忆、设想、尝试、开放结尾或有阶段变化的重复判为矛盾。无法确认时用uncertain。每个issue最多引用4个目录编号，必须来自同一正文目录。没有明确矛盾时verdict=supported且issues为空。`,
-      userPrompt: JSON.stringify({
+        `conflict仅用于：已明确完成的动作又被当作未完成；明确否定后直接肯定同一事实；人物位置、物品持有状态或时间顺序直接反转；同一阶段的同一动作重复完成且没有新阶段或重新尝试；前后事件缺少必要的因果承接；时间已经跨过但后文仍直接处于不可能的时间窗口；没有场景转换却突然出现在另一地点；同一材料、凭证或物品的用途前后被当成不同用途，导致后续结果无法由前文推出。\n` +
+        `causal-break、time-gap、scene-transition、material-purpose都必须引用造成断裂的前后原句。不要把合理的新动作、重新确认、回忆、设想、尝试、开放结尾、已说明的场景切换或有阶段变化的重复判为矛盾。无法确认时用uncertain。每个issue最多引用4个目录编号，必须来自同一正文目录。没有明确矛盾时verdict=supported且issues为空。` + writingInputEncodingGuidance,
+      userPrompt: serializeWritingInput({
         designContract: context.designContract,
         evidenceCatalog: catalog,
         completeText: text,
       }),
       outputSchema: storyWritingConsistencyReviewSchema,
       diagnosticStage: 'story-writing-consistency-review', temperature: 0.1, maxTokens: 1600,
-    }) as WritingConsistencyReview
+    }
+    const key = finalReviewKey(context, options)
+    const cached = cachedFinalReview<WritingConsistencyReview>(key)
+    if (cached) return cached
+    const output = await requestQwenJson(options) as WritingConsistencyReview
     if (!['supported', 'conflict', 'uncertain'].includes(output.verdict) || !Array.isArray(output.issues)
       || output.issues.some(issue => !Array.isArray(issue.evidenceIds) || issue.evidenceIds.length > 4
         || issue.evidenceIds.some(id => typeof id !== 'string' || !allowed.has(id)))) {
       throw new AppError('完整故事事实审阅返回了无效证据，请重试。', 502, 'STORY_WRITING_CONSISTENCY_INVALID')
     }
+    rememberFinalReview(key, output)
     return output
   } catch (error) {
     const unavailableCodes = new Set(['QWEN_NOT_CONFIGURED', 'QWEN_TIMEOUT', 'QWEN_NETWORK_ERROR', 'QWEN_UPSTREAM_ERROR', 'QWEN_RATE_LIMITED', 'QWEN_REQUEST_BUDGET_EXHAUSTED'])
@@ -174,17 +215,23 @@ export async function reviewWritingMainline(context: Context, text: string, mode
     ...(contract.selectedDirection ? [{ id: 'design-contract:selected-direction', text: contract.selectedDirection, scope: 'direction' }] : []),
     ...(contract.causalBridge ? [{ id: 'design-contract:causal-bridge', text: `${contract.causalBridge.method}；${contract.causalBridge.change}`, scope: 'causal-bridge' }] : []),
     { id: `design-contract:node:${context.currentBeat.id}`, text: context.currentBeat.detail, scope: 'current-node' },
+    ...(mode === 'complete' ? contract.nodes.filter(node => node.beatId !== context.currentBeat.id)
+      .map(node => ({ id: `design-contract:node:${node.beatId}`, text: node.text, scope: 'confirmed-node' })) : []),
     ...context.acceptedProse.map(segment => ({ id: `accepted:${segment.id}`, text: segment.text, scope: 'accepted-prose' })),
+    ...context.authorRequirements.map(requirement => ({ id: `author-requirement:${requirement.id}`, text: requirement.quote, scope: 'author-requirement' })),
   ]
   const allowed = new Set(catalog.map(item => item.id))
   let output: WritingMainlineReview
+  let key: string | undefined
   try {
-    output = await requestQwenJson({
+    const options = {
       systemPrompt: `你是故事正文的主线审阅员。${mode === 'complete' ? '现在审阅已经拼接完成的完整正文。' : '现在审阅当前段正文提案。'}只判断正文是否仍服务已确认的故事主线，严格输出JSON {verdict,reason,evidenceIds}。\n` +
         `supported：当前段服务原始目标、作者选定方向、当前节点，或通过有动机的绕路/取舍继续让目标、风险、承诺或代价产生作用。新事件不因未逐字出现在设计里而失败。\n` +
         `drift：${mode === 'complete' ? '完整正文的主要篇幅或结尾已经被无关任务接管，原目标只剩装饰性提及，且' : '新事件已经接管故事，替代原目标和当前节点，而且'}没有目标、风险、承诺、代价或动机上的连接。不能因为${mode === 'complete' ? '目标没有成功、结尾开放或' : '本段尚未完成目标、出现普通交通/服务/交流过程、或'}目标没有逐字复述而判drift。\n` +
-        `uncertain：输入不足以判断。未来节点只是停笔边界，不是已发生事实；不能把它当成正文事实。reason简要说明判断。evidenceIds只能从目录中选择；没有必要时为空。`,
-      userPrompt: JSON.stringify({
+        `uncertain：输入不足以判断。未来节点只是停笔边界，不是已发生事实；不能把它当成正文事实。reason简要说明判断。evidenceIds只能从目录中选择；没有必要时为空。\n` +
+        (mode === 'complete' ? '对照confirmedNodes核对完整正文是否兑现本版设计中的关键行动和结局，包括作者修改；不能只出现同一物品或重提目标就算兑现。明确约定完成的行动遗漏、被无关收束替代且没有有动机的变化时判drift。允许措辞、细节和合理开放结尾，不要求逐字复述。\n' : '') +
+        authorRequirementsGuidance + `\n明确推翻作者设定、违反边界或${mode === 'complete' ? '完整故事遗漏明确要求兑现的发展' : '本段消除了后续兑现发展要求的可能性'}也判drift，并引用对应要求及正文证据；未在当前段兑现全篇要求不算失败。` + writingInputEncodingGuidance,
+      userPrompt: serializeWritingInput({
         designContract: {
           goal: contract.goal,
           mainlineGoals: contract.mainlineGoals,
@@ -192,7 +239,9 @@ export async function reviewWritingMainline(context: Context, text: string, mode
           selectedDirection: contract.selectedDirection ?? null,
           causalBridge: contract.causalBridge,
           currentNode: contract.nodes.find(node => node.beatId === context.currentBeat.id) ?? null,
+          ...(mode === 'complete' ? { confirmedNodes: contract.nodes } : {}),
         },
+        authorRequirements: context.authorRequirements,
         currentBeat: context.currentBeat,
         acceptedProse: context.acceptedProse,
         proposal: text,
@@ -200,7 +249,11 @@ export async function reviewWritingMainline(context: Context, text: string, mode
       }),
       outputSchema: storyWritingMainlineReviewSchema,
       diagnosticStage: 'story-writing-mainline-review', temperature: 0.1, maxTokens: 1200,
-    }) as WritingMainlineReview
+    }
+    key = mode === 'complete' ? finalReviewKey(context, options) : undefined
+    const cached = cachedFinalReview<WritingMainlineReview>(key)
+    if (cached) return cached
+    output = await requestQwenJson(options) as WritingMainlineReview
   } catch (error) {
     const unavailableCodes = new Set(['QWEN_NOT_CONFIGURED', 'QWEN_TIMEOUT', 'QWEN_NETWORK_ERROR', 'QWEN_UPSTREAM_ERROR', 'QWEN_RATE_LIMITED', 'QWEN_REQUEST_BUDGET_EXHAUSTED'])
     if (error instanceof AppError && unavailableCodes.has(error.code)) return {
@@ -217,6 +270,7 @@ export async function reviewWritingMainline(context: Context, text: string, mode
     || output.evidenceIds.some(id => typeof id !== 'string' || !allowed.has(id))) {
     throw new AppError('本段主线审阅返回了无效证据，请重试当前段。已采用正文仍保留。', 502, 'STORY_WRITING_MAINLINE_REVIEW_INVALID')
   }
+  rememberFinalReview(key, output)
   return output
 }
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { activePreparationMaterial, preparationExplanationContext } from './storyPreparationContext.js'
+import { activePreparationMaterial, preparationExplanationContext, preparationAuthorRequirements } from './storyPreparationContext.js'
 import type { StoryPreparation } from '../../shared/story-preparation.js'
 
 function fixture(): StoryPreparation {
@@ -26,6 +26,18 @@ function fixture(): StoryPreparation {
   }
 }
 const candidate = { id: 'c0', action: '青柠走近路，在岔路口迷路了。', possibleResult: '走错路耽误时间。', futureChoice: '询问朋友，还是自己找路？' }
+
+test('requirements survive missing anchor selection and keep supersession and reserved unknown semantics', () => {
+  const p = fixture()
+  p.mainlineAnchors = []
+  p.material.find(m => m.id === 'tone')!.role = 'unknown'
+  p.authorReview = { originalText: '', candidates: [], supersededMaterialIds: ['boundary'] }
+  const requirements = preparationAuthorRequirements(p)
+  assert.deepEqual(requirements.map(r => [r.id, r.kind, r.status]), [
+    ['company', 'setting', 'required'], ['ending', 'development', 'required'], ['tone', 'development', 'reserved-unknown'],
+  ])
+  assert.deepEqual(preparationExplanationContext(p, candidate).authorRequirements, requirements)
+})
 
 test('separates author premise, goals, boundaries, future requirements, and explicitly reserved unknowns', () => {
   const p = fixture()

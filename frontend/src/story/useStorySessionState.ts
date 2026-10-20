@@ -263,7 +263,6 @@ export function useStorySessionState(): StorySessionState {
   const applySessionVersion = (result: StorySessionVersion) => {
     setStoryId(result.storyId)
     setRevision(result.revision)
-    persistStoryId(result.storyId)
   }
 
   const applySessionSnapshot = (snapshot: StorySessionSnapshot) => {

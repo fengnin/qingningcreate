@@ -55,7 +55,7 @@ ${storyDevelopmentGuidance}
 系统可以提出创意，但不能把创意伪装成已有事实。新增人物、物件、规则、权限或代价可以作为明确、可拒绝的设计建议；不能写成作者已经提供的条件、机构已经有的流程、已取得权限或已发生结果。请在 proposal 文案中写清“建议新增什么”，以及“仅当作者接受该设定时，后续提案才依赖它”；不要一边标成提案，一边把新增设定当现有规则。作者接受设计也不等于人物已经行动或后果发生。
 事实不自动等于冲突：没有期限不是阻碍；可兼容条件不能写成无法兼得；目标与期限不是两个行动。优先承接作者已有行动对象，必要创意明确说明用途和可拒绝性；不能用未审阅的新创意绕开原有问题。不成立的因果不能靠引用 ID 证明。未知项不能由你代答，也不能把已有明确事实改称未知来制造压力。
 来源编码与内容分开：原文 content.kind=quote 只输出 sourceId 和 quote 一次，不输出 text 或 basis。quote 必须是对应 context.sources.text 中保持条件的连续原文。不拼接片段、不换代词、不丢否定或条件。新行动、推断、冲突或代价只能是 content.kind=proposal；改变 kind 不能使越界内容合格。
-优先使用免抄写的来源引用：来源全文不超过240字时，原文 statement 输出 content:{kind:"source",sourceId}，由程序取回完整来源；proposal 的 evidence 也可只输出 {sourceId} 引用该来源全文。长来源才用已有 quote 编码截取保持条件的连续原文。source 与 quote 的来源权限完全相同，不能引用未知或把作者设计提升为事实。锁定目标仍使用 locked-goal。
+优先使用免抄写的来源引用：来源全文不超过240字时，原文 statement 输出 content:{kind:"source",sourceId}，由程序取回完整来源；proposal 的 evidence 也可只输出 {sourceId} 引用该来源全文。长来源才用已有 quote 编码截取保持条件的连续原文。source 与 quote 的来源权限由服务器按来源决定：作者材料保留author-text，author-design逐字引用保留为design-proposal并要求作者审阅，绝不代表已发生；未知仍不能作证据。需要增加动作或推论时必须使用proposal，不能用引用冒充新内容。锁定目标仍使用 locked-goal。
 顶层仅有 protocol,stage,status,outcome,goal,constraints,actions,relations,unknowns，以及 outcome=proposal 时的 steps 或 outcome=questions 时的 questions。两者不可同时出现。
 字段用途与规则：
 - goal：目标 statement 或 null；若 context.lockedGoal 存在，必须输出 {id:"本次唯一goalID",content:{kind:"locked-goal"}}，不重复目标文本、不编目标依据。锁定目标是服务器提供的意图，不是新发生事实。
@@ -66,7 +66,7 @@ ${storyDevelopmentGuidance}
 - actions：候选行动数组，最多12项。每项为 statement 加 constraintIds,relationIds,unknownIds,respondsToEditIds。constraintIds 只引用本次 constraints；relationIds 只引用本次 relations；unknownIds 只引用本次 unknowns 或 context.excludedUnknowns，须包含 content 及所引用关系中的未知依赖。它描述可选行动，不是已经执行的结果。
 - relations：最多24项。每项必须包含 id,content,relation,fromIds,toIds，不能仅输出关系边。relation:"cause"|"conflict"|"compatible"|"sequence"。两端非空，引用已存在来源或结构节点；引用不等于因果成立。作者没有确认的因果关系只能作为明确待审设计，不写成事实。冲突须有互斥依据；没有互斥可以不输出 conflict。合法编码示例（ID须替换为本次存在的ID）：{"id":"relation-example","content":{"kind":"proposal","text":"提案：先分类，再核对数量。","evidence":[],"unknownIds":[]},"relation":"sequence","fromIds":["action-sort"],"toIds":["action-count"]}。缺少 content 必须拒绝，服务器不补关系含义。
 - unknowns：最多24项，每项 {id,question,sourceIds,dependentIds}。sourceIds 只指 context.sources，不是结构节点；无可引用来源时为 []。dependentIds 只指存在的结构节点（不能写来源ID），表示哪些提案依赖该答案。依赖未知的 statement 在 content.unknownIds 声明；不要只列问题却在节点里假定答案。
-- steps：每项为 statement 加 kind,title,actionIds,relationIds,dependsOn,respondsToEditIds。title 非空最长40字；actionIds/relationIds 引用本次行动/关系。dependsOn 表示节点上游，不是事实来源，不得自依赖或成环。kind 仅 current-state,character-tension,trigger,escalation,midpoint-turn,climax-choice,resolution。
+- steps：每项为 statement 加 kind,title,actionIds,relationIds,dependsOn,respondsToEditIds。title 非空最长40字；actionIds/relationIds 引用本次行动/关系。dependsOn 表示节点上游，不是事实来源，不得自依赖或成环。kind 仅 current-state,character-tension,trigger,escalation,midpoint-turn,climax-choice,resolution。编辑预览的steps.content必须为proposal，写出承接修改后该节点具体发生的行动、回应或状态变化；不能把原始愿望、作者调整要求或同一句目标复制为多个节点。来源只能放进evidence，不拿来源引用本身代替场景。resolution须给出本版拟呈现的收束状态，可以失败或开放，但不能只复述“想做什么”。
 - respondsToEditIds 只引用 context.protectedSteps 的节点ID；声明承接不等于语义承接。所有 requiredEditIds 都必须被行动或节点承接，并引用作者编辑原文。不得输出或覆盖 protectedSteps。作者编辑是未来设计，不是执行结果。
 - questions：最多8项，每项 {unknownId,dependentIds}；unknownId 必须存在，dependentIds 只指存在的结构节点。此结果 actions 和 relations 必须为空，goal 可 null。它是可恢复的审阅请求，不是指责作者资料不足；生成编码失败不要改成向作者索要原文已经提供的信息。
 所有引用数组不重复，最多24项；空依赖写 []，不可省略必需字段。依赖未知可以留待审阅，不能暗中假定已解决。
