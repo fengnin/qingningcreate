@@ -27,4 +27,5 @@ export interface StoryPreparationExplanationRequest {
   revision: number
   curveId: string
   candidate: { id: string; action: string; possibleResult: string; futureChoice?: string }
+  selectedStoryDirection?: string
 }

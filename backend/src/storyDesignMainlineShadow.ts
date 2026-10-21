@@ -5,7 +5,7 @@ import { storySemanticReviewGuidance } from './storySemanticReview.js'
 import type { StoryPreparation } from '../../shared/story-preparation.js'
 
 export const storyDesignMainlineShadowPrompt = `仅观察故事设计是否发生 mainline-drift，不参与通过、修复或作者确认。按整版骨架判断，不能把“事件A引出事件B”本身当成主线仍成立的证明。
-核对原愿望、已选方向、人物办法及其后果，是否仍影响后续选择和代价；若被另一任务取代，指出从哪个节点开始，以及被取代的原问题。临时绕路、失败、办理手续、处理技术问题本身不算偏航。合理改变目标、主动放弃原计划可以成立，前提是动机可理解、原愿望或关系仍构成取舍的代价；不要求人物必须完成原目标、不要求每段重复目标词。仅结尾重提目标也不能证明主线承接。
+核对原愿望、已选方向、人物办法及其后果，是否仍影响后续选择和代价；若被另一任务取代，指出从哪个节点开始，以及被取代的原问题。完整骨架必须让原愿望的处置可辨认：推进、失败、延后，或有动机地让位。若把不能实现原活动的替代体验、象征凭据、同一地点活动或旁人的经历冒充原愿望的完成，判 mainline-drift；不能把“仍在同一场所”当作原行动仍在继续。结果任务未要求亲自完成时允许合理委托；明确改期或放弃也可构成有效处置，不要求新增确认台词。临时绕路、失败、办理手续、处理技术问题本身不算偏航。合理改变目标、主动放弃原计划可以成立，前提是动机可理解、原愿望或关系仍构成取舍的代价；不要求人物必须完成原目标、不要求每段重复目标词。仅结尾重提目标也不能证明主线承接。
 不审阅文风、精彩程度、普通省略、逐段正文连续性或节点抢跑。不设计修复方案，不追加情节。若证据不足，返回uncertain，不能猜测未写出的限制。
 严格返回JSON {verdict,reason,evidenceIds}。verdict为supported、mainline-drift或uncertain。reason用不超过400字解释判断。evidenceIds只选evidenceCatalog已有编号，不重抄原文；mainline-drift至少选一个作者材料或已选方向编号及一个设计节点编号，引用须实际支持判断；其他结论可用空数组。编号只定位原文，不证明语义正确。
 ${preparationMaterialAuthorityGuidance}

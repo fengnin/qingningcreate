@@ -7,6 +7,7 @@ import { preparationOutputSchemas, qualityOutputSchema } from './storyOutputSche
 import { mapInitialReasoningProposal } from './storyInitialReasoning.js'
 import { validateStoryReasoningProposal } from './storyReasoningContract.js'
 import { storyDirectionSelectionGuidance } from './storyPreparationDirections.js'
+import { storySettingScopeGuidance } from './storySettingScope.js'
 import { observeStoryDesignMainline, reviewStoryDesignMainline } from './storyDesignMainlineShadow.js'
 import { outputShapeErrors, shape as s } from './modelOutputSchema.js'
 import { compileStoryDesignContract, currentStoryDesignContract, storyDesignContractInput, storyDesignContractGuidance } from './storyDesignContract.js'
@@ -26,14 +27,17 @@ export const preparationStoryDesignPrompt = `根据作者确认的方向，提�
 具体设计人物采取什么办法，尝试带来什么变化，人物如何回应；需要关键选择时，写出这一版他暂定选择做什么、放弃或承担什么，接着给出这版实际走向的结局。不要让起点、行动和结局重复同一句，也不要在结局仍只并列“如果选甲就怎样、选乙就怎样”。开放结局可以保留远期未知，但当前这次行动应有可理解的落点。目标可有来由地转变，原愿望及风险仍须影响选择的意义。
 允许补充服务关键行动、转折和结果的新人物、道具、必要铺垫与回应；均属于可拒绝的未来提案。优先让已有要素发挥作用，不把每个普通省略补成新任务，不为了完整强行加秘密、故障、手续或危机。普通动作、对白、环境和无关紧要的细节留给后续正文；已采用解释中的重要待展开事项，只在确实支撑当前骨架时兑现。
 brief.allowSystemNamedCharacters=false时，不给新增人物起具体名字，保留作者已经提供的名字。人物称呼不需要另加身份往事来证明合理。
+${storySettingScopeGuidance}
 ${preparationMaterialAuthorityGuidance}
 ${authorRequirementsGuidance}
-materialIds只能引用referenceContract.knownMaterialIds中确实承接的作者片段；引用只说明从哪里出发，不证明新增情节是事实。可用空数组表示纯新增发展，尤其不能用原目标冒充结局已经成立的证明。已知背景和保留的替代路径可以在起点引用而不逐条复述；不能假装承接无关材料。保留的未知不作为已知引用或关键解决手段。
+materialIds只能引用referenceContract.knownMaterialIds中确实承接的作者片段；引用只说明从哪里出发，不证明新增情节是事实。可用空数组表示纯新增发展，尤其不能用原目标冒充结局已经成立的证明。已知背景和保留的替代路径可以在起点引用而不逐条复述；不能假装承接无关材料。referenceContract.unknownMaterialIds列出的未知材料不能出现在materialIds，也不能被写成原因、资源、障碍、解决手段或结局依据；除非当前候选的unknownIds明确包含对应问题，否则只能保留为未决，不得替作者定案。
 ${storyDevelopmentGuidance}`
 
 export const preparationStoryDesignReviewPrompt = `审阅一版待作者决定的完整故事骨架，严格输出 JSON {checks:[{criterion,passed,evidence}],issues:[]}。criterion为boundaries、continuity、causality、closure，每项恰好一次；evidence不超过240字，issues只列具体实质问题，最多4项。
 boundaries核对作者已定条件、发展要求和明确保留的未知；continuity核对是否承接最新已选卡片的困难、选择、后续取舍和可能走向，人物尝试与回应是否仍影响后续；causality核对重要行动、变化与结果是否接得上；closure核对是否提出这一版具体暂定结果，而非重复原卡的分支预测。合理的开放结局不等于没有结局。
 核对命名开关：brief.allowSystemNamedCharacters=false时不得为新人物起具体名字；已有作者名字可保留。判断连续性时，已选行动不能一直推迟到最后才出现；trigger应写出实际尝试，后续变化由人物回应接起。只拿出工具或出现新麻烦还不算实际尝试。
+${storySettingScopeGuidance}
+新增设定导致额外独立任务或替换已选方向时归continuity；造成办法缺乏依据或数字冲突时归causality，不增加审阅维度或重复列同一问题。
 ${preparationMaterialAuthorityGuidance}
 ${authorRequirementsGuidance}
 ${storySemanticReviewGuidance}
@@ -74,13 +78,14 @@ function reviewIssues(raw: unknown): string[] {
 
 /** New events remain proposals. Accepted card wording and original material
  * are preserved separately; neither review nor confirmation executes them. */
-export async function developPreparationStory(curve: ProvisionalCurve, p: StoryPreparation, goal: StoryPreparationItem): Promise<ProvisionalCurve> {
+export async function developPreparationStory(curve: ProvisionalCurve, p: StoryPreparation, goal?: StoryPreparationItem): Promise<ProvisionalCurve> {
   const active = activePreparationMaterial(p)
   const known = active.filter(m => m.role !== 'unknown')
   const selected = p.candidates.find(c => p.acceptedCandidateIds.includes(c.id))!
+  const goalText = goal?.quote ?? p.authorReview?.selectedStoryDirection ?? selected.action
   const context = { ...preparationExplanationContext(p, selected), brief: curve.brief,
-    creativeFocus: preparationCreativeFocus(p), designContract: storyDesignContractInput(p, goal.quote),
-    referenceContract: { knownMaterialIds: known.map(m => m.id) } }
+    creativeFocus: preparationCreativeFocus(p), designContract: storyDesignContractInput(p, goalText),
+    referenceContract: { knownMaterialIds: known.map(m => m.id), unknownMaterialIds: active.filter(m => m.role === 'unknown').map(m => m.id) } }
   let previousOutput: unknown, repair: string | undefined, failure: AppError | undefined
   let steps: Step[] | undefined
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -91,7 +96,7 @@ export async function developPreparationStory(curve: ProvisionalCurve, p: StoryP
       previousOutput = output
       const draft = parseSteps(output, new Set(known.map(m => m.id)), true)
       const audit = await requestQwenJson({ systemPrompt: `${preparationStoryDesignReviewPrompt}\n${storyDesignContractGuidance}\n${storyDirectionSelectionGuidance}\ncontinuity 必须核对作者选定的走向，不能把擅自改选另一分支视作允许的进一步设计。`,
-        userPrompt: JSON.stringify({ ...context, designContract: { ...context.designContract, ...compileStoryDesignContract(p, draft, goal.quote) }, steps: draft }), temperature: 0.1, maxTokens: 1800,
+        userPrompt: JSON.stringify({ ...context, designContract: { ...context.designContract, ...compileStoryDesignContract(p, draft, goalText) }, steps: draft }), temperature: 0.1, maxTokens: 1800,
         diagnosticStage: 'preparation-story-design-review', outputSchema: qualityOutputSchema(criteria) })
       const issues = reviewIssues(audit)
       if (process.env.STORY_PREPARATION_DIAGNOSTICS === 'true') console.warn('[preparation] story-design-review', JSON.stringify({ attempt: attempt + 1, audit }))
@@ -126,13 +131,17 @@ export async function developPreparationStory(curve: ProvisionalCurve, p: StoryP
   return mapped
 }
 
-function mapPreparationDesign(curve: ProvisionalCurve, p: StoryPreparation, goal: StoryPreparationItem, steps: Step[]): ProvisionalCurve {
+function mapPreparationDesign(curve: ProvisionalCurve, p: StoryPreparation, goal: StoryPreparationItem | undefined, steps: Step[]): ProvisionalCurve {
   const known = activePreparationMaterial(p).filter(m => m.role !== 'unknown')
   const evidence = (ids: string[]) => ids.map(id => ({ sourceId: id, quote: known.find(m => m.id === id)!.quote }))
   const basis = (ids: string[]) => ({ kind: 'design-proposal' as const, evidence: evidence(ids), unknownIds: [] })
+  const selected = p.candidates.find(c => p.acceptedCandidateIds.includes(c.id))!
+  const goalText = goal?.quote ?? p.authorReview?.selectedStoryDirection ?? selected.action
   const actionSteps = steps.filter(s => !['current-state', 'resolution'].includes(s.kind))
   const proposal: StoryReasoningProposal = { protocol: 1, stage: 'initial-design', status: 'needs-review', outcome: 'proposal',
-    goal: { id: 'prepared-goal', text: goal.quote, basis: { kind: 'author-text', evidence: evidence([goal.id]) } },
+    goal: { id: 'prepared-goal', text: goalText, basis: goal
+      ? { kind: 'author-text', evidence: evidence([goal.id]) }
+      : basis(selected.materialIds.filter(id => known.some(item => item.id === id))) },
     constraints: known.map(m => ({ id: `material-${m.id}`, text: m.quote, basis: { kind: 'author-text', evidence: evidence([m.id]) } })),
     actions: actionSteps.map(s => ({ id: `design-action-${s.kind}`, text: s.text, basis: basis(s.materialIds), constraintIds: [], relationIds: [], unknownIds: [], respondsToEditIds: [] })),
     relations: [], unknowns: [], steps: steps.map((s, i) => ({ id: `beat-${s.kind}`, kind: s.kind, title: titles[s.kind], text: s.text, basis: basis(s.materialIds),
@@ -149,7 +158,7 @@ function mapPreparationDesign(curve: ProvisionalCurve, p: StoryPreparation, goal
     storyEndBeatIds: present('current-state', 'climax-choice', 'resolution'), middleDevelopmentBeatIds: present('escalation', 'midpoint-turn', 'climax-choice') }
   validateStoryReasoningProposal(proposal, { stage: 'initial-design', sources: known.map(m => ({ id: m.id, text: m.quote, authority: 'author-material' })), protectedSteps: [], requiredEditIds: [] })
   const mapped = mapInitialReasoningProposal(proposal, design, curve.brief, { allowSimplePlan: true })
-  return { ...mapped, id: curve.id, preparation: p, createdAt: curve.createdAt, designContract: compileStoryDesignContract(p, steps, goal.quote),
+  return { ...mapped, id: curve.id, preparation: p, createdAt: curve.createdAt, designContract: compileStoryDesignContract(p, steps, goalText),
     generation: { origin: 'model', dramaticMechanism: '承接已选方向生成可编辑的故事骨架', notice: '已根据你确认的方向构思发展与暂定结局。每一段都可以修改或局部重做，确认后再进入剧情。' } }
 }
 

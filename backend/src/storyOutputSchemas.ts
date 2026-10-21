@@ -2,6 +2,7 @@ import { shape as s, type OutputSchema } from './modelOutputSchema.js'
 import { developmentFields, developmentResultFields, developmentChoiceSchema } from './storyDevelopmentState.js'
 import { bridgeReviewCheckSchema } from './storyBridgeReview.js'
 import { factReviewCheckSchema } from './storyFactReview.js'
+import { directionLogicReviewSchema } from './storyDirectionLogicReview.js'
 
 const refs = s.array(s.text)
 const question = s.object({ id: s.text, question: s.text, materialIds: refs })
@@ -19,6 +20,11 @@ export const preparationOutputSchemas = {
     mainlineAnchors: s.array(referenceNode({ kind: s.enum('character', 'relationship', 'place', 'action', 'object', 'constraint', 'condition', 'time') }), 0, 16),
     appealMaterialIds: s.array(s.text, 0, 3) }),
   directions: s.object({ candidates: s.array(candidate, 1, 3), questions: s.array(question, 0, 8) }),
+  directionPlans: s.object({ plans: s.array(s.object({
+    id: s.text, difficulty: s.text,
+    options: s.array(s.object({ action: s.text, consequence: s.text }), 2, 2),
+    materialIds: refs, preconditionIds: refs, resultBasisIds: refs,
+  }), 3, 3) }),
   questions: s.object({ candidates: s.array(candidate, 0, 0), questions: s.array(question, 1, 8) }),
   compression: s.object({ texts: s.array(s.object({ id: s.text, text: s.text }), 1, 24) }),
   // Qwen may sort object keys. These nested names keep attempt -> change ->
@@ -92,6 +98,28 @@ export const storyWritingConsistencyReviewSchema = s.object({
   }), 0, 6),
 })
 export const preparationQualitySchema = qualityOutputSchema(['facts', 'causality', 'requirements', 'author-control', 'questions'])
+export function preparationDirectionQualitySchema(candidateIds: string[], structuredPlans = false, consequenceIds: string[] = []): OutputSchema {
+  return s.object({
+    ...(structuredPlans ? { actionChecks: directionLogicReviewSchema(candidateIds) } : {}),
+    ...(consequenceIds.length ? { consequenceChecks: s.array(s.object({ id: s.enum(...consequenceIds),
+      resultStatus: s.enum('asserted', 'conditional', 'uncertain', 'planned'),
+      prerequisite: s.text, prerequisiteStatus: s.enum('satisfied-by-action', 'explicit-condition', 'only-planned', 'missing', 'not-needed'),
+      verdict: s.enum('supported', 'unsupported'), reason: s.text }), consequenceIds.length, consequenceIds.length) } : {}),
+    candidateChecks: s.array(s.object({
+      id: candidateIds.length ? s.enum(...candidateIds) : s.text,
+      pursuedGoal: s.text,
+      branches: s.array(s.object({
+        action: s.text,
+        outcome: s.text,
+        goalEffect: s.enum('advances', 'attempted', 'postponed', 'abandoned', 'failed', 'substituted', 'unaddressed'),
+        mechanism: s.enum('supported', 'unsupported'),
+      }), structuredPlans ? 2 : 1, structuredPlans ? 2 : 3),
+      relation: s.enum('pursues-goal', 'goal-tradeoff', 'substituted', 'unrelated'),
+      reason: s.text,
+    }), candidateIds.length, candidateIds.length),
+    ...preparationQualitySchema.properties!,
+  })
+}
 export const clarificationReviewSchema = s.object({ grounded: s.bool, dependsOnUnconfirmedPremise: s.bool })
 export const headTailReviewSchema = s.object({ reviews: s.array(s.object({ optionId: s.text,
   keepsConfirmedGoal: s.bool, followsSelectedApproach: s.bool, climaxIsProtagonistAction: s.bool,

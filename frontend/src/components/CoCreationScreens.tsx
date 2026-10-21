@@ -5,7 +5,7 @@ import type { CreativeBrief, CreativeTone, CurveBeat, DramaticForce, StoryAuthor
 import type { StorySession } from '../story/useStorySession'
 import { StoryRequirementsFields } from './StoryRequirementsFields'
 import { StoryJourney } from './StoryScreens'
-import { requestPreparationGoalSuggestion, requestPreparationStoryDirections } from '../story/storyApi'
+import { requestPreparationStoryDirections, requestPreparationExplanation } from '../story/storyApi'
 import { PreparationExplanation, ExplanationExpansionNotes, explanationMatches } from './PreparationExplanation'
 import { preparationActionFieldLimit, splitPreparationAction, updatePreparationAction } from '../story/preparationAction'
 import type { StoryReasoningProposal, StoryReasoningStatement } from '../../../shared/story-reasoning-contract.js'
@@ -351,7 +351,7 @@ export function ProvisionalCurveScreen({ session }: { session: StorySession }) {
             const parts = splitPreparationAction(c.action)
             return <dl key={c.id}><dt>遇到的难处</dt><dd>{parts.difficulty}</dd>{parts.choice && <><dt>眼前的选择</dt><dd>{parts.choice}</dd></>}<dt>后续的取舍</dt><dd>{c.futureChoice || '尚未指定'}</dd><dt>可能带来的变化</dt><dd>{c.possibleResult}</dd></dl>
           })}<p>这是构思本版故事的起点；下方段落是进一步提出的故事设计。</p></details>}
-          {curve.preparation?.candidates.filter(c => curve.preparation!.acceptedCandidateIds.includes(c.id) && c.explanation).map(c => <details className="story-review-details" key={`explanation-${c.id}`}><summary>查看选定困境的推演解释</summary><p>这是选择困境时采用的设计解释；后续节点修改后需重新判断，尚未成为故事事实。</p><dl><dt>可能采取的办法</dt><dd>{c.explanation!.method}</dd><dt>处境变化</dt><dd>{c.explanation!.change}</dd></dl><ExplanationExpansionNotes value={c.explanation!} />{c.explanation!.issues.map((issue, i) => <p key={i}>保留的问题：{issue}</p>)}</details>)}
+          {curve.preparation?.candidates.filter(c => curve.preparation!.acceptedCandidateIds.includes(c.id) && c.explanation).map(c => <details className="story-review-details" key={`explanation-${c.id}`}><summary>查看选定方向与推进过程</summary><p>这是进入故事设计时采用的安排；修改节点后可重新核对，仍是尚未发生的设计。</p><dl>{curve.preparation!.authorReview?.selectedStoryDirection && <><dt>选定的走向</dt><dd>{curve.preparation!.authorReview.selectedStoryDirection}</dd></>}<dt>人物准备怎么做</dt><dd>{c.explanation!.method}</dd><dt>可能带来的变化</dt><dd>{c.explanation!.change}</dd></dl><ExplanationExpansionNotes value={c.explanation!} />{c.explanation!.issues.map((issue, i) => <p key={i}>保留的问题：{issue}</p>)}</details>)}
           <CurveDesignSummary curve={curve} />
           {curve.preparation && (curve.preparation.material.some(m => m.role === 'unknown') || !!curve.preparation.authorReview?.supersededMaterialIds?.length || !!curve.preparation.supplements?.length) && <details className="story-review-details"><summary>待定内容与设定调整</summary>{curve.preparation.material.filter(m => m.role === 'unknown').map(m => <p key={m.id}>待定：{m.quote}</p>)}
             {curve.preparation.authorReview?.supersededMaterialIds?.map(id => <p key={id}>被作者明确取代（保留原文，不再作为依据）：{curve.preparation!.material.find(m => m.id === id)?.quote}</p>)}
@@ -751,31 +751,21 @@ function PreparationReview({ session }: { session: StorySession }) {
   const [editing, setEditing] = useState<string>()
   const [selectedId, setSelectedId] = useState<string>()
   const [reviewed, setReviewed] = useState<Record<string, { action: string; possibleResult: string; futureChoice?: string }>>({})
-  const [explanations, setExplanations] = useState<Record<string, import('../../../shared/story-preparation.js').StoryPreparationExplanation>>({})
   const [pendingOperation, setPendingOperation] = useState<'regenerate' | 'accept'>()
   const [choosingDirection, setChoosingDirection] = useState(false)
   const p = session.provisionalCurve!.preparation!
   const busy = session.stageStatus === 'loading'
   const submitLock = useRef(false)
-  useEffect(() => { setEditing(undefined); setSelectedId(undefined); setReviewed({}); setExplanations({}); setChoosingDirection(false) }, [session.provisionalCurve!.id, p.candidates])
+  useEffect(() => { setEditing(undefined); setSelectedId(undefined); setReviewed({}); setChoosingDirection(false) }, [session.provisionalCurve!.id, p.candidates])
   const candidates = p.candidates
   const available = candidates.filter(c => !c.unknownIds.length)
   const active = available[0] ?? candidates[0]
-  const criticalQuestion = active?.unknownIds.length ? p.questions.find(q => active.unknownIds.includes(q.id)) : !p.candidates.length ? p.questions[0] : undefined
   const selected = candidates.find(c => c.id === selectedId)
-  const selectedWording = selected && (reviewed[selected.id] ?? selected)
-  const selectedExplanation = selected && (explanations[selected.id] ?? selected.explanation)
-  const selectedNeedsReview = Boolean(selected && selectedWording && (selectedExplanation
-    ? !explanationMatches(selectedExplanation.wording, selectedWording)
-    : !explanationMatches(selected, selectedWording)))
   const renderAction = (value: string) => {
     const match = value.match(/^遇到的难处：([\s\S]*?)\s*眼前的选择：([\s\S]*)$/u)
     if (!match) return <span className="preparation-action-legacy"><small>遇到的难处与眼前的选择</small><span>{value}</span></span>
     return <><span className="preparation-action-part"><small>遇到的难处</small><span>{match[1]}</span></span><span className="preparation-action-part"><small>眼前的选择</small><span>{match[2]}</span></span></>
   }
-  const evidenceFor = (ids: string[]) => [...new Set(ids)]
-    .map(id => p.material.find(material => material.id === id))
-    .filter((material): material is typeof p.material[number] => Boolean(material))
   const editCandidate = (candidate: typeof candidates[number], field: 'difficulty' | 'choice' | 'possibleResult' | 'futureChoice', value: string) => {
     setChoosingDirection(false)
     setReviewed(current => {
@@ -795,20 +785,20 @@ function PreparationReview({ session }: { session: StorySession }) {
   }
   const createReview = (c: typeof p.candidates[number]): import('../../../shared/story-preparation.js').StoryPreparationReview => {
     const wording = reviewed[c.id] ?? c
-    const explanation = explanations[c.id] ?? c.explanation
     return {
       originalText: `我选择这个困境，故事尚未发生。\n方向：${wording.action}${wording.futureChoice ? `\n后续的取舍：${wording.futureChoice}` : ''}\n可能带来的变化：${wording.possibleResult}`,
-      candidates: [{ id: c.id, action: wording.action, possibleResult: wording.possibleResult, ...(wording.futureChoice !== undefined ? { futureChoice: wording.futureChoice } : {}), ...(explanation ? { explanation } : {}) }],
+      candidates: [{ id: c.id, action: wording.action, possibleResult: wording.possibleResult, ...(wording.futureChoice !== undefined ? { futureChoice: wording.futureChoice } : {}) }],
     }
   }
-  const accept = async (c: typeof p.candidates[number], direction: string) => {
-    if (busy || submitLock.current || selectedNeedsReview || !direction.trim()) return
+  const accept = async (c: typeof p.candidates[number], direction: string, explanation: import('../../../shared/story-preparation.js').StoryPreparationExplanation) => {
+    if (busy || submitLock.current || !direction.trim()) return
     submitLock.current = true
     setPendingOperation('accept')
     // A click receipts exactly the displayed future design. It supplies no
     // confirmed facts, supersession or execution, and retains server checks.
     try { await session.acceptPreparation([c.id], {
       ...createReview(c), selectedStoryDirection: direction.trim(),
+      candidates: [{ id: c.id, ...explanation.wording, explanation }],
     }) } finally { submitLock.current = false; setPendingOperation(undefined) }
   }
   return <main className="app-shell setup-shell cocreation-shell preparation-workspace">
@@ -822,11 +812,6 @@ function PreparationReview({ session }: { session: StorySession }) {
     {candidates.map((active, index) => {
       const wording = reviewed[active.id] ?? active
       const actionParts = splitPreparationAction(wording.action)
-      const directionEvidence = evidenceFor(active.materialIds)
-      const goalEvidence = directionEvidence.filter(material => material.role === 'goal')
-      const proposedSetup = wording.action.match(/^遇到的难处：([\s\S]*?)\s*眼前的选择：/u)?.[1]?.trim() ?? wording.action
-      const currentExplanation = explanations[active.id] ?? active.explanation
-      const explanationCurrent = currentExplanation ? explanationMatches(currentExplanation.wording, wording) : explanationMatches(active, wording)
       return <section className={`preparation-proposal ${selectedId === active.id ? 'is-selected' : ''}`} aria-label={`故事走向 ${index + 1}`} key={active.id}>
       <button className="preparation-choice" type="button" aria-pressed={selectedId === active.id} disabled={busy || !!active.unknownIds.length} onClick={() => { if (selectedId !== active.id) setChoosingDirection(false); setSelectedId(active.id) }}>
         <span className="preparation-choice-index">0{index + 1}</span>
@@ -837,42 +822,23 @@ function PreparationReview({ session }: { session: StorySession }) {
       {editing === active.id && <div className="preparation-editor">
         <label>遇到的难处<textarea maxLength={preparationActionFieldLimit(wording.action, 'difficulty')} disabled={busy} value={actionParts.difficulty} onChange={e => editCandidate(active, 'difficulty', e.target.value)} /></label>
         <label>眼前的选择<textarea maxLength={preparationActionFieldLimit(wording.action, 'choice')} disabled={busy} value={actionParts.choice} onChange={e => editCandidate(active, 'choice', e.target.value)} /></label>
-        <label>后续的取舍<textarea maxLength={240} disabled={busy} value={wording.futureChoice ?? ''} onChange={e => editCandidate(active, 'futureChoice', e.target.value)} /></label>
+        {wording.futureChoice !== undefined && <label>后续的取舍<textarea maxLength={240} disabled={busy} value={wording.futureChoice} onChange={e => editCandidate(active, 'futureChoice', e.target.value)} /></label>}
         <label>可能带来的变化<textarea maxLength={240} disabled={busy} value={wording.possibleResult} onChange={e => editCandidate(active, 'possibleResult', e.target.value)} /></label>
-        <p>修改任意一项后，展开“查看依据”，点击“重新推演这张卡”。千问会结合最新四项内容生成新解释，供你查看并决定是否采用。</p>
-        <p>需要时可展开“手动调整推进过程”，或核对后沿用原安排。难处与选择合计最多240字；原始设定请回到“修改想法”。</p>
+        <p>选定方向后，将根据最新内容展开推进过程，供你审阅和修改。难处与选择合计最多240字。</p>
         <button className="text-action" type="button" disabled={busy} onClick={() => setEditing(undefined)}>完成编辑</button>
       </div>}
       {active.unknownIds.length > 0 && <p className="preparation-missing-condition">暂不能选择，还需确定：{active.unknownIds.map(id => p.questions.find(q => q.id === id)?.question ?? '这条方向的关键条件').join('；')}</p>}
       <div className="preparation-actions">
         <button className="text-action" type="button" disabled={busy} onClick={() => setEditing(editing === active.id ? undefined : active.id)}><PencilLine size={16} /> 编辑</button>
-        {!explanationCurrent && <span className="preparation-explanation-status" role="status">解释待核对：展开“查看依据”，点击“重新推演这张卡”，查看新解释并决定是否采用。</span>}
       </div>
-      <details className="preparation-evidence preparation-card-evidence">
-        <summary>查看依据</summary>
-        <p className="preparation-evidence-note">原文引用保留你的输入。下方推演解释可编辑、可重做，仍是尚未发生的设计。</p>
-        <dl>
-          <dt>{goalEvidence.length ? '原目标 · 作者原文' : '作者原文'}</dt>
-          <dd>{(goalEvidence.length ? goalEvidence : directionEvidence).length ? (goalEvidence.length ? goalEvidence : directionEvidence).map(material => <blockquote key={material.id}>{material.quote}</blockquote>) : '这条方向没有可展示的作者原文。'}</dd>
-          <dt>已有铺垫 · 方向提案</dt>
-          <dd>{proposedSetup}</dd>
-          <dt>后续的取舍</dt>
-          <dd>{wording.futureChoice || '这条方向尚未提出后续的取舍。'}</dd>
-        </dl>
-        <PreparationExplanation key={`${session.provisionalCurve!.id}-${active.id}-${session.revision}`} candidate={active} wording={wording} explanation={explanations[active.id]} disabled={busy}
-          storyId={session.storyId} revision={session.revision} curveId={session.provisionalCurve!.id}
-          onChange={value => setExplanations(current => ({ ...current, [active.id]: value }))} />
-      </details>
     </section>})}
-    {!!candidates.length && <div className="preparation-direction-footer">{!choosingDirection && <button className="primary-action" type="button" disabled={busy || !selected || selectedNeedsReview || !((reviewed[selected.id]?.action ?? selected.action).trim()) || !((reviewed[selected.id]?.possibleResult ?? selected.possibleResult).trim())} onClick={() => { setEditing(undefined); setChoosingDirection(true) }}>确认这个故事走向 <ArrowRight size={16} /></button>}<button className="text-action" type="button" disabled={busy} onClick={() => void requestAlternative()}> <RefreshCcw size={16} /> 换一组故事走向</button></div>}
-    {choosingDirection && selected && !selectedNeedsReview && <PreparationStoryDirectionChoice
+    {!!candidates.length && <div className="preparation-direction-footer">{!choosingDirection && <button className="primary-action" type="button" disabled={busy || !selected || !((reviewed[selected.id]?.action ?? selected.action).trim()) || !((reviewed[selected.id]?.possibleResult ?? selected.possibleResult).trim())} onClick={() => { setEditing(undefined); setChoosingDirection(true) }}>展开这个方向 <ArrowRight size={16} /></button>}<button className="text-action" type="button" disabled={busy} onClick={() => void requestAlternative()}> <RefreshCcw size={16} /> 换一组故事走向</button></div>}
+    {choosingDirection && selected && <PreparationStoryDirectionChoice
       key={JSON.stringify([session.revision, selected.id, createReview(selected)])}
       session={session} candidateId={selected.id} review={createReview(selected)} disabled={busy}
-      onConfirm={direction => accept(selected, direction)} />}
-    {selectedNeedsReview && <p className="preparation-note" role="status">所选卡片已修改。请在“查看依据”中重新推演并采用结果；也可手动调整推进过程，或核对后沿用原安排，再确认故事走向。</p>}
+      onConfirm={(direction, explanation) => accept(selected, direction, explanation)} />}
     {!!candidates.length && <p className="preparation-note">选中的是未来设计，不表示人物已经行动。</p>}
-    {!candidates.length && criticalQuestion && <PreparationContextRecovery session={session} disabled={busy} />}
-    {!active && !criticalQuestion && <section className="preparation-question"><p>这些方向都先放一放。可以换一组，或继续修改你的想法。</p><button className="primary-action" type="button" disabled={busy} onClick={() => void requestAlternative()}>再想三种方向</button></section>}
+      {!active && <section className="preparation-question"><p>暂时没有形成可审阅的方向，可以重新生成一组。</p><button className="primary-action" type="button" disabled={busy} onClick={() => void requestAlternative()}>再想三种方向</button></section>}
     </div>
     <aside className="preparation-source-column">
       <section className="preparation-original" aria-label="作者原文"><small>你的原始想法</small>{p.sources.map(s => <div key={s.id}>{s.id !== 'author-input' && <small>{({ 'author-setting': '已确定的设定', 'author-direction': '希望的发展', 'author-boundaries': '必须保留或避免的内容', 'author-note': '希望故事呈现' } as Record<string, string>)[s.id] ?? '你的补充'}</small>}<blockquote>{s.text}</blockquote></div>)}<button className="text-action" type="button" disabled={busy} onClick={session.goBackToOpening}><PencilLine size={14} /> 修改想法与要求</button></section>
@@ -887,17 +853,20 @@ function PreparationStoryDirectionChoice({ session, candidateId, review, disable
   candidateId: string
   review: import('../../../shared/story-preparation.js').StoryPreparationReview
   disabled: boolean
-  onConfirm: (direction: string) => Promise<void>
+  onConfirm: (direction: string, explanation: import('../../../shared/story-preparation.js').StoryPreparationExplanation) => Promise<void>
 }) {
   const [directions, setDirections] = useState<import('../../../shared/story-preparation.js').StoryPreparationStoryDirection[]>([])
   const [selected, setSelected] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [retry, setRetry] = useState(0)
+  const [explanations, setExplanations] = useState<Record<string, import('../../../shared/story-preparation.js').StoryPreparationExplanation>>({})
+  const [processPending, setProcessPending] = useState(false)
+  const processRequests = useRef(new Map<string, ReturnType<typeof requestPreparationExplanation>>())
   const directionRequest = useRef<{ retry: number; promise: ReturnType<typeof requestPreparationStoryDirections> }>()
   useEffect(() => {
     let active = true
-    setLoading(true); setError(''); setDirections([]); setSelected('')
+    setLoading(true); setError(''); setDirections([]); setSelected(''); setExplanations({}); processRequests.current.clear()
     if (!directionRequest.current || directionRequest.current.retry !== retry) {
       directionRequest.current = { retry, promise: requestPreparationStoryDirections({ storyId: session.storyId!, revision: session.revision,
         curveId: session.provisionalCurve!.id, acceptedCandidateIds: [candidateId], authorReview: review }) }
@@ -914,6 +883,11 @@ function PreparationStoryDirectionChoice({ session, candidateId, review, disable
     const item = directions.find(d => d.id === selected)
     return item ? `${item.choice}\n可能承担的变化：${item.consequence}` : ''
   })()
+  const card = review.candidates!.find(c => c.id === candidateId)!
+  const candidate = session.provisionalCurve!.preparation!.candidates.find(c => c.id === candidateId)!
+  const wording = { action: card.action, possibleResult: card.possibleResult, futureChoice: card.futureChoice }
+  const explanation = explanations[selected]
+  const ready = explanation && explanationMatches(explanation.wording, wording)
   return <section ref={directionPanel} className="preparation-story-directions" aria-label="选择故事走向" aria-busy={loading}>
     <div><p className="eyebrow">接下来 / 故事走向</p><h2>你想让故事往哪里走？</h2><p className="preparation-direction-description">先决定关键取舍，再构思完整故事；具体过程和暂定结局仍可修改。</p></div>
     {loading && <p role="status">正在根据这张卡整理走向…</p>}
@@ -925,47 +899,28 @@ function PreparationStoryDirectionChoice({ session, candidateId, review, disable
         <span className="preparation-choice-indicator" aria-hidden="true">{selected === item.id && <Check size={16} />}</span>
       </label>)}
     </div>
-    <div className="preparation-direction-footer"><button className="primary-action" type="button" disabled={disabled || !direction} onClick={() => void onConfirm(direction)}>按这个走向构思故事 <ArrowRight size={16} /></button></div>
+    {direction && <section className="preparation-selected-process" aria-label="推进过程">
+      <div><p className="eyebrow">推进过程</p><h3>这个选择怎样推动故事？</h3><p>查看人物的办法与处境变化，采用后再进入故事设计。</p></div>
+      <PreparationExplanation key={`${retry}-${selected}`} candidate={{ ...candidate, explanation: undefined, causalBridge: undefined }}
+        wording={wording} explanation={explanation} disabled={disabled} autoGenerate selectedStoryDirection={direction}
+        storyId={session.storyId} revision={session.revision} curveId={session.provisionalCurve!.id}
+        onPendingChange={setProcessPending}
+        loadInitial={() => {
+          let promise = processRequests.current.get(selected)
+          if (!promise) {
+            promise = requestPreparationExplanation({ storyId: session.storyId!, revision: session.revision,
+              curveId: session.provisionalCurve!.id, candidate: { id: candidateId, ...wording }, selectedStoryDirection: direction })
+            processRequests.current.set(selected, promise)
+            void promise.catch(() => { processRequests.current.delete(selected) })
+          }
+          return promise
+        }}
+        onChange={value => setExplanations(current => ({ ...current, [selected]: value }))} />
+    </section>}
+    <div className="preparation-direction-footer"><button className="primary-action" type="button" disabled={disabled || !direction || !ready || processPending} onClick={() => { if (ready && !processPending) void onConfirm(direction, explanation) }}>确认并进入故事设计 <ArrowRight size={16} /></button></div>
   </section>
 }
 
-function PreparationContextRecovery({ session, disabled }: { session: StorySession; disabled: boolean }) {
-  const [mode, setMode] = useState<'system' | 'manual'>()
-  const [supplement, setSupplement] = useState('')
-  const [suggesting, setSuggesting] = useState(false)
-  const [suggestionError, setSuggestionError] = useState('')
-  const combinedIdea = `${session.trimmedIdea}${/[。！？]$/u.test(session.trimmedIdea) ? '' : '。'}${supplement.trim()}`
-  const getSuggestion = async () => {
-    if (!session.storyId || !session.provisionalCurve || suggesting) return
-    setMode('system')
-    setSuggesting(true)
-    setSuggestionError('')
-    try {
-      setSupplement(await requestPreparationGoalSuggestion({ storyId: session.storyId, revision: session.revision, curveId: session.provisionalCurve.id }))
-    } catch (error) {
-      setSuggestionError(error instanceof Error ? error.message : '暂时无法生成建议，请再试一次。')
-    } finally {
-      setSuggesting(false)
-    }
-  }
-  const useSupplement = () => {
-    if (!supplement.trim() || combinedIdea.length > 120) return
-    session.updateIdea(combinedIdea)
-    session.goBackToOpening()
-  }
-  return <section className="preparation-context-recovery" aria-label="补充故事起点">
-    <p className="eyebrow">补充故事起点</p>
-    <h2>先决定怎么继续</h2>
-    <p>可以让系统提出一条可修改的起点，也可以自己补一句，再生成故事方向。</p>
-    <div className="preparation-context-routes" role="group" aria-label="补充方式">
-      <button type="button" className={mode === 'system' ? 'is-selected' : ''} disabled={disabled || suggesting} onClick={() => void getSuggestion()}><Sparkles size={17} /><span><strong>让系统先给一版</strong><small>只是一句可修改的建议，不会自动成为你的设定。</small></span><ArrowRight size={16} /></button>
-      <button type="button" className={mode === 'manual' ? 'is-selected' : ''} disabled={disabled || suggesting} onClick={() => { setMode('manual'); setSupplement(''); setSuggestionError('') }}><PencilLine size={17} /><span><strong>我来补充设定</strong><small>写一句你愿意加入原始想法的内容。</small></span><ArrowRight size={16} /></button>
-    </div>
-    {suggesting && <p role="status">正在构思暂定起点…</p>}
-    {suggestionError && <p role="alert">{suggestionError}</p>}
-    {mode && !suggesting && <div className="preparation-context-editor"><label htmlFor="preparation-context-supplement">{mode === 'system' ? '系统建议 · 可修改' : '你的补充'}</label><textarea id="preparation-context-supplement" value={supplement} onChange={e => setSupplement(e.target.value)} maxLength={120} placeholder="例如：主角想完成哪件事？" disabled={disabled} /><small>{combinedIdea.length} / 120{combinedIdea.length > 120 ? ' · 请缩短补充' : ''}</small><button className="primary-action" type="button" disabled={disabled || !supplement.trim() || combinedIdea.length > 120} onClick={useSupplement}>带着补充返回想法 <ArrowRight size={16} /></button></div>}
-  </section>
-}
 function PreparationSupplementReview({ item, disabled, onReview }: { item: import('../../../shared/story-preparation.js').StoryPreparationSupplement; disabled: boolean; onReview: (id: string, decision: 'accepted-design'|'rejected'|'keep-unknown', text: string) => Promise<void> }) {
   const [authorText, setAuthorText] = useState('')
   return <article><p>待审 {item.kind}：{item.text}</p><p>{item.question}</p><p>审阅状态：{item.status}（不表示执行或结果发生）</p>{item.authorText && <blockquote>{item.authorText}</blockquote>}

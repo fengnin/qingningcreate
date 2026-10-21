@@ -1,15 +1,17 @@
 import { randomUUID } from 'node:crypto'
+import { generateDirectionCards, directionCardGenerationPrompt } from './storyDirectionCards.js'
+import { directionLogicReviewGuidance } from './storyDirectionLogicReview.js'
 import { parsePreparationExplanation } from './storyPreparationExplanation.js'
 import { activePreparationMaterial } from './storyPreparationContext.js'
 export { activePreparationMaterial } from './storyPreparationContext.js'
 import { hasProposalProtocolLeak } from './storyProposalProse.js'
 import { storyCreativeIntentGuidance, storyCreativeFocusGuidance, preparationCreativeFocus } from './storyCreativeIntent.js'
-import { storyDevelopmentGuidance, storyDevelopmentRepairGuidance, storySemanticReviewGuidance, storyTechnicalReviewGuidance } from './storySemanticReview.js'
+import { storyDevelopmentGuidance, storyDevelopmentRepairGuidance, storySemanticReviewGuidance, storyTechnicalReviewGuidance, storyMainlineGoalGuidance, storyCausalMechanismGuidance, storyResourceConsistencyGuidance } from './storySemanticReview.js'
 import { developmentStateGuidance, developmentStateIssues, type DevelopmentState } from './storyDevelopmentState.js'
 import { bridgeRepairDiagnostic, parseBridgeReviewCheck, bridgeEvidenceCatalog, storyDirectionDetailGuidance, type BridgeEvidence } from './storyBridgeReview.js'
 import { generateSceneDraft, sceneAuthorRequirements } from './storySceneDraft.js'
 import { AppError, requestQwenJson, withModelDiagnostic } from './qwen.js'
-import { preparationOutputSchemas as schemas, preparationQualitySchema, projectionOutputSchema, causalReviewOutputSchema, factReviewOutputSchema } from './storyOutputSchemas.js'
+import { preparationOutputSchemas as schemas, preparationDirectionQualitySchema, projectionOutputSchema, causalReviewOutputSchema, factReviewOutputSchema } from './storyOutputSchemas.js'
 import { parseFactReviewChecks } from './storyFactReview.js'
 import { developPreparationStory } from './storyPreparationDesign.js'
 import type { StoryCausalBridge, StoryMainlineAnchor, StoryMainlineGoal, StoryPreparation, StoryPreparationCandidate, StoryPreparationItem, StoryPreparationReview, StoryExpansionNeed, StoryCreativeFocus } from '../../shared/story-preparation.js'
@@ -44,6 +46,37 @@ class PreparationQualityError extends AppError {
   }
 }
 const preparationQualityCriteria = ['facts', 'causality', 'requirements', 'author-control', 'questions'] as const
+const openIdeaDirectionsGuidance = `原文未明确人物目标时，直接围绕已有主题、场景、关系或感觉构思三种可拒绝的故事方向，不要求作者先补充想法。未提供的人物或愿望可作为暂定提案，不能宣称是作者原本指定的目标；人物称呼遵守命名开关。作者明确说暂不确定的要素继续保持开放，不能擅自定案或依赖它解决问题。materialIds引用实际承接的原始材料，不为生成方向把主题、风格或未知改标成goal。审阅按原文检查相容性与提案内部因果，不能仅因没有预先确定人物目标而拒绝或追问。`
+export function preparationDirectionQualityPrompt(brief: CreativeBrief): string {
+  return `${directionLogicReviewGuidance}\n${openIdeaDirectionsGuidance}
+完成上述独立因果判断后，审查故事提案质量。你负责核对当前方向卡，不负责替它扩写、象征化或解释成更好的故事。提供 structuredProposal 时，逐卡按 options 原顺序返回恰好两个 branches，直接核对 difficulty、options.action 和对应 options.consequence；proposal 是同一内容的展示形式。每个 outcome 必须保留对应 consequence 的实际声称，不得把“可能、等待、风险、尝试”改成已完成，也不得替它补出成功条件。返回JSON {actionChecks:[上述聚焦判断，仅structuredProposal时返回],candidateChecks:[{id,pursuedGoal,branches:[{action,outcome,goalEffect,mechanism}],relation,reason}],checks:[{criterion,passed,evidence}],issues:[具体问题]}。
+先提取每个分支再作结论。branches覆盖卡片全部选择，通常两个，不能只挑较合理的分支。action与outcome各不超过60字，分别概括卡片实际写出的行动和结果，必须保留各自人物主体；不能把行动目的填成已经发生的结果，也不能把“他”改为主角。goalEffect仅按实际结果对原目标的影响选择：advances=原目标有实际进展；attempted=结果尚未给定、仍是有作用途径的合理尝试；postponed=明确延后；abandoned=有动机地放弃；failed=明确失败；substituted=把另一体验、凭据或别人的经历冒充完成；unaddressed=结果转去无关信息且没交代原目标进展、受阻、失败或取舍。结果已写成别人获得机会并转入无关对话时，不能以主角原先想求助为由填attempted。mechanism判断已写出的行动能否支撑已声称的结果：supported或unsupported；普通未展开细节不算unsupported，不强求尝试成功。等待回复、他人合理回应、普通求助或配合，不因结果不受主角控制就判unsupported；只拒绝真正需要推翻已有限制、凭空新增决定性能力或省略关键作用途径的结果。每个分支独立生效，任何substituted、unaddressed或unsupported均需修复。
+若输入提供 consequenceCatalog，先返回 consequenceChecks:[{id,resultStatus,prerequisite,prerequisiteStatus,verdict,reason}]，每个片段ID恰好一次。resultStatus按原文措辞取asserted（直接断言变化成立）、conditional（明确以某事发生为条件）、uncertain（可能或风险）、planned（打算安排）；不能因整张卡是未来提案就把所有断言一律改成conditional。prerequisite用不超过40字指出该结果成立需要的关键事件，没有则为空；prerequisiteStatus取satisfied-by-action（假设执行当前action，该事件即完成）、explicit-condition（原文明确写了该事件完成后的条件）、only-planned（当前action只是约定、准备或承诺以后做该事件）、missing（关键事件及途径缺失）、not-needed（无关键前提）。普通工具使用、沟通回应等可自然展开，不列成缺失前提。verdict仅supported或unsupported，reason不超过60字，不能用“起点、预期、将来有望履行”证明一个已经无条件宣称成立的结果。当前action本身若是实际执行所需事件，允许描写其后果；若只是安排未来执行，不能省略实际履行就声称责任、占有或风险已消失。
+片段必须连同完整consequence、对应action和difficulty判断，保留前文的如果、可能、失败与时间条件，不割裂条件句。逐项核对片段内所有关键断言，前半句合理不能抵消后半句跳跃。只评原文所称结果，不提供修复办法。任何关键断言unsupported均须修复，不能被分支或总评通过抵消。无catalog时不返回consequenceChecks，保留原有编辑场景的审阅格式。
+先逐卡核对原始愿望。原目标只从 sources、material、mainlineGoals 中读取；proposal 是待核对的提案，不能反过来定义作者原本想要什么。pursuedGoal 概括卡片人物实际在做的事，不能自动复制原目标。对眼前的每一种应对分别追踪到 possibleResult，再给整张卡一个 relation：
+- pursues-goal：各分支的办法仍争取原活动、行动或明确任务，允许失败或未完成。
+- goal-tradeoff：人物明确接受改期、放弃或转变，原目标因此失去的机会、代价或承诺仍直接驱动取舍。不能把做别的事冒充另一种完成。
+- substituted：任一分支用另一任务、象征替身、表面凭据或他人代为经历冒充原目标的实现。只有作者原文就要求该替代任务时才不算偷换。
+- unrelated：后续已转去另一任务，原目标只剩开头提及、同一场所或末尾感悟。
+任一分支偷换目标时整张卡按 substituted 处理；合理失败、改期或放弃可为 goal-tradeoff，不强求完成原计划。理由仅解释提案实际内容。
+原文没有要求完整程度时，不擅自补成必须全程、全部或一次完成。分支明确交代未完成的部分及其代价，仍争取同一活动或任务的部分进展，可判goal-tradeoff；只有把部分、替代任务或凭据冒充全部完成才判substituted，不要求另加承认改目标的台词。
+candidateChecks 每个候选 id 恰好一次，无候选时为空数组；reason 与 pursuedGoal 各不超过120字。任一 substituted 或 unrelated 都是实质问题，不会被其他卡片或五项总评抵消。
+随后完成五项 checks，每项恰好一次，passed 为布尔值，evidence 不超过140字：
+facts：保留人物主体、原目标、已定事实、否定、期限、关系和条件。不把初始状态的未来变化误判为已有事实冲突。
+causality：人物应对须与所称结果有作用关系；不能用新巧合替人物完成选择。三张卡是互斥备选，不互相比较为时间线；阻碍和取舍须实质不同。有sceneDraft时不得更换已定尝试、变化及回应。
+按下述共享因果、资源尺度检查行动能否启动及支撑所称结果；实质断裂令 mechanism 为 unsupported、causality 失败，并指明候选 id。拒绝理由须同时指出卡片的具体限制和与之冲突的行动或结果，不能只写不自然、缺细节或缺作者授权。原目标没有限定版本、场所时，改变版本或场所不构成偷换；提案自己的新设定不能提升为作者限制。明确写成失败的错误尝试可以成立，不得擅自把它改判为声称成功。剧情写得太满或生硬只作为改进空间，不为审美偏好另设硬拦截。
+重点区分安排与完成、意愿与能力、风险降低与风险消失：等待、约定、提供凭据本身不能完成仍未发生的交付或状态转移；普通道具、保险、手续不能凭空获得决定性功能。关键后果必须能由对应行动和已给条件支撑；把关键缺口藏在“可能”后仍是 unsupported。此处不要求补齐普通操作细节，也不拒绝明确可能失败的合理尝试。新增规则只按故事世界的合理性和必要性核对，不因作者没事先提供就一概拒绝。
+requirements：遵守作者要求、命名权限和世界设定。新人物、道具、情境可以创作，不因作者没写过就拒绝；但不能靠明显不可能、越权或违背已有限制的办法完成关键结果。
+author-control：新增内容都是可拒绝的未来设计，不是已发生事实；保留authorAction和作者明确保留的未知。缺少普通细节不等于越界。
+questions：仅问必要的人物目标或作者明确保留且无法绕过的未知；无问题时通过，不追问自造设定的证明。
+只拒绝实质缺陷，同义改写、未采用最优办法、普通省略不算失败。感觉和戏剧力量默认约束整篇，卡片只需相容并保留空间。issues最多三项，每项不超过200字；指明候选id和具体问题，不补写新情节。总评通过时 issues 应为空；逐卡判定无论总评怎样都独立生效。
+${storyMainlineGoalGuidance}
+${storyCausalMechanismGuidance}
+${storyResourceConsistencyGuidance}
+${storySemanticReviewGuidance}
+${storyCreativeFocusGuidance}
+${storyCreativeIntentGuidance(brief, 'directions')}`
+}
 const futureChoiceIssueTypes = ['none', 'author-conflict', 'world-implausible', 'causal-gap', 'mainline-drift'] as const
 const generatedProposalTextMax = 240
 function logPreparationReview(stage: string, attempt: number, candidateIds: string[], decision: object): void {
@@ -86,16 +119,25 @@ async function repairGeneratedTextLengths(output: unknown, sources: StoryPrepara
   if (!output || typeof output !== 'object' || Array.isArray(output)) return output
   const repaired = structuredClone(output) as Record<string, unknown>
   const fields: { id: string; path: string; text: string; maxLength: number; targetLength: number; record: Record<string, unknown>; key: string }[] = []
-  const collect = (value: unknown, path: string, limits: Record<string, number>) => {
+  const collect = (value: unknown, path: string, limits: Record<string, number>, maxLength = generatedProposalTextMax) => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return
     const record = value as Record<string, unknown>
     for (const [key, targetLength] of Object.entries(limits)) {
       const value = record[key]
-      if (typeof value === 'string' && value.length > generatedProposalTextMax) fields.push({
-        id: `t${fields.length}`, path: `${path}.${key}`, text: value, maxLength: generatedProposalTextMax, targetLength, record, key,
+      if (typeof value === 'string' && value.length > maxLength) fields.push({
+        id: `t${fields.length}`, path: `${path}.${key}`, text: value, maxLength, targetLength, record, key,
       })
     }
   }
+  // Review and display must use the same repaired option/consequence pairs.
+  // Component budgets keep the compiled card within its existing text limit.
+  if (Array.isArray(repaired.plans) && repaired.plans.length >= 1 && repaired.plans.length <= 3) repaired.plans.forEach((value, i) => {
+    collect(value, `plans[${i}]`, { difficulty: 55 }, 80)
+    if (value && typeof value === 'object' && Array.isArray(value.options)) value.options.forEach((option: unknown, j: number) => {
+      collect(option, `plans[${i}].options[${j}]`, { action: 28 }, 60)
+      collect(option, `plans[${i}].options[${j}]`, { consequence: 35 }, 60)
+    })
+  })
   if (Array.isArray(repaired.candidates) && repaired.candidates.length <= 3) repaired.candidates.forEach((value, i) => {
     collect(value, `candidates[${i}]`, { action: 110, possibleResult: 80, futureChoice: 80 })
     if (value && typeof value === 'object') collect(value.causalBridge, `candidates[${i}].causalBridge`, { method: 100, change: 100 })
@@ -181,19 +223,6 @@ function classifyPreparationMaterial(value: unknown, frames: ReturnType<typeof f
   return parsePreparationMaterial({ material: frames.map(f => ({ ...f, role: roles.find(r => r.id === f.id)!.role })) }, sources)
 }
 
-
-const preparationQuestionsPrompt = `你是第一次写作的作者的故事搭档。当前在最小行动候选阶段的补充入口，人物目标尚未确定，或作者明确保留的关键未知阻碍了独立构思；依据requiredResponse区分这两种情况。
-严格返回 JSON {candidates:[],questions:[{id,question,materialIds}]}。只问一个容易回答的创作选择：谁想做什么，或谁正面对什么具体情境。提供两三个简短例子帮助作者选择，也允许作者自定。不问抽象类型、主动被动、主体客体、戏剧机制或创作理论，不要求一次补齐人物、地点、期限、阻碍和结局。没有人物就先问人物，不将等候的对象误称为行动主体。
-保留原文已定风格、场景及结尾期待；不能把结尾期待当人物当前愿望。不要设计角色行动或结果，不进行现实事实核查。materialIds 仅取 referenceContract.questionMaterialIds 中相关的原文ID，不能新增来源。`
-
-const preparationDirectionsPrompt = `你是一位中文短篇故事编辑。从作者的想法提出恰好三种可以继续展开的故事困境，供作者选择；此时不写场景、对白或人物已经做出的具体动作。
-${storyDevelopmentGuidance}
-严格输出JSON {candidates:[{id,action,materialIds,preconditionIds,possibleResult,resultBasisIds,unknownIds}],questions:[]}。每条 action 用50至110字，必须使用两段明确标记：“遇到的难处：……”和“眼前的选择：……”。前一段说明人物原本想完成什么、未来可能遇到的一个阻碍；后一段说明由该阻碍造成的眼前取舍。不要把阻碍写成已经发现、已被告知或已被要求的事实。possibleResult 用30至80字写不同选择可能让原目标怎样变化，不宣称结果已经发生。不写“提议：”“可能发展：”前缀。
- 三条从同一原始愿望出发，在事件、人物应对及取舍上分化；删去专有名词后若仍是同一阻碍，就重新构思。mainlineGoals 是作者的完整主线，mainlineAnchors 是原文指定的要素。每条只围绕一个主要阻碍和一个眼前取舍，不在短卡里写完多轮过程。先利用人物性格、相处方式、行动对象和已有场景产生变化；确实需要新人物、道具或条件时再补，交代其怎样影响选择即可。
- 人物可以在遇见新情况后改变打算，甚至主动承担原先回避的代价；写清为何改变，以及原愿望、风险或关系如何继续影响取舍。不能仅在开头重提原目标、随后转去无关任务。作者已定结局是选定方向应能走向的终点，不必让三条使用同一个转折。保留作者期限、承诺、否定、关系、结局期望和明确未知；只说双方有分歧时，不替他们确定立场。
- 意外可以从已有情境中自然遇见，不必全由人物造成，也不必在卡片里解释完整来历；之后的可能发展须与人物不同应对有关，不靠再一次巧合自动解题。新内容都是尚未发生、可拒绝的提案。能力与限制按故事世界判断：日常互动不必补证明流程，奇幻能力不必补科学原理；关键结果仍须有相应行动或能力支撑，不把询问写成必然获准，不凭空越过作者限制。
- 每条id唯一，用d0、d1、d2。引用字段只能使用 referenceContract 中对应字段允许的材料 ID；mainlineAnchors 和 mainlineGoals 只用于理解主线，不是引用来源。materialIds至少引用原始目标；preconditionIds只能从 referenceContract.preconditionMaterialIds 选取行动确实依赖的作者已定事实或条件，没有额外前提就返回空数组，不得把人物目标当作前提。resultBasisIds只在可能结果明确承接已知原文条件时引用，否则返回空数组；不能为系统新创作的结果硬填原始目标充当证明。短输入允许提出新结果，但仍须与原目标、明确条件和人物选择构成可信因果。unknownIds为空。rejectedCandidates只用于避开作者拒绝过的方向，不是故事事实。
-输出结构：每条候选必须有七个独立字段，不能把 possibleResult、materialIds 等键名及其内容写进 action 字符串。单条编码示例（只示范字段，文字和ID必须按本次输入构思与选择）：{"id":"d0","action":"遇到的难处：人物面临的一个具体问题。眼前的选择：两种可能的应对。","materialIds":["本次允许的目标材料ID"],"preconditionIds":[],"possibleResult":"人物不同应对可能带来的变化。","resultBasisIds":[],"unknownIds":[]}。最终顶层为 {"candidates":[三条完整候选],"questions":[]}。即使重试也须返回完整JSON，不只给修订的句子或部分字段。不要附加解释。`
 
 export function parsePreparationMaterial(value: unknown, sources: StoryPreparation['sources']): StoryPreparationItem[] {
   const r = object(value, ['material'])
@@ -366,20 +395,28 @@ ${storyTechnicalReviewGuidance}
 evidenceCatalog的id由程序保留原文，不重抄quote、不引用其他方向或内部developmentState。拒绝依据须真正支持所称断裂：状态矛盾选冲突双方，机制断裂选办法与声称结果，偏航选原愿望或已有后果与脱离它的后续。reason不超过180字，只解释实际判断，不建议新情节；不能仅凭未写细节、失败后处境变差、审阅者自定的必要条件拒绝。先作实际判断，再保证verdict、reason及引用一致；重审仍覆盖全部输入id。`
 
 export async function projectFutureChoices(candidates: StoryPreparationCandidate[], sources: StoryPreparation['sources'], brief: CreativeBrief,
-  mainlineAnchors: StoryMainlineAnchor[] = [], mainlineGoals: StoryMainlineGoal[] = [], creativeFocus?: StoryCreativeFocus): Promise<StoryPreparationCandidate[]> {
+  mainlineAnchors: StoryMainlineAnchor[] = [], mainlineGoals: StoryMainlineGoal[] = [], creativeFocus?: StoryCreativeFocus,
+  selectedStoryDirection?: string): Promise<StoryPreparationCandidate[]> {
   if (!candidates.length) return candidates
   const hasCompleteProjection = candidates.every(candidate => candidate.futureChoice && candidate.causalBridge)
   const prompt = `你是故事大纲编辑。输入包含已审阅的方向卡。为每条方向补人物可能采取的办法、由此可能发生的处境变化和下一层故事取舍，不写完整剧情。返回精确 JSON {developments:[{attempt:{means,methodUses,text,materialIds},change:{outcome,states,text,materialIds},futureChoice:{requires,text},id}]}，每个输入 id 恰好一项。每条按attempt→change→futureChoice连续写完整后再写下一条，不把办法与后续选择分成两组独立构思。
 ${storyDevelopmentGuidance}
 ${storyCreativeFocusGuidance}
 ${developmentStateGuidance}
+${storyMainlineGoalGuidance}
+${storyCausalMechanismGuidance}
+${storyResourceConsistencyGuidance}
+selectedStoryDirection 若存在，是作者已经选定的走向；本次办法、变化和后续取舍必须承接它，不重新打开相反分支。候选已有 futureChoice 时保留该取舍的含义，不自行替换；作者已确认的具体设计条件仍须保留。
 method 是人物在方向卡眼前取舍中可能采取的办法，change 是办法后可能出现的新局面，使原目标更近、更远，或改变已建立的人物关系；两项各用40至100字，简明写清机制，不要把它写成已经发生。methodBasisIds 只能引用该方向的 materialIds；changeBasisIds 只在变化确实承接作者原文条件时引用该方向的 resultBasisIds，否则为空。引用表示承接作者材料，不证明新结果已经发生或因果成立。来源 ID 不写入文字。
 以上办法编码为attempt.text、methodBasisIds编码为attempt.materialIds；处境变化编码为change.text、changeBasisIds编码为change.materialIds；后续取舍编码为futureChoice.text。不要输出旧的bridges或futureChoices顶层数组。
 本步写故事大纲，不写操作指南。办法用一个可理解的行动说清，不展开拆装、接线、材料用量或参数实验。题材确实关注技术时，保留直接决定取舍的关键条件即可。若阻力来自人与人的关系，让尝试与回应落在相处中，不凭空增加必须先解决的技术难题。
  每条 text 30至80字，写明办法奏效或失败后，人物面对哪两种后续走向。新取舍须影响原愿望的机会、代价或已有关系，也可以让人物在保住原打算与回应更在意的事情之间选择；等待、核对、调整做法或路线也可成立，但这次办法必须带来新信息、条件或后果，不能原地重复。先沿方向卡已有人物、目标和情境寻找办法；新事件可以偶然出现，不要求由上一步直接造成，但人物须有自然理由遇见它，且它须影响原目标和选择，不能连续空降无关麻烦代替人物行动改变处境。
  可以创作新人物、道具、往事、服务或规则，无须作者原文或方向卡预先写明；新内容应能从人物正在做的事或已有场所情境自然遇见。能力与代价按作者的世界设定和题材判断，新设定须自洽并保留已有的限制。普通询问、登记、协商及他人合理配合可以带出可能变化，无须另编整套手续、权限或背景；有必要条件时用条件式说明，不保证必然获准。关键结果须有办法能提供的信息、资源或能力支撑；线索可以引出调查，不能无依据地变成定论。
  method 只写人物选用的办法；change 写办法成败、他人回应或相关发现带来的信息、机会、限制、代价或关系变化，不用心理感悟代替处境变化。futureChoices.text 写变化后尚待决定的两种走向，不必写出结局。写故事规划，不写对白、微动作、身体感受、隐藏经历或完整场景。不为增强戏剧性再空降一轮麻烦；先让这次办法产生后果。所有内容仍是可拒绝、尚未发生的系统提案。`
-  const input = { sources, brief, mainlineAnchors, mainlineGoals, creativeFocus, candidates: candidates.map(({ id, action, possibleResult, materialIds, resultBasisIds }) => ({ id, action, possibleResult, materialIds, resultBasisIds })) }
+  const input = { sources, brief, mainlineAnchors, mainlineGoals, creativeFocus,
+    ...(selectedStoryDirection ? { selectedStoryDirection } : {}),
+    candidates: candidates.map(({ id, action, possibleResult, materialIds, resultBasisIds, futureChoice }) => ({ id, action, possibleResult, materialIds, resultBasisIds,
+      ...(futureChoice ? { futureChoice } : {}) })) }
   const projectedBridges = new Map<string, ReturnType<typeof parseFutureChoiceProjection>['bridges'][number]>()
   const projectedChoices = new Map<string, string>()
   const projectedStates = new Map<string, DevelopmentState>()
@@ -458,7 +495,7 @@ ${storySemanticReviewGuidance}`,
           userPrompt: JSON.stringify({ storyContext: sources.map(source => source.text),
             mainlineGoals: mainlineGoals.map(goal => goal.quote),
             mainlineAnchors: mainlineAnchors.map(anchor => ({ kind: anchor.kind, quote: anchor.quote })),
-            creativeFocus,
+            creativeFocus, ...(selectedStoryDirection ? { selectedStoryDirection } : {}),
             proposals, evidenceCatalog }),
           temperature: 0.1, maxTokens: 1800, diagnosticStage: 'preparation-future-choice-world-review', outputSchema: causalReviewOutputSchema(worldCandidates.length, evidenceCatalog.map(e => e.id)),
         }, raw => {
@@ -796,32 +833,39 @@ async function generatePreparationCandidates(sources: StoryPreparation['sources'
     mainlineAnchors: mainlineAnchors.map(({ kind, quote }) => ({ kind, quote })),
     mainlineGoals: mainlineGoals.map(({ quote }) => quote),
     brief, referenceContract: preparationReferenceContract(material), rejectedCandidates, ...(authorAction ? { authorAction } : {}) }
-  let needsGoalChoice = !authorAction && !material.some(m => m.role === 'goal')
-  // Undecided author intent stays in the question path. Never manufacture a
-  // character goal to make the staged scene pipeline run.
-  const sceneStep = needsGoalChoice || !authorAction ? undefined : await generateSceneDraft({ sources, material, brief, rejectedCandidates, authorAction, creativeFocus })
+  if (!authorAction) return generateDirectionCards({ input: { ...input,
+      authorRequirements: sceneAuthorRequirements({ sources, material, brief, rejectedCandidates }) },
+    prompt: `${directionCardGenerationPrompt}\n${storyCreativeIntentGuidance(brief, 'directions')}\n${openIdeaDirectionsGuidance}`,
+    request: requestPreparationResponse,
+    compress: raw => repairGeneratedTextLengths(raw, sources, 'preparation-directions-text-length'),
+    parse: raw => {
+      const result = parsePreparationCandidates(raw, material)
+      if (result.candidates.some(c => rejectedCandidates.some(old => old.action === c.action))) invalid('新提案重复了已拒绝的行动。')
+      return result
+    },
+  })
+  // Author edits retain their existing scene/review contract. Fresh cards
+  // above have a separate, compact review and targeted repair pipeline.
+  const sceneStep = await generateSceneDraft({ sources, material, brief, rejectedCandidates, authorAction, creativeFocus })
   let sceneDraft = sceneStep && 'attempt' in sceneStep ? sceneStep : undefined
   const unknownQuestions = sceneStep && 'questions' in sceneStep ? sceneStep.questions : undefined
-  if (unknownQuestions) needsGoalChoice = true
+  if (unknownQuestions) throw new AppError('这次调整依赖尚未确定的条件，请调整方向后重试；原有卡片仍保留。', 409, 'STORY_PREPARATION_UNKNOWN_DEPENDENCY')
+  if (!sceneDraft) return invalid('未生成可审阅的方向调整，请重试。')
   let previousOutput: unknown
   let validationFailure: string | undefined
   for (let attempt = 0; attempt < 2; attempt++) {
     // Presentation and reference IDs are deterministic. Asking the model to
     // copy an approved scene creates another opportunity for story drift.
-    previousOutput = sceneDraft ? { candidates: [{ id: 'c0',
-      action: authorAction ?? `提议：${sceneDraft.attempt.action}`,
+    previousOutput = { candidates: [{ id: 'c0',
+      action: authorAction,
       materialIds: sceneDraft.attempt.materialIds, preconditionIds: sceneDraft.attempt.preconditionIds,
       possibleResult: `可能发展：${sceneDraft.development.change}${sceneDraft.development.response}`,
       resultBasisIds: sceneDraft.development.resultBasisIds, unknownIds: [] }], questions: [] }
-       : await requestQwenJson({ systemPrompt: needsGoalChoice ? preparationQuestionsPrompt : `${validationFailure?.startsWith('内容审阅：') ? `${storyDevelopmentRepairGuidance}\n` : ''}${preparationDirectionsPrompt}\n${storyCreativeIntentGuidance(brief, 'directions')}\n${storyCreativeFocusGuidance}`,
-      userPrompt: JSON.stringify({ ...input, ...(sceneDraft ? { sceneDraft } : {}), ...(needsGoalChoice ? { requiredResponse: unknownQuestions ? 'candidates=[]；围绕suggestedQuestions对应的明确未知，只问一个必要问题，不替作者决定未知。' : 'candidates=[]；原文尚无人物目标，请只问一个人物或目标的创作选择，不设计角色行动。', ...(unknownQuestions ? { suggestedQuestions: unknownQuestions } : {}) } : {}), ...(validationFailure ? { previousOutput, validationFailure } : {}) }),
-      temperature: needsGoalChoice ? 0.2 : 0.45, maxTokens: needsGoalChoice ? 1200 : 3000, diagnosticStage: needsGoalChoice ? 'preparation-candidates' : 'preparation-directions',
-      outputSchema: needsGoalChoice ? schemas.questions : schemas.directions })
     try {
       // In edit mode the model generates only a result, never another action.
       // A conflicting action remains a visible error; do not splice it away.
-      const output = authorAction && previousOutput && typeof previousOutput === 'object' && !Array.isArray(previousOutput)
-        ? structuredClone(previousOutput) as Record<string, unknown> : previousOutput
+      const output: unknown = previousOutput && typeof previousOutput === 'object' && !Array.isArray(previousOutput)
+        ? structuredClone(previousOutput) : previousOutput
       if (authorAction && output && typeof output === 'object' && 'candidates' in output && Array.isArray(output.candidates) && output.candidates.length === 1) {
         const candidate = output.candidates[0]
         if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
@@ -829,10 +873,7 @@ async function generatePreparationCandidates(sources: StoryPreparation['sources'
           candidate.action = authorAction
         }
       }
-      const result = parsePreparationCandidates(!authorAction && !needsGoalChoice
-        ? await repairGeneratedTextLengths(output, sources, 'preparation-directions-text-length') : output, material)
-      if (sceneDraft && !authorAction && (result.candidates.length !== 1
-          || ![sceneDraft.attempt.action, `提议：${sceneDraft.attempt.action}`].includes(result.candidates[0]!.action))) invalid('文字表达不能更换已审阅的尝试。')
+      const result = parsePreparationCandidates(output, material)
       if (sceneDraft && result.candidates.length === 1) {
         const candidate = result.candidates[0]!
         for (const [actual, expected] of [[candidate.materialIds, sceneDraft.attempt.materialIds],
@@ -841,32 +882,37 @@ async function generatePreparationCandidates(sources: StoryPreparation['sources'
         }
         if (candidate.unknownIds.length || result.questions.length) invalid('文字表达不能新增补充依赖。')
       }
-      if (needsGoalChoice && result.candidates.length) invalid('原文尚无人物目标；请返回 candidates=[] 和一个具体创作问题，不把作者主题或未定人物转换为角色行动。')
-      if (!needsGoalChoice && !authorAction && (result.candidates.length !== 3 || result.questions.length
-          || result.candidates.some(c => c.unknownIds.length))) invalid('请给出三条不依赖补充问题的故事困境。')
       if (authorAction && (result.candidates.length !== 1 || result.candidates[0]!.action !== authorAction)) invalid('重推必须完整保留作者编辑的行动。')
       if (result.candidates.some(c => rejectedCandidates.some(old => old.action === c.action))) invalid('新提案重复了已拒绝的行动。')
       if (new Set(result.candidates.map(c => `${c.action.replace(/\s/gu, '')}|${c.possibleResult.replace(/\s/gu, '')}`)).size !== result.candidates.length) invalid('故事方向重复。')
       const issues = await requestPreparationResponse({
-          systemPrompt: `审查故事提案质量，核对文字是否忠实于作者材料与创作边界。返回精确JSON {checks:[{criterion,passed,evidence}],issues:[具体问题]}。五项criterion为facts,causality,requirements,author-control,questions，每项一次；passed布尔值，evidence引用具体措辞、不超过140字。issues最多三项、每项不超过200字，只有实质缺陷才列；不得补写缺失解释替提案圆场。结合 mainlineGoals 的完整原目标和 mainlineAnchors，对每张方向卡的 action 与 possibleResult 整体判断是否仍服务原故事；若某张卡转向与原愿望、人物关系和取舍代价失去联系的任务，令 causality 失败并在 issues 写明候选 id 和偏航处。不逐要素输出判断，也不在此阶段审阅因果桥的下一步。允许人物因有来由的发现或回应改变目标、牺牲原打算；原活动、关系或风险须继续影响选择的意义与代价。
-${storySemanticReviewGuidance}
-facts：逐条保留原目标、行动主体、明确事实、期限、承诺、关系、否定以及命名权限。作者事实是初始状态，可在未来发展中变化；不能把求职者写成招聘人员，不能把假装或象征动作当成实际目标。
-  causality：有sceneDraft时比较骨架与提案，不能新增或更换尝试、变化、回应。没有sceneDraft时，只检查每条新事件是否能在已有情境中被人物遇见、是否改变人物处境并深化或转变原愿望所带出的选择；可能走向是否与人物的不同应对有关，而非下一次巧合自动完成。意外不必由上一行动造成，卡片不必解释完整事件来历或写完故事曲线；不要以缺少后续细节判失败。各方向是互斥的备选设计，不是同一时间线；分别核对内部逻辑，不把不同方向的新设定互相当作已定事实来判矛盾。不同方向须有实质不同的主要阻碍或关键选择，换道具、场地或措辞不算不同。作者要求的共同结局不算机制差异：若三条都是同一种认知错误、同一种物件线索或同一种误会，只换了表面细节，必须指出重复。
- requirements：新人物、道具、往事、代价及日常流程均可作为未来设计创作，不要求作者预先提供。按作者世界、题材惯例及提案的自洽设定理解，只拦截影响关键转折的明显不可能、越权或矛盾：例如办法没有能力支撑所称结果、违背已有能力限制、明显荒谬的强制规则，或把询问与他人沉默直接当作已获授权。正常互动不要求权限链，奇幻能力不要求科学实现，短卡不要求补齐规则制定者、完整手续或事件全史。技术、规则或手续本身不构成错误；相继增加的无关要求若替代人物应对，须指出哪一步失去故事联系，而非要求再补一套设定。
- author-control：所有新增内容是尚未执行、可拒绝的未来设计，不能决定作者明确保留的未知。保留authorAction，拒绝后改变机制。骨架本身也是设计，不是事实证据。
-questions：问题必要具体、易回答，只问人物目标或不可避开的作者未知，不追问自造设定的现实证明，不重复确认。不提供行动而只问创作选择时，causality只检查问题能否帮助确定人物或情境，不要求问题包含完整故事。
-${storyCreativeIntentGuidance(brief, 'directions')}
-${storyCreativeFocusGuidance}
-若有候选，检查三条是否都与所选感觉、戏剧力量和作者额外偏好相容，并各自提供不同、可发展的主要机制；这里不要求每条卡片独立完成整篇故事。若某条完全偏离，或把作者偏好直接写成已发生结果，列出候选 id；不能只因出现标签词、俏皮对白就判通过。作者偏好应在选定方向后的曲线与正文中转化为可观察的行动、选择或收束；作者事实与因果优先，不要求新增未确认的关键事件。`,
+          systemPrompt: preparationDirectionQualityPrompt(brief),
          userPrompt: JSON.stringify({ sources, material, mainlineAnchors, mainlineGoals, creativeFocus, brief, authorAction, rejectedCandidates,
           authorRequirements: sceneAuthorRequirements({ sources, material, brief, rejectedCandidates, authorAction }),
-          sceneDraft: sceneDraft ? { action: sceneDraft.attempt.action,
-            change: sceneDraft.development.change, response: sceneDraft.development.response } : undefined, proposal: result,
+           sceneDraft: sceneDraft ? { action: sceneDraft.attempt.action,
+             change: sceneDraft.development.change, response: sceneDraft.development.response } : undefined, proposal: result,
           expressionBoundary: '若提供sceneDraft，核对表达是否新增或改变骨架的事件、物件、人物边界和后果。骨架是待作者审阅的未来设计，不是执行证据。',
           reviewMode: result.candidates.length ? authorAction ? '作者编辑的方向与可能发展核对' : '三条故事困境的共同目标、阻碍差异和选择因果核对' : '仅补充创作选择，不要求行动、结果或完整因果链' }),
-         temperature: 0.1, maxTokens: 1800, diagnosticStage: 'preparation-quality-review', outputSchema: preparationQualitySchema,
-       }, raw => {
-      const audit = object(raw, ['checks', 'issues'])
+            temperature: 0.1, maxTokens: 2600, diagnosticStage: 'preparation-quality-review', outputSchema: preparationDirectionQualitySchema(result.candidates.map(candidate => candidate.id)),
+        }, raw => {
+      const audit = object(raw, ['checks', 'issues', 'candidateChecks'])
+      const mainlineChecks = list(audit.candidateChecks, 3).map(value => {
+        const check = object(value, ['id', 'pursuedGoal', 'branches', 'relation', 'reason'])
+        const id = text(check.id, 80)
+        if (!result.candidates.some(candidate => candidate.id === id)
+          || !['pursues-goal', 'goal-tradeoff', 'substituted', 'unrelated'].includes(String(check.relation))) invalid('方向主线审阅的编号或关系不合法。')
+        const branches = list(check.branches, 3).map(value => {
+          const branch = object(value, ['action', 'outcome', 'goalEffect', 'mechanism'])
+          if (!['advances', 'attempted', 'postponed', 'abandoned', 'failed', 'substituted', 'unaddressed'].includes(String(branch.goalEffect))
+            || !['supported', 'unsupported'].includes(String(branch.mechanism))) invalid('方向分支审阅的目标变化或机制判断不合法。')
+          const action = text(branch.action, 240), outcome = text(branch.outcome, 240)
+           return { action, outcome,
+            goalEffect: String(branch.goalEffect), mechanism: String(branch.mechanism) }
+        })
+        if (!branches.length) invalid('方向审阅缺少分支结果。')
+        return { id, pursuedGoal: text(check.pursuedGoal, 240), branches, relation: String(check.relation), reason: text(check.reason, 320) }
+      })
+      if (!coversCandidates(mainlineChecks, result.candidates)) invalid('方向主线审阅必须恰好覆盖每张卡片。')
       const issues = list(audit.issues, 8).map((v, i) => text(v, 500, `issues[${i}]`))
       const checks = list(audit.checks, 5).map(v => {
         const check = object(v, ['criterion', 'passed', 'evidence'])
@@ -874,15 +920,26 @@ ${storyCreativeFocusGuidance}
         return { criterion: String(check.criterion), passed: check.passed, evidence: text(check.evidence, 320, `checks[${String(check.criterion)}].evidence`) }
       })
        if (checks.length !== 5 || new Set(checks.map(c => c.criterion)).size !== 5) invalid('内容审阅没有完成全部维度。')
-      if (checks.every(c => c.passed) && issues.length) invalid('审阅各项均通过却仍列出内容缺陷。请只重审原提案，使checks和issues一致；不改写故事，也不为保留问题列表编造失败项。')
-      logPreparationReview('quality', attempt + 1, result.candidates.map(candidate => candidate.id), { checks, issues })
+       const branchIssues = mainlineChecks.flatMap(check => check.branches.flatMap((branch, i) =>
+        ['substituted', 'unaddressed'].includes(branch.goalEffect) || branch.mechanism === 'unsupported'
+           ? [`${check.id} 分支${i + 1}：${branch.action} → ${branch.outcome}；目标影响=${branch.goalEffect}，机制=${branch.mechanism}。`] : []))
+      if (checks.every(c => c.passed) && issues.length && !branchIssues.length
+        && mainlineChecks.every(check => !['substituted', 'unrelated'].includes(check.relation))) invalid('审阅各项均通过却仍列出内容缺陷。请只重审原提案，使checks和issues一致；不改写故事，也不为保留问题列表编造失败项。')
+      issues.push(...branchIssues)
+      for (const check of mainlineChecks) if (['substituted', 'unrelated'].includes(check.relation)) {
+        issues.push(`${check.id} 主线偏航：实际追求“${check.pursuedGoal}”；${check.reason}`)
+      }
+       logPreparationReview('quality', attempt + 1, result.candidates.map(candidate => candidate.id), { checks, mainlineChecks, issues })
       // Preserve failed dimensions without flooding regeneration with the same
       // critique twice (issues and checks usually describe the same defects).
       if (!issues.length) for (const check of checks.filter(c => !c.passed)) issues.push(`${check.criterion}：${check.evidence}`)
       return issues
       })
       if (issues.length) throw new PreparationQualityError(issues, 'directions', attempt + 1)
-      if (result.candidates.length) {
+      // Legacy callers may provide prebuilt bridges. Keep validating those
+      // explicit bridges, but ordinary direction cards stay lightweight until
+      // the author selects one.
+      if (result.candidates.some(candidate => candidate.causalBridge)) {
         const projected = await projectFutureChoices(result.candidates, sources, brief, mainlineAnchors, mainlineGoals, creativeFocus)
         return { ...result, candidates: projected }
       }
@@ -959,23 +1016,6 @@ export function parsePreparationReview(value: unknown, acceptedIds: string[]): S
     ...(confirmedQuotes === undefined ? {} : { confirmedQuotes: confirmedQuotes as string[] }) }
 }
 
-/** Classification is model work, never a server keyword inference. A missing
- * role can be recovered by selecting existing text without rewriting history. */
-async function resolvePreparationGoal(material: StoryPreparationItem[]): Promise<StoryPreparationItem> {
-  const classified = material.find(m => m.role === 'goal')
-  if (classified) return classified
-  const known = material.filter(m => m.role !== 'unknown')
-  const output = await requestQwenJson({
-    systemPrompt: '核对作者目标分类。输出精确 JSON {goalMaterialId}。只从输入 knownMaterial 中选择明确表达作者人物目标的一项 ID；不改写目标，不以行动候选或可能结果代替目标，不推断人物动机。没有明确目标时返回 goalMaterialId:null。此输出只是原文角色审阅，不是设计接受或执行事实。',
-    userPrompt: JSON.stringify({ knownMaterial: known }), temperature: 0.1, maxTokens: 200, diagnosticStage: 'preparation-goal-classification', outputSchema: schemas.goal,
-  })
-  const r = object(output, ['goalMaterialId'])
-  const id = r.goalMaterialId === null ? null : text(r.goalMaterialId, 80)
-  const goal = known.find(m => m.id === id)
-  if (!goal) invalid('目标分类未给出有效的已知原文引用；模型需重新整理或返回问题审阅，不能用行动或未知材料补造目标。')
-  return goal!
-}
-
 export function acceptPreparation(p: StoryPreparation, acceptedCandidateIds: string[], review?: StoryPreparationReview): StoryPreparation {
   if (p.status !== 'needs-review') throw new AppError('结构已接受，请审阅当前曲线。', 409, 'STORY_PREPARATION_ALREADY_ACCEPTED')
   if (acceptedCandidateIds.length !== 1 || new Set(acceptedCandidateIds).size !== acceptedCandidateIds.length
@@ -1040,7 +1080,20 @@ export function acceptPreparation(p: StoryPreparation, acceptedCandidateIds: str
 /** The selected, possibly edited card is the basis for a new reviewable story. */
 export async function generateCurveFromPreparation(curve: ProvisionalCurve, acceptedIds: string[], review?: StoryPreparationReview): Promise<ProvisionalCurve> {
   if (!curve.preparation || curve.status !== 'draft' || curve.beats.length) throw new AppError('当前不在方向确认阶段。', 409, 'STORY_PREPARATION_NOT_PENDING')
-  const preparation = acceptPreparation(curve.preparation, acceptedIds, review)
-  const goal = await resolvePreparationGoal(activePreparationMaterial(preparation))
+  const accepted = acceptPreparation(curve.preparation, acceptedIds, review)
+  // The first screen only needs three comparable direction cards. Build the
+  // deeper causal bridge after the author has selected one card, so unused
+  // alternatives do not spend model calls or acquire misleading detail.
+  const selected = accepted.candidates.filter(candidate => accepted.acceptedCandidateIds.includes(candidate.id))
+  const hasMainlineContract = (accepted.mainlineAnchors?.length ?? 0) > 0 || (accepted.mainlineGoals?.length ?? 0) > 0
+  const needsProjection = selected.some(candidate => !candidate.causalBridge && !candidate.explanation) && hasMainlineContract
+  const projected = needsProjection
+    ? await projectFutureChoices(selected, accepted.sources, curve.brief,
+      accepted.mainlineAnchors ?? [], accepted.mainlineGoals ?? [], preparationCreativeFocus(accepted), accepted.authorReview?.selectedStoryDirection)
+    : selected
+  const projectedById = new Map(projected.map(candidate => [candidate.id, candidate]))
+  const preparation = { ...accepted, candidates: accepted.candidates.map(candidate => projectedById.get(candidate.id) ?? candidate) }
+  const activeMaterial = activePreparationMaterial(preparation)
+  const goal = activeMaterial.find(item => item.role === 'goal')
   return developPreparationStory(curve, preparation, goal)
 }

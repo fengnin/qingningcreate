@@ -3173,7 +3173,7 @@ export function parseStoryPreparationSuggestionRequest(body: unknown): StorySess
 }
 
 export function parseStoryPreparationExplanationRequest(body: unknown): StoryPreparationExplanationRequest {
-  const r = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'candidate'])
+  const r = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'candidate', 'selectedStoryDirection'])
   const c = parseRequestRecord(r.candidate, ['id', 'action', 'possibleResult', 'futureChoice'])
   const { id, ...wording } = c
   const parsed = parseExplanationWording(wording)
@@ -3181,6 +3181,7 @@ export function parseStoryPreparationExplanationRequest(body: unknown): StoryPre
     throw new AppError('方向文字每项最多240字。', 400, 'INVALID_REQUEST')
   }
   return { ...parseStorySessionReference(r), curveId: readIdentifier(r, 'curveId', '请选择当前草案。', invalidRequestContext),
+    ...(r.selectedStoryDirection === undefined ? {} : { selectedStoryDirection: readText(r, 'selectedStoryDirection', '请选择当前故事走向。', 4000, invalidRequestContext) }),
     candidate: { id: readIdentifier(c, 'id', '请选择当前方向。', invalidRequestContext), ...parsed } }
 }
 
@@ -3190,7 +3191,7 @@ export async function suggestSessionPreparationExplanation(request: StoryPrepara
   if (!curve.preparation || curve.beats.length || session.confirmedCurve || session.currentTurn || session.history.length) {
     throw new AppError('当前不在故事方向编辑阶段。', 409, 'STORY_PREPARATION_NOT_PENDING')
   }
-  const preview = await suggestPreparationExplanation(curve.preparation, request.candidate)
+  const preview = await suggestPreparationExplanation(curve.preparation, request.candidate, request.selectedStoryDirection)
   assertStorySessionRevision(session, request.revision)
   return preview
 }
