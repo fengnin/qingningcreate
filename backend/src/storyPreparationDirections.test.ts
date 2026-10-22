@@ -24,6 +24,7 @@ test('expanding a generated card returns its existing action/consequence pairs w
     const result = await suggestPreparationStoryDirections(curve, preparation)
     assert.deepEqual(result.directions.map(({ choice, consequence }) => ({ action: choice, consequence })), pairs)
     assert.deepEqual(result.directions.map(d => d.id), ['path-1', 'path-2'])
+    assert.deepEqual(result.directions.map(d => d.title), ['方向1', '方向2'])
     assert.deepEqual(preparation, before)
 
     preparation.candidates[0]!.action = preparation.candidates[0]!.action.replace('立即改约明天', '先联系朋友一起改约')

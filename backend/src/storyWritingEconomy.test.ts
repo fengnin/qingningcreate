@@ -193,9 +193,9 @@ test('confirmed contradictions still block completion; incompatible evidence and
 test('a contradiction requires distinct prose evidence on both sides and a coherent verdict', async () => {
   for (const invalid of [
     { verdict: 'conflict', issues: [] },
-    { verdict: 'supported', issues: [{ kind: 'causal-break', evidenceIds: ['complete-text:0', 'complete-text:1'], reason: '矛盾结论不一致。' }] },
+    { verdict: 'supported', issues: [{ kind: 'state-reversal', evidenceIds: ['complete-text:0', 'complete-text:1'], reason: '矛盾结论不一致。' }] },
     ...[[], ['complete-text:0'], ['complete-text:0', 'complete-text:0'], ['complete-text:0', 'beat-current-state']].map(evidenceIds =>
-      ({ verdict: 'conflict', issues: [{ kind: 'causal-break', evidenceIds, reason: '待核实。' }] })),
+      ({ verdict: 'conflict', issues: [{ kind: 'state-reversal', evidenceIds, reason: '待核实。' }] })),
   ]) {
     await stubModel(async (_requests, replies) => {
       replies.push(invalid)
@@ -218,7 +218,7 @@ test('segment reviews stay fresh and final passes expire', async () => {
   })
 })
 
-test('generation and both reviewers receive losslessly compacted inputs', async () => {
+test('generation receives direct text and both reviewers retain lossless inputs', async () => {
   const { curve, draft, context } = fixture()
   const long = '方屿在收到老师正式电子书单后，与妹妹逐项核对书名、版本和必选标记，并把未确定的版本问题留下等待老师确认。'.repeat(4)
   curve.beats[1]!.detail = long
@@ -229,12 +229,19 @@ test('generation and both reviewers receive losslessly compacted inputs', async 
     await reviewWritingMainline(context(), long, 'complete')
     await reviewCompleteWritingConsistency(context(), long)
     assert.equal(regenerated.segments[1]!.text, long)
-    for (const request of requests) {
+    for (const [index, request] of requests.entries()) {
       const encoded = request.messages[1].content
       const restored = expandInput(JSON.parse(encoded))
-      assert.ok(request.messages[0].content.includes('$textRef'))
       assert.ok(JSON.stringify(restored).includes(long))
-      assert.ok(encoded.length < JSON.stringify(restored).length)
+      if (index === 0) {
+        assert.equal(typeof restored.currentBeat.detail, 'string')
+        assert.ok(!encoded.includes('$textRef'))
+        assert.equal(restored.designContract, undefined)
+        assert.equal(restored.designMainlineReview, undefined)
+      } else {
+        assert.ok(request.messages[0].content.includes('$textRef'))
+        assert.ok(encoded.length < JSON.stringify(restored).length)
+      }
     }
   })
 })

@@ -112,7 +112,10 @@ export function writingContext(idea: string, curve: ConfirmedCurve, draft: Story
       ...curve.designContract?.authorRequirements ?? [],
     ].map(requirement => [requirement.id, requirement])).values()]
       .filter(requirement => !curve.design?.sourceFacts.some(fact => fact.id === requirement.id && fact.disposition === 'parked')),
-    designContract: curve.designContract ?? null,
+    // Historical hidden summaries are not another source of node events.
+    designContract: curve.designContract ? { ...curve.designContract,
+      nodes: beats.map(b => ({ beatId: b.id, kind: b.kind, text: b.detail, objective: b.detail,
+        dependsOn: [...b.dependsOn], sourceIds: curve.designContract!.nodes.find(n => n.beatId === b.id)?.sourceIds ?? [] })) } : null,
     designMainlineReview: curve.mainlineReview ?? null,
     currentBeat: { id: beat.id, kind: beat.kind, title: beat.title, detail: beat.detail },
     nextBeatBoundary: followingBeats[0] ?? null,
@@ -127,6 +130,27 @@ export function writingContext(idea: string, curve: ConfirmedCurve, draft: Story
 }
 type Context = ReturnType<typeof writingContext>
 
+/** Only writing instructions and full prose go to generation, never old reviews. */
+export function writingGenerationInput(context: Context) {
+  return {
+    brief: context.brief,
+    sourceContext: context.sourceContext,
+    authorMaterial: context.authorMaterial,
+    explicitUnknowns: context.explicitUnknowns,
+    authorRequirements: context.authorRequirements,
+    storyIntent: context.designContract ? { goal: context.designContract.goal.text,
+      selectedDirection: context.designContract.selectedDirection ?? null } : null,
+    acceptedProse: context.acceptedProse,
+    currentBeat: context.currentBeat,
+    followingBeats: context.followingBeats,
+    isLast: context.isLast,
+    expansionNeeds: context.expansionNeeds,
+    ...(context.previousText !== undefined ? { previousText: context.previousText,
+      previousAuthorship: context.previousAuthorship, rewriteContract: context.rewriteContract } : {}),
+    ...(context.feedback ? { feedback: context.feedback } : {}),
+  }
+}
+
 export type WritingMainlineReview = {
   verdict: 'supported' | 'drift' | 'uncertain'
   reason: string
@@ -135,7 +159,7 @@ export type WritingMainlineReview = {
 
 export type WritingConsistencyReview = {
   verdict: 'supported' | 'conflict' | 'uncertain'
-  issues: Array<{ kind: 'state-reversal' | 'repeated-completion' | 'time-order' | 'location-reversal' | 'possession-reversal' | 'causal-break' | 'time-gap' | 'scene-transition' | 'material-purpose'; evidenceIds: string[]; reason: string }>
+  issues: Array<{ kind: 'state-reversal' | 'repeated-completion' | 'time-order' | 'location-reversal' | 'possession-reversal'; evidenceIds: string[]; reason: string }>
 }
 
 type PassedReview = WritingMainlineReview | WritingConsistencyReview
@@ -186,10 +210,10 @@ export async function reviewCompleteWritingConsistency(context: Context, text: s
   try {
     const options = {
       systemPrompt: `你是完整故事的事实连续性审阅员。严格输出JSON {verdict,issues}。只找有明确正文证据的前后矛盾，不审文风、不审主线、不要求目标成功。\n` +
-        `conflict仅用于：已明确完成的动作又被当作未完成；明确否定后直接肯定同一事实；人物位置、物品持有状态或时间顺序直接反转；同一阶段的同一动作重复完成且没有新阶段或重新尝试；前后事件缺少必要的因果承接；时间已经跨过但后文仍直接处于不可能的时间窗口；没有场景转换却突然出现在另一地点；同一材料、凭证或物品的用途前后被当成不同用途，导致后续结果无法由前文推出。\n` +
+        `conflict仅用于正文明确陈述的互斥事实：同一事件同时被叙述为已完成与未完成；同一时间范围的同一事实被明确肯定又否定；人物位置、物品持有状态或先后时间存在无法同时成立的明确陈述；同一次动作在没有重新尝试或阶段变化时被重复完成。只使用state-reversal、repeated-completion、time-order、location-reversal、possession-reversal。\n` +
         `只按正文顺序和实际时间核对同一主体、对象与事实范围。区分意图、准备、开始、进行、暂停与完成：前一阶段可以发展到后一阶段，开始不等于完成，局部动作不等于整个任务完成。先前状态不是全文结束时必须保持的状态；不同时间的状态不同不自动矛盾。\n` +
         `必须通读两处证据之间及相邻的正文，查找已写出的行动、位置变化和状态转换，包括一句话已蕴含的必要子动作。同一场景内不同位置不自动等于不同场景。跨句、跨段或时间推进中的普通动作可以自然省略；仅缺少逐动作描写不能判causal-break或scene-transition。若需要新增关键能力、资源、例外或推翻明确限制才能连接，才是实质因果缺口；不能靠想象补齐这些关键事实，也不能自行添加时间、位置、持有或动作不变的限制来制造冲突。\n` +
-        `causal-break、time-gap、scene-transition、material-purpose都必须引用造成断裂的前后原句。不要把合理的新动作、重新确认、回忆、设想、尝试、开放结尾、已说明的场景切换或有阶段变化的重复判为矛盾。无法确认时用uncertain。每个issue引用2至4个不同的正文目录编号。没有明确矛盾时verdict=supported且issues为空。` + writingInputEncodingGuidance,
+        `不审一般因果完整度、转场是否详写、材料用途是否解释充分；缺少普通过渡不是事实互斥。区分叙述者确认的事实与人物对白、猜测、回忆和意象；未经叙述确认的人物说法不能自动作为事实。文学表达不按物理状态逐字审判，但叙述明确声称某个现实目标成功或失败时，应按正文核对，不能擅自改成象征含义替矛盾圆场。不要把合理新动作、重新确认、设想、尝试、开放结尾或阶段变化判为矛盾。无法确认时用uncertain。每个issue引用2至4个不同的正文目录编号。没有明确矛盾时verdict=supported且issues为空。` + writingInputEncodingGuidance,
       userPrompt: serializeWritingInput({
         evidenceCatalog: catalog,
         completeText: text,
@@ -238,7 +262,7 @@ export async function reviewWritingMainline(context: Context, text: string, mode
   const catalog = [
     { id: 'design-contract:goal', text: contract.goal.text, scope: 'goal' },
     ...(contract.selectedDirection ? [{ id: 'design-contract:selected-direction', text: contract.selectedDirection, scope: 'direction' }] : []),
-    ...(contract.causalBridge ? [{ id: 'design-contract:causal-bridge', text: `${contract.causalBridge.method}；${contract.causalBridge.change}`, scope: 'causal-bridge' }] : []),
+    ...(mode === 'segment' && contract.causalBridge ? [{ id: 'design-contract:causal-bridge', text: `${contract.causalBridge.method}；${contract.causalBridge.change}`, scope: 'causal-bridge' }] : []),
     { id: `design-contract:node:${context.currentBeat.id}`, text: context.currentBeat.detail, scope: 'current-node' },
     ...(mode === 'complete' ? contract.nodes.filter(node => node.beatId !== context.currentBeat.id)
       .map(node => ({ id: `design-contract:node:${node.beatId}`, text: node.text, scope: 'confirmed-node' })) : []),
@@ -254,7 +278,7 @@ export async function reviewWritingMainline(context: Context, text: string, mode
         `supported：当前段服务原始目标、作者选定方向、当前节点，或通过有动机的绕路/取舍继续让目标、风险、承诺或代价产生作用。新事件不因未逐字出现在设计里而失败。\n` +
         `drift：${mode === 'complete' ? '完整正文的主要篇幅或结尾已经被无关任务接管，原目标只剩装饰性提及，且' : '新事件已经接管故事，替代原目标和当前节点，而且'}没有目标、风险、承诺、代价或动机上的连接。不能因为${mode === 'complete' ? '目标没有成功、结尾开放或' : '本段尚未完成目标、出现普通交通/服务/交流过程、或'}目标没有逐字复述而判drift。\n` +
         `uncertain：输入不足以判断。未来节点只是停笔边界，不是已发生事实；不能把它当成正文事实。reason简要说明判断。evidenceIds只能从目录中选择；没有必要时为空。\n` +
-        (mode === 'complete' ? '对照confirmedNodes核对完整正文是否兑现本版设计中的关键行动和结局，包括作者修改；不能只出现同一物品或重提目标就算兑现。明确约定完成的行动遗漏、被无关收束替代且没有有动机的变化时判drift。允许措辞、细节和合理开放结尾，不要求逐字复述。\n' : '') +
+        (mode === 'complete' ? '终审只核对创作者可见并确认的confirmedNodes.text与明确作者要求中的关键行动、关键选择和约定结果是否遗漏。只因无关任务接管、关键行动被意象收尾替代或明确要求被推翻才判drift，并引用对应设计或作者要求的编号。不能从历史行动摘要、审阅意见或自己的偏好新增必须完成的事件。普通走路、开关物件、取放、转场等子动作未逐一描写不算遗漏。原设计允许暂缓、放弃或开放结局时，不能强求原愿望成功；不要用“故事仍提到目标”替代对关键行动的核对，也不能用文学深意替明确相反的结果圆场。\n' : '') +
         authorRequirementsGuidance + `\n明确推翻作者设定、违反边界或${mode === 'complete' ? '完整故事遗漏明确要求兑现的发展' : '本段消除了后续兑现发展要求的可能性'}也判drift，并引用对应要求及正文证据；未在当前段兑现全篇要求不算失败。` + writingInputEncodingGuidance,
       userPrompt: serializeWritingInput({
         designContract: {
@@ -262,7 +286,7 @@ export async function reviewWritingMainline(context: Context, text: string, mode
           mainlineGoals: contract.mainlineGoals,
           mainlineAnchors: contract.mainlineAnchors,
           selectedDirection: contract.selectedDirection ?? null,
-          causalBridge: contract.causalBridge,
+          ...(mode === 'segment' ? { causalBridge: contract.causalBridge } : {}),
           currentNode: contract.nodes.find(node => node.beatId === context.currentBeat.id) ?? null,
           ...(mode === 'complete' ? { confirmedNodes: contract.nodes } : {}),
         },
@@ -294,6 +318,10 @@ export async function reviewWritingMainline(context: Context, text: string, mode
     || !Array.isArray(output.evidenceIds)
     || output.evidenceIds.some(id => typeof id !== 'string' || !allowed.has(id))) {
     throw new AppError('本段主线审阅返回了无效证据，请重试当前段。已采用正文仍保留。', 502, 'STORY_WRITING_MAINLINE_REVIEW_INVALID')
+  }
+  if (mode === 'complete' && output.verdict === 'drift' && !output.evidenceIds.some(id =>
+    id.startsWith('design-contract:node:') || id.startsWith('author-requirement:'))) {
+    return { verdict: 'uncertain', reason: '未引用明确约定的节点行动或作者要求，不能据此否定完整正文。', evidenceIds: [] }
   }
   rememberFinalReview(key, output)
   return output

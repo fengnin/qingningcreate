@@ -854,9 +854,9 @@ function PreparationStoryDirectionChoice({ session, candidateId, review, disable
     {loading && <p className="preparation-loading-status" role="status"><span className="generation-spinner" aria-hidden="true" />正在根据这张卡整理走向…</p>}
     {error && <div className="preparation-retry-action" role="alert"><button type="button" className="text-action" disabled={disabled || loading} onClick={() => setRetry(v => v + 1)}>重新整理走向</button><p>{error}</p></div>}
     <div className="preparation-story-direction-list" role="radiogroup" aria-label="本版故事走向">
-      {directions.map(item => <label className={`preparation-proposal preparation-story-direction ${selected === item.id ? 'is-selected' : ''}`} key={item.id}>
+      {directions.map((item, index) => <label className={`preparation-proposal preparation-story-direction ${selected === item.id ? 'is-selected' : ''}`} key={item.id}>
         <input type="radio" name="story-direction" checked={selected === item.id} disabled={disabled || loading} onChange={() => setSelected(item.id)} />
-        <span className="preparation-choice-copy"><strong>{item.title}</strong><span className="preparation-choice-action">{item.choice}</span><span className="preparation-choice-outcome"><small>可能的代价或变化</small><span className="preparation-development">{item.consequence}</span></span></span>
+        <span className="preparation-choice-copy"><strong>方向{index + 1}</strong><span className="preparation-choice-action">{item.choice}</span><span className="preparation-choice-outcome"><small>可能的代价或变化</small><span className="preparation-development">{item.consequence}</span></span></span>
         <span className="preparation-choice-indicator" aria-hidden="true">{selected === item.id && <Check size={16} />}</span>
       </label>)}
     </div>

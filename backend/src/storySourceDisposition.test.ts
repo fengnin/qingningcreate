@@ -23,7 +23,7 @@ test('unused material decision preserves reviewed structure, but live dependenci
     const request=JSON.parse(String(init?.body))
     const output=request.response_format.json_schema.name.endsWith('-review')
       ? {checks:['boundaries','continuity','causality','closure'].map(criterion=>({criterion,passed:true,evidence:'合同测试桩。'})),issues:[]}
-      : {steps:['current-state','trigger','resolution'].map((kind,i)=>({kind,text:i===0?material[0]!.quote:i===1?candidate.action:'图纸按编号归组，未改变图纸。',materialIds:i===2?['permission']:['goal']})).map(step=>({...step,action:step.kind==='current-state'?null:step.text.slice(0,6),expectedChange:step.kind==='current-state'?null:step.text.slice(-6)}))}
+      : {steps:['current-state','trigger','resolution'].map((kind,i)=>({kind,text:i===0?material[0]!.quote:i===1?candidate.action:'图纸按编号归组，未改变图纸。',materialIds:i===2?['permission']:['goal']}))}
     return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify(output)}}]}),{status:200})
   }
   try {

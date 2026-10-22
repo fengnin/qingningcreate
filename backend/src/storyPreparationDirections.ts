@@ -17,7 +17,7 @@ export async function suggestPreparationStoryDirections(curve: ProvisionalCurve,
   const results = candidate.possibleResult.startsWith('选择一：')
     ? candidate.possibleResult.slice('选择一：'.length).split('；选择二：') : []
   if (choices.length === 2 && results.length === 2 && [...choices, ...results].every(text => text.trim())) {
-    return { directions: choices.map((choice, index) => ({ id: `path-${index + 1}`, title: `走向${index + 1}`,
+    return { directions: choices.map((choice, index) => ({ id: `path-${index + 1}`, title: `方向${index + 1}`,
       choice: choice.trim(), consequence: results[index]!.trim() })) }
   }
   const context = { ...preparationExplanationContext(preparation, candidate), brief: curve.brief }
@@ -34,7 +34,7 @@ export async function suggestPreparationStoryDirections(curve: ProvisionalCurve,
       const directions = raw.directions.map((d, i) => {
         if (!d || d.id !== `path-${i + 1}` || ![d.title, d.choice, d.consequence].every(v => typeof v === 'string' && v.trim())
           || d.title.length > 24 || d.choice.length > 120 || d.consequence.length > 120) throw new Error('direction')
-        return { id: d.id, title: d.title.trim(), choice: d.choice.trim(), consequence: d.consequence.trim() }
+        return { id: d.id, title: `方向${i + 1}`, choice: d.choice.trim(), consequence: d.consequence.trim() }
       })
       if (new Set(directions.map(d => d.choice)).size !== directions.length) throw new Error('duplicate')
       return { directions }

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { assembleWrittenStory, reviseWritingDraft } from './storyWriting.js'
 import { reviewWritingText, reviewWritingMainline, writingContext } from './storyWritingProtection.js'
+import { storyWritingConsistencyReviewSchema } from './storyOutputSchemas.js'
+import { outputShapeErrors } from './modelOutputSchema.js'
 import type { ConfirmedCurve, StoryWritingDraft, StoryWritingRequest } from '../../shared/story-contract.js'
 
 async function withModelReplies(replies: unknown[], run: (requests: any[]) => Promise<void>) {
@@ -68,7 +70,8 @@ test('final review sees earlier confirmed nodes and author edits even with prepa
     const result = await reviewWritingMainline(context, '她直接出发去球场。', 'complete')
     assert.equal(result.verdict, 'drift')
     const input = JSON.parse(requests[0].messages[1].content)
-    assert.deepEqual(input.designContract.confirmedNodes, c.designContract!.nodes)
+    assert.deepEqual(input.designContract.confirmedNodes.map((n: any) => n.text), c.beats.map(b => b.detail))
+    assert.ok(input.designContract.confirmedNodes.every((n: any) => n.action === undefined && n.expectedChange === undefined))
     assert.ok(input.evidenceCatalog.some((e: any) => e.id === 'design-contract:node:b1'))
   })
 })
@@ -104,6 +107,63 @@ test('structured design reviews a generated segment before it becomes pending', 
     assert.equal(requests.length, 2)
     assert.equal(JSON.parse(requests[1].messages[1].content).proposal, draft.segments[0]!.text)
   })
+})
+
+test('generation preserves author requirements and full prose but ignores hidden plans and previous verdicts', async () => {
+  const c = structuredClone(contractedCurve), draft = prefix()
+  c.designContract!.nodes[1]!.text = '过时节点描述。'
+  c.designContract!.nodes[1]!.action = '隐藏行动：她飞去另一座城市。'
+  c.designContract!.nodes[1]!.expectedChange = '隐藏结果：她再也不看球。'
+  c.designContract!.authorRequirements = [{ id: 'a', sourceId: 'author-note', quote: '先向朋友确认再出发。', kind: 'development', status: 'required' }]
+  c.mainlineReview = { status: 'supported', message: '过时的审阅解释。', reviewedSteps: [{ kind: 'resolution', text: '旧版结局。' }], repairedBeatKinds: [] }
+  const before = structuredClone({ c, draft })
+  await withModelReplies([{ text: '她向朋友确认后出发，赶往球场。' }, { verdict: 'supported', reason: '承接目标。', evidenceIds: [] }], async requests => {
+    await reviseWritingDraft('去看球赛', c, draft, req('next'))
+    const input = JSON.parse(requests[0].messages[1].content)
+    assert.equal(input.currentBeat.detail, c.beats[1]!.detail)
+    assert.equal(input.acceptedProse[0].text, draft.segments[0]!.text)
+    assert.equal(input.authorRequirements[0].quote, '先向朋友确认再出发。')
+    for (const field of ['designContract', 'designMainlineReview', 'evidence', 'continuity', 'futureDesign', 'nextBeatBoundary']) assert.equal(input[field], undefined)
+    assert.ok(!requests[0].messages[1].content.includes('$textRef'))
+    assert.ok(!requests[0].messages[1].content.includes('隐藏行动'))
+    assert.ok(!requests[0].messages[1].content.includes('过时的审阅解释'))
+    assert.deepEqual({ c, draft }, before)
+  })
+})
+
+test('inconclusive final reviews allow completion with notices, without changing accepted text', async () => {
+  const draft = prefix()
+  draft.segments.push({ id: 's2', beatId: 'b2', label: '回应', text: '她赶往球场。', status: 'pending' })
+  const before = structuredClone(draft)
+  await withModelReplies([{ verdict: 'uncertain', reason: '无法确认。', evidenceIds: [] }, { verdict: 'uncertain', issues: [] }], async () => {
+    const result = await reviseWritingDraft('去看球赛', contractedCurve, draft, req('accept', { segmentId: 's2' }))
+    assert.equal(result.complete, true)
+    assert.equal(result.review?.length, 2)
+    assert.ok(result.review?.every(item => item.tone === 'warn'))
+    assert.equal(assembleWrittenStory(contractedCurve, result)?.review.length, 2)
+    assert.deepEqual(result.segments.map(s => s.text), before.segments.map(s => s.text))
+    assert.deepEqual(draft, before)
+    const edited = await reviseWritingDraft('去看球赛', contractedCurve, result, req('edit', { segmentId: 's2', text: '她赶到了球场。' }))
+    assert.equal(edited.complete, false)
+    assert.equal(edited.review, undefined)
+  })
+})
+
+test('omitting an explicitly confirmed key action still blocks completion', async () => {
+  const draft = prefix()
+  draft.segments.push({ id: 's2', beatId: 'b2', label: '回应', text: '她望着球票，觉得故事已经结束。', status: 'pending' })
+  const before = structuredClone(draft)
+  await withModelReplies([{ verdict: 'drift', reason: '仅抒情收尾，没有兑现确认的回应行动。', evidenceIds: ['design-contract:node:b2'] }], async () => {
+    await assert.rejects(reviseWritingDraft('去看球赛', contractedCurve, draft, req('accept', { segmentId: 's2' })), { code: 'STORY_WRITING_COMPLETE_MAINLINE_DRIFT' })
+    assert.deepEqual(draft, before)
+  })
+})
+
+test('final consistency schema excludes general causal gaps and omitted transitions', () => {
+  for (const kind of ['causal-break', 'time-gap', 'scene-transition', 'material-purpose']) {
+    assert.ok(outputShapeErrors({ verdict: 'conflict', issues: [{ kind,
+      reason: '没有逐步描述过程。', evidenceIds: ['complete-text:0', 'complete-text:1'] }] }, storyWritingConsistencyReviewSchema).length)
+  }
 })
 
 test('mainline drift is rejected without mutating the existing draft', async () => {

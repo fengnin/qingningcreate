@@ -87,7 +87,7 @@ test('generation returns unchanged while shadow is pending, even if shadow later
     assert.equal(requests.filter(r => r.stage === 'preparation-story-design').length, 1)
   }, stage => stage.endsWith('-shadow') ? pending : stage.endsWith('-review')
     ? { checks: ['boundaries', 'continuity', 'causality', 'closure'].map(criterion => ({ criterion, passed: true, evidence: '测试桩。' })), issues: [] }
-    : { steps: steps.map(step => ({ ...step, action: step.kind === 'current-state' ? null : step.text.slice(0, 6), expectedChange: step.kind === 'current-state' ? null : step.text.slice(-6) })) })
+    : { steps })
 })
 
 test('disabled shadow makes no requests or records', async () => mocked(async (logs, requests) => {

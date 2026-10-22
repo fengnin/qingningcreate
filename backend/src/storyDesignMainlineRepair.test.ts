@@ -17,8 +17,7 @@ const steps = [
   { kind: 'current-state' as const, text: '小林拿着球票出门。', materialIds: ['goal'] },
   { kind: 'trigger' as const, text: '他乘车前往球场，途中发现司机正在招人。', materialIds: [] },
   { kind: 'resolution' as const, text: '他留下经营车队，再也没有去看球。', materialIds: [] },
-].map(step => ({ ...step, action: step.kind === 'current-state' ? null : step.text.slice(0, 6),
-  expectedChange: step.kind === 'current-state' ? null : step.text.slice(-6) }))
+]
 const curve: ProvisionalCurve = { id: 'mainline-test', title: '球赛', status: 'draft', brief: { tones: [], dramaticForces: [], allowSystemNamedCharacters: false }, beats: [], instructions: [], createdAt: 1, updatedAt: 1 }
 const drift = { verdict: 'mainline-drift', reason: '测试桩：新事业取代原愿望。', evidenceIds: ['material:goal', 'beat:resolution'] }
 const supported = { verdict: 'supported', reason: '测试桩，仅验证控制流程。', evidenceIds: [] }
@@ -41,7 +40,7 @@ async function model(run: (calls: any[]) => Promise<void>, reply: (stage: string
     names.forEach((name, i) => { if (saved[i] === undefined) delete process.env[name]; else process.env[name] = saved[i] })
   }
 }
-const normalReply = (stage: string, input: any) => stage.endsWith('-repair') ? { patches: [{ kind: 'resolution', text: repaired, action: '小林付费乘车', expectedChange: '赶到球场看完比赛' }] }
+const normalReply = (stage: string, input: any) => stage.endsWith('-repair') ? { patches: [{ kind: 'resolution', text: repaired }] }
   : stage === 'preparation-story-design-review' ? quality
     : input.evidenceCatalog.some((e: any) => e.text === repaired) ? supported : drift
 
@@ -51,8 +50,7 @@ test('two drift checks allow one local patch, retaining uncited nodes and all ev
   assert.equal(result.review.status, 'repaired'); assert.equal(calls.length, 5)
   assert.deepEqual(result.steps.slice(0, 2), steps.slice(0, 2))
   assert.equal(result.steps[2]!.text, repaired)
-  assert.equal(result.steps[2]!.action, '小林付费乘车')
-  assert.equal(result.steps[2]!.expectedChange, '赶到球场看完比赛')
+  assert.deepEqual(Object.keys(result.steps[2]!).sort(), ['kind', 'materialIds', 'text'])
   assert.deepEqual(result.steps.map(s => s.materialIds), steps.map(s => s.materialIds))
   assert.deepEqual(steps, before)
   const patchRequest = calls.find(call => call.stage.endsWith('-repair')).input
@@ -132,7 +130,8 @@ test('saved unavailable design can retry without regenerating or losing author e
   assert.deepEqual(generated, original)
   assert.deepEqual(result.beats.slice(0, 2), generated.beats.slice(0, 2))
   assert.deepEqual(result.designContract!.nodes.slice(0, 2), generated.designContract!.nodes.slice(0, 2))
-  assert.equal(result.designContract!.nodes[2]!.expectedChange, '赶到球场看完比赛')
+  assert.equal(result.designContract!.nodes[2]!.text, repaired)
+  assert.equal(result.designContract!.nodes[2]!.expectedChange, undefined)
   assert.deepEqual(result.reasoning!.designReview!.acceptedProposalIds, [])
   assert.equal(calls.filter(c => c.stage === 'preparation-story-design').length, 1)
 }, (stage, input, calls) => {

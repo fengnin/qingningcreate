@@ -29,7 +29,8 @@ test('design contract preserves source goal, selected bridge, dependencies and n
   assert.deepEqual(contract.goal, { text: '青柠想看演唱会。', sourceIds: ['g'] })
   assert.equal(contract.causalBridge!.method, '联系朋友拼车。')
   assert.deepEqual(contract.nodes[1]!.dependsOn, ['beat-current-state'])
-  assert.equal(contract.nodes[1]!.action, '联系朋友拼车')
+  assert.equal(contract.nodes[1]!.action, undefined)
+  assert.equal(contract.nodes[1]!.objective, steps[1]!.text)
   assert.equal(storyDesignContractInput(p).execution, 'none')
   assert.equal(storyDesignContractInput(p).reservedUnknowns[0]!.id, 'u')
   assert.deepEqual(p, before)
@@ -44,11 +45,16 @@ test('contract carries every supplemental requirement even when model anchors om
   ])
 })
 
-test('unknown references and empty action/change summaries are rejected', () => {
+test('unknown references are rejected and legacy hidden summaries are not compiled', () => {
   for (const step of [
     { ...steps[1]!, materialIds: ['u'] }, { ...steps[1]!, materialIds: ['missing'] },
-    { ...steps[1]!, action: '' }, { ...steps[1]!, expectedChange: '' },
   ]) assert.throws(() => compileStoryDesignContract(preparation(), [steps[0]!, step, steps[2]!]), { code: 'STORY_PREPARATION_INVALID_OUTPUT' })
+  const contract = compileStoryDesignContract(preparation(), [steps[0]!, {
+    ...steps[1]!, action: '她改去机场。', expectedChange: '抵达另一个城市。',
+  }, steps[2]!])
+  assert.equal(contract.nodes[1]!.text, steps[1]!.text)
+  assert.equal(contract.nodes[1]!.action, undefined)
+  assert.equal(contract.nodes[1]!.expectedChange, undefined)
 })
 
 test('latest author explanation replaces historical bridge and superseded anchors cannot return', () => {

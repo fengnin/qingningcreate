@@ -49,7 +49,7 @@ export const preparationOutputSchemas = {
     text: s.text, question: s.text, materialIds: refs }), 0, 8) }),
   storyDesign: s.object({ steps: s.array(s.object({
     kind: s.enum('current-state', 'trigger', 'escalation', 'midpoint-turn', 'climax-choice', 'resolution'),
-    text: s.text, materialIds: refs, action: s.either(s.text, s.nil), expectedChange: s.either(s.text, s.nil),
+    text: s.text, materialIds: refs,
   }), 3, 6) }),
 }
 
@@ -92,7 +92,7 @@ export const storyWritingMainlineReviewSchema = s.object({
 export const storyWritingConsistencyReviewSchema = s.object({
   verdict: s.enum('supported', 'conflict', 'uncertain'),
   issues: s.array(s.object({
-    kind: s.enum('state-reversal', 'repeated-completion', 'time-order', 'location-reversal', 'possession-reversal', 'causal-break', 'time-gap', 'scene-transition', 'material-purpose'),
+    kind: s.enum('state-reversal', 'repeated-completion', 'time-order', 'location-reversal', 'possession-reversal'),
     evidenceIds: refs,
     reason: s.text,
   }), 0, 6),

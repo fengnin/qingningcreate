@@ -633,6 +633,8 @@ export interface StoryWritingSegment {
 export interface StoryWritingDraft {
   segments: StoryWritingSegment[]
   complete: boolean
+  /** Inconclusive final audits are notices, not rejection of accepted prose. */
+  review?: StoryReviewItem[]
   /** Server-owned, source-bound continuity cache; never author facts or future design. */
   continuity?: {
     snapshots: Array<{
