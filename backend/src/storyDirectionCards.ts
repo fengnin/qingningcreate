@@ -4,9 +4,15 @@ import { compileDirectionPlans } from './storyDirectionPlan.js'
 import { storySettingScopeGuidance } from './storySettingScope.js'
 import type { DirectionLogicPlan } from './storyDirectionLogicReview.js'
 import type { StoryPreparation, StoryPreparationCandidate } from '../../shared/story-preparation.js'
+import type { CreativeBrief } from '../../shared/story-contract.js'
 
 type Plan = DirectionLogicPlan & { materialIds: string[]; preconditionIds: string[]; resultBasisIds: string[] }
 type Issue = { id: string; reason: string }
+
+export function directionCardNamingGuidance(brief?: Pick<CreativeBrief, 'allowSystemNamedCharacters'>): string {
+  if (brief?.allowSystemNamedCharacters === true) return '人物命名权限：允许为新增人物提出具体名字，仍须保留作者已提供的人名，不把新增名字说成作者已定设定。'
+  return '人物命名权限：当前未允许系统提出具名人物。必须保留作者原文已提供的名字；新增人物只用朋友、同学、工作人员等关系或身份称呼，不得自行起姓名、昵称、英文名或代号。此规则适用于difficulty及每个options.action、options.consequence，不只检查主角；不得给已有但未命名的朋友补名。作者原文已有的姓名、作品名和场所名不因本开关删除。'
+}
 const verdict = s.enum('supported', 'unsupported', 'uncertain')
 const judgment = s.object({ verdict, reason: s.text })
 const invalid = (): never => { throw new AppError('方向审阅的编号、分支或判断不完整，请重试审阅。', 502, 'STORY_PREPARATION_INVALID_OUTPUT') }
@@ -96,15 +102,17 @@ function discardUnsupportedPreconditionReferences(value: unknown, allowedIds: st
 
 type Request = <T>(options: Parameters<typeof requestQwenJson>[0], parse: (raw: unknown) => T | Promise<T>) => Promise<T>
 export async function generateDirectionCards(options: {
-  input: Record<string, unknown>; prompt: string;
+  input: Record<string, unknown> & { brief?: Pick<CreativeBrief, 'allowSystemNamedCharacters'> }; prompt: string;
   request: Request; compress: (raw: unknown) => Promise<unknown>;
   parse: (raw: unknown) => Pick<StoryPreparation, 'candidates' | 'questions'>;
+  onCandidatesGenerated?: () => void;
 }): Promise<Pick<StoryPreparation, 'candidates' | 'questions'>> {
   let plans: Plan[] = [], candidates: StoryPreparationCandidate[] = [], issues: Issue[] = []
   let pendingIds: string[] | undefined
+  const namingGuidance = directionCardNamingGuidance(options.input.brief)
   for (let attempt = 0; attempt < 2; attempt++) {
     const replacements = await options.request({
-      systemPrompt: `${options.prompt}\n${directionCardScopeGuidance}${pendingIds ? '\n本轮只修复repairIds中的卡，保持id不变；不得输出或改写其余卡。每卡必须仍有一个阻碍、两种行动及直接后果。' : ''}`,
+      systemPrompt: `${options.prompt}\n${directionCardScopeGuidance}\n${namingGuidance}${pendingIds ? '\n本轮只修复repairIds中的卡，保持id不变；不得输出或改写其余卡。每卡必须仍有一个阻碍、两种行动及直接后果。' : ''}`,
       userPrompt: JSON.stringify({ ...options.input, ...(pendingIds ? { repairIds: pendingIds,
         repairPlans: plans.filter(p => pendingIds!.includes(p.id)),
         previousOutput: { plans: plans.filter(p => pendingIds!.includes(p.id)) },
@@ -135,8 +143,9 @@ export async function generateDirectionCards(options: {
       candidates = candidates.map(c => cards.get(c.id) ?? c)
     }
     const changedIds = grounded.plans.map(p => p.id)
+    if (attempt === 0) options.onCandidatesGenerated?.()
     const reviewPlans = plans.filter(p => changedIds.includes(p.id))
-    issues = await options.request({ systemPrompt: directionCardReviewPrompt,
+    issues = await options.request({ systemPrompt: `${directionCardReviewPrompt}\n${namingGuidance}\n命名审阅必须对照sources识别人名来源，卡片自己生成的名字不是作者授权；未经允许给新人物起名时，将该卡boundaries判为unsupported，reason指出新增名字及命名权限冲突。允许增加未具名的人物，不因人物未出现在原文就拒绝；作品名和场所名不当作人物姓名。`,
       userPrompt: JSON.stringify({ ...options.input, reviewPlans, unchangedPlans: plans.filter(p => !changedIds.includes(p.id)) }),
       temperature: 0.1, maxTokens: 400 + reviewPlans.length * 600,
       diagnosticStage: 'preparation-direction-card-review', outputSchema: directionCardReviewSchema(changedIds),

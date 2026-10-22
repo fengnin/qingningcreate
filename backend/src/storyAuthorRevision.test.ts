@@ -53,6 +53,11 @@ test('author requirements produce scene text without mutating the curve; echo an
     invalidReview = true
     await assert.rejects(generateAuthorRevisedBeat(idea, curve, target, instruction), { code: 'STORY_AUTHOR_REVISION_REVIEW_UNAVAILABLE' })
     invalidReview = false
+    detail = `提案：${curve.beats.find(b => b.kind === 'current-state')!.detail}`
+    generationCount = 0
+    await assert.rejects(generateAuthorRevisedBeat(idea, curve, target, instruction), { code: 'STORY_AUTHOR_REVISION_REQUIREMENTS_UNMET' })
+    assert.equal(generationCount, 2, 'copying another beat must fail even when requirement review passes')
+    assert.deepEqual(curve, before)
     detail = instruction
     await assert.rejects(generateAuthorRevisedBeat(idea, curve, target, instruction), { code: 'STORY_AUTHOR_REVISION_INVALID_OUTPUT' })
     assert.deepEqual(curve, before)

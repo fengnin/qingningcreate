@@ -740,6 +740,25 @@ interface StoryOperationFingerprint {
  */
 const inFlightCoCreationStarts = new Map<string, Promise<StoryCoCreationResponse>>()
 const completedCoCreationStarts = new Map<string, CachedStoryOperation<StoryCoCreationResponse>>()
+const coCreationProgress = new Map<string, { completedNodes: number; updatedAt: number }>()
+const inFlightCoCreationProgressIds = new Map<string, string>()
+
+export function getStoryCoCreationProgress(operationId: string): { completedNodes: number } {
+  const progress = coCreationProgress.get(operationId)
+  if (!progress || Date.now() - progress.updatedAt > 10 * 60_000) return { completedNodes: 0 }
+  return { completedNodes: progress.completedNodes }
+}
+
+function updateStoryCoCreationProgress(operationId: string | undefined, completedNodes: number): void {
+  if (!operationId) return
+  const now = Date.now()
+  for (const [id, progress] of coCreationProgress) {
+    if (now - progress.updatedAt > 10 * 60_000) coCreationProgress.delete(id)
+  }
+  const progress = coCreationProgress.get(operationId)
+  if (progress) Object.assign(progress, { completedNodes, updatedAt: now })
+  else coCreationProgress.set(operationId, { completedNodes, updatedAt: now })
+}
 const inFlightCurveBeatUpdates = new Map<string, Promise<StoryCurveMutationResponse>>()
 const completedCurveBeatUpdates = new Map<string, CachedStoryOperation<StoryCurveMutationResponse>>()
 // Operation ids protect transport retries. These semantic locks additionally
@@ -2585,14 +2604,24 @@ export async function startStoryCoCreation(
   )
   const operationKey = getCoCreationStartOperationKey(request)
   const cached = readCachedStoryOperation(completedCoCreationStarts, operationKey)
-  if (cached) return cached
+  if (cached) {
+    updateStoryCoCreationProgress(request.operationId, 3)
+    return cached
+  }
   const existingOperation = inFlightCoCreationStarts.get(operationKey)
   if (existingOperation) return structuredClone(await existingOperation)
 
   const semanticKey = getCoCreationSemanticOperationKey(request)
   const existingSemanticOperation = inFlightCoCreationSemanticOperations.get(semanticKey)
-  if (existingSemanticOperation) return structuredClone(await existingSemanticOperation)
+  if (existingSemanticOperation) {
+    const progressId = inFlightCoCreationProgressIds.get(semanticKey)
+    const progress = progressId ? coCreationProgress.get(progressId) : undefined
+    if (request.operationId && progress) coCreationProgress.set(request.operationId, progress)
+    return structuredClone(await existingSemanticOperation)
+  }
 
+  updateStoryCoCreationProgress(request.operationId, 0)
+  if (request.operationId) inFlightCoCreationProgressIds.set(semanticKey, request.operationId)
   const operation = startStoryCoCreationInternal(request)
   inFlightCoCreationStarts.set(operationKey, operation)
   inFlightCoCreationSemanticOperations.set(semanticKey, operation)
@@ -2602,6 +2631,7 @@ export async function startStoryCoCreation(
     if (inFlightCoCreationStarts.get(operationKey) === operation) inFlightCoCreationStarts.delete(operationKey)
     if (inFlightCoCreationSemanticOperations.get(semanticKey) === operation) {
       inFlightCoCreationSemanticOperations.delete(semanticKey)
+      inFlightCoCreationProgressIds.delete(semanticKey)
     }
   }
 }
@@ -2650,8 +2680,9 @@ async function startStoryCoCreationInternal(
     ? getRejectedCurveProposalDetails(existingSession)
     : []
   const curve = request.generationMode === 'review-actions'
-    ? await generateStoryPreparation(request.idea, request.brief)
+    ? await generateStoryPreparation(request.idea, request.brief, completedNodes => updateStoryCoCreationProgress(request.operationId, completedNodes))
     : await generateProvisionalCurve(request.idea, seed, request.brief, excludedProposalDetails)
+  if (request.generationMode !== 'review-actions') updateStoryCoCreationProgress(request.operationId, 3)
   if (existingSession) {
     const current = getStorySession(request.storyId!, request.revision)
     const session = request.generationMode === 'review-actions' ? structuredClone(current) : current
@@ -2869,11 +2900,12 @@ async function updateSessionCurveBeatInternal(
   operationKey: string,
 ): Promise<StoryCurveMutationResponse> {
 
-  const session = getStorySession(request.storyId, request.revision)
-  const curve = requireDraftCurve(session, request.curveId)
+  const current = getStorySession(request.storyId, request.revision)
+  const session = createEditableStoryDesignSession(current, request.curveId)
+  const curve = requireDraftCurve(session, session.provisionalCurve!.id)
   const result = updateCurveBeat(curve, request.beatId, request.detail)
   if (curve.reasoning) {
-    const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), provisionalCurve: result.curve, pendingCurveRegeneration: undefined })
+    const saved = commitClarificationSessionChanges(current, { ...structuredClone(session), provisionalCurve: result.curve, pendingCurveRegeneration: undefined })
     const response = createCurveMutationResponse(saved, result)
     writeCachedStoryOperation(completedCurveBeatUpdates, operationKey, response)
     return response
@@ -2885,17 +2917,10 @@ async function updateSessionCurveBeatInternal(
     }
     const replacement = result.curve.beats.find((beat) => beat.id === request.beatId)!
     for (const clarification of previouslyBlocked) await reviewClarificationReplacement(curve, clarification, replacement)
-    assertStorySessionRevision(session, request.revision)
+    assertStorySessionRevision(current, request.revision)
     result.curve = markClarificationsResolved(result.curve, [request.beatId])
   }
-  let saved = session
-  if (curve.clarifications?.length) {
-    saved = commitClarificationSessionChanges(session, { ...structuredClone(session), provisionalCurve: result.curve, pendingCurveRegeneration: undefined })
-  } else {
-    session.provisionalCurve = result.curve
-    session.pendingCurveRegeneration = undefined
-    commitStorySessionChanges(session)
-  }
+  const saved = commitClarificationSessionChanges(current, { ...structuredClone(session), provisionalCurve: result.curve, pendingCurveRegeneration: undefined })
   const response = createCurveMutationResponse(saved, result)
   writeCachedStoryOperation(completedCurveBeatUpdates, operationKey, response)
   return response
@@ -2904,13 +2929,14 @@ async function updateSessionCurveBeatInternal(
 export async function regenerateSessionCurveBeat(
   request: StoryCurveBeatRegenerationRequest,
 ): Promise<StoryCurveMutationResponse> {
-  const session = getStorySession(request.storyId, request.revision)
-  const curve = requireDraftCurve(session, request.curveId)
+  const current = getStorySession(request.storyId, request.revision)
+  const session = createEditableStoryDesignSession(current, request.curveId)
+  const curve = requireDraftCurve(session, session.provisionalCurve!.id)
   if (curve.reasoning) {
     const result = await previewClarificationCurveBeat(session.idea, session.seed, curve, request.beatId, request.feedback, request.replaceRejected === true)
-    assertStorySessionRevision(session, request.revision)
+    assertStorySessionRevision(current, request.revision)
     const nextCurve = result.questionCurve ?? curve
-    const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), provisionalCurve: nextCurve, pendingCurveRegeneration: result.preview })
+    const saved = commitClarificationSessionChanges(current, { ...structuredClone(session), provisionalCurve: nextCurve, pendingCurveRegeneration: result.preview })
     return { ...createCurveMutationResponse(saved, { curve: nextCurve, affectedBeatIds: result.affectedBeatIds }), pendingCurveRegeneration: result.preview }
   }
   const blocked = getClarificationsAffectingBeat(curve, request.beatId)
@@ -2918,8 +2944,8 @@ export async function regenerateSessionCurveBeat(
     && getDependentBeatIds(curve.beats, beat.id).includes(request.beatId))
   if (blocked.length || hasAuthorDependency || curve.beats.find(beat => beat.id === request.beatId)?.source === 'user-edit') {
     const result = await previewClarificationCurveBeat(session.idea, session.seed, curve, request.beatId, request.feedback, request.replaceRejected === true)
-    assertStorySessionRevision(session, request.revision)
-    const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), pendingCurveRegeneration: result.preview })
+    assertStorySessionRevision(current, request.revision)
+    const saved = commitClarificationSessionChanges(current, { ...structuredClone(session), pendingCurveRegeneration: result.preview })
     return { ...createCurveMutationResponse(saved, { curve, affectedBeatIds: result.affectedBeatIds }), pendingCurveRegeneration: result.preview }
   }
   const result = await regenerateCurveBeat(
@@ -2934,31 +2960,20 @@ export async function regenerateSessionCurveBeat(
   for (const clarification of getClarificationsForBeat(curve, request.beatId)) {
     await reviewClarificationReplacement(curve, clarification, replacement)
   }
-  assertStorySessionRevision(session, request.revision)
-  if (curve.clarifications?.length) {
-    const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), provisionalCurve: result.curve, pendingCurveRegeneration: undefined })
-    return createCurveMutationResponse(saved, result)
-  }
-  session.provisionalCurve = result.curve
-  session.pendingCurveRegeneration = undefined
-  commitStorySessionChanges(session)
-  return createCurveMutationResponse(session, result)
+  assertStorySessionRevision(current, request.revision)
+  const saved = commitClarificationSessionChanges(current, { ...structuredClone(session), provisionalCurve: result.curve, pendingCurveRegeneration: undefined })
+  return createCurveMutationResponse(saved, result)
 }
 
 export async function rejectSessionCurveBeat(
   request: StoryCurveBeatRejectRequest,
 ): Promise<StoryCurveMutationResponse> {
-  const session = getStorySession(request.storyId, request.revision)
-  const curve = requireDraftCurve(session, request.curveId)
+  const current = getStorySession(request.storyId, request.revision)
+  const session = createEditableStoryDesignSession(current, request.curveId)
+  const curve = requireDraftCurve(session, session.provisionalCurve!.id)
   const result = rejectCurveBeat(curve, request.beatId, request.reason)
-  if (curve.reasoning) {
-    const saved = commitClarificationSessionChanges(session, { ...structuredClone(session), provisionalCurve: result.curve, pendingCurveRegeneration: undefined })
-    return createCurveMutationResponse(saved, result)
-  }
-  session.provisionalCurve = result.curve
-  session.pendingCurveRegeneration = undefined
-  commitStorySessionChanges(session)
-  return createCurveMutationResponse(session, result)
+  const saved = commitClarificationSessionChanges(current, { ...structuredClone(session), provisionalCurve: result.curve, pendingCurveRegeneration: undefined })
+  return createCurveMutationResponse(saved, result)
 }
 
 export async function regenerateSessionCurveDependencies(
@@ -3104,19 +3119,26 @@ export async function updateSessionCurveClarification(
 
 /** Publish the detached draft only after its whole session has been saved. */
 export function parseStoryPreparationAcceptanceRequest(body: unknown): StoryPreparationAcceptanceRequest {
-  const r = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'acceptedCandidateIds', 'authorReview'])
+  const r = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'acceptedCandidateIds', 'authorReview', 'versionMode'])
   const acceptedCandidateIds = readDesignReviewIds(r.acceptedCandidateIds)
+  if (r.versionMode !== undefined && r.versionMode !== 'new-version') throw new AppError('版本操作无效。', 400, 'INVALID_REQUEST')
   return { ...parseStorySessionReference(r), curveId: readIdentifier(r, 'curveId', '请选择当前结构。', invalidRequestContext), acceptedCandidateIds,
+    ...(r.versionMode === undefined ? {} : { versionMode: 'new-version' as const }),
     ...(r.authorReview === undefined ? {} : { authorReview: parsePreparationReview(r.authorReview, acceptedCandidateIds) }) }
 }
 
 export async function acceptSessionPreparation(request: StoryPreparationAcceptanceRequest): Promise<StoryCurveMutationResponse> {
   if (!request.authorReview?.selectedStoryDirection?.trim()) throw new AppError('请先选择故事走向，再构思故事。', 400, 'STORY_DIRECTION_REQUIRED')
   const current = getStorySession(request.storyId, request.revision)
-  const curve = requireDraftCurve(current, request.curveId)
+  let working = current
+  if (current.confirmedCurve || current.provisionalCurve?.status !== 'draft') {
+    if (request.versionMode !== 'new-version') throw new AppError('已确认版本不能原地修改，请创建新版本。', 409, 'STORY_VERSION_DECISION_REQUIRED')
+    working = createPreparationDraftVersion(current, request.curveId)
+  }
+  const curve = requireDraftCurve(working, working === current ? request.curveId : working.provisionalCurve!.id)
   const mapped = await generateCurveFromPreparation(curve, request.acceptedCandidateIds, request.authorReview)
   assertStorySessionRevision(current, request.revision)
-  const next = structuredClone(current)
+  const next = structuredClone(working)
   next.provisionalCurve = mapped
   next.seed = { ...next.seed, lockedGoal: mapped.reasoning?.goal?.text ?? null }
   const saved = commitClarificationSessionChanges(current, next)
@@ -3137,34 +3159,80 @@ export async function retrySessionDesignMainline(request: StoryCurveStartSpineRe
 
 export async function suggestSessionStoryDirections(request: StoryPreparationAcceptanceRequest) {
   const current = getStorySession(request.storyId, request.revision)
-  const curve = requireDraftCurve(current, request.curveId)
-  if (!curve.preparation || curve.beats.length) throw new AppError('当前不在方向选择阶段。', 409, 'STORY_PREPARATION_NOT_PENDING')
-  const preparation = acceptPreparation(curve.preparation, request.acceptedCandidateIds, request.authorReview)
+  const curve = current.confirmedCurve
+    ? (requireConfirmedCurve(current, request.curveId), current.provisionalCurve!)
+    : requireDraftCurve(current, request.curveId)
+  if (!curve.preparation) throw new AppError('当前没有可选择的故事方向。', 409, 'STORY_PREPARATION_NOT_PENDING')
+  const preparationSource = current.confirmedCurve || curve.beats.length
+    ? { ...structuredClone(curve.preparation), status: 'needs-review' as const, acceptedCandidateIds: [], authorReview: undefined, executed: false as const }
+    : curve.preparation
+  const preparation = acceptPreparation(preparationSource, request.acceptedCandidateIds, request.authorReview)
   const result = await suggestPreparationStoryDirections(curve, preparation)
   assertStorySessionRevision(current, request.revision)
   return result
 }
 
 export function parseStoryPreparationRevisionRequest(body: unknown): StoryPreparationRevisionRequest {
-  const r = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'decision', 'candidateId', 'authorAction'])
+  const r = parseRequestRecord(body, ['storyId', 'revision', 'curveId', 'decision', 'candidateId', 'authorAction', 'versionMode'])
   if (!['reject', 'regenerate', 'revise'].includes(String(r.decision))) throw new AppError('请选择调整方式。', 400, 'INVALID_REQUEST')
+  if (r.versionMode !== undefined && r.versionMode !== 'new-version') throw new AppError('版本操作无效。', 400, 'INVALID_REQUEST')
   if (r.authorAction !== undefined && (typeof r.authorAction !== 'string' || !r.authorAction.trim() || r.authorAction.length > 240)) throw new AppError('请填写修改后的行动，最多240字。', 400, 'INVALID_REQUEST')
   return { ...parseStorySessionReference(r), curveId: readIdentifier(r, 'curveId', '请选择当前草案。', invalidRequestContext), decision: r.decision as StoryPreparationRevisionRequest['decision'],
     ...(r.candidateId === undefined ? {} : { candidateId: readIdentifier(r, 'candidateId', '请选择提案。', invalidRequestContext) }),
-    ...(r.authorAction === undefined ? {} : { authorAction: r.authorAction as string }) }
+    ...(r.authorAction === undefined ? {} : { authorAction: r.authorAction as string }),
+    ...(r.versionMode === undefined ? {} : { versionMode: 'new-version' as const }) }
 }
 
 export async function reviseSessionPreparation(request: StoryPreparationRevisionRequest): Promise<StoryCurveMutationResponse> {
   const current = getStorySession(request.storyId, request.revision)
-  const curve = requireDraftCurve(current, request.curveId)
-  if (current.confirmedCurve || current.currentTurn || current.history.length) throw new AppError('已确认路径不能原地改写，请建立新版本。', 409, 'STORY_CURVE_NOT_DRAFT')
+  let working = current
+  if (current.confirmedCurve || current.provisionalCurve?.status !== 'draft') {
+    if (request.versionMode !== 'new-version') throw new AppError('已确认方向不能原地修改，请创建新版本。', 409, 'STORY_VERSION_DECISION_REQUIRED')
+    working = createPreparationDraftVersion(current, request.curveId)
+  }
+  const curve = requireDraftCurve(working, working === current ? request.curveId : working.provisionalCurve!.id)
+  if (working.currentTurn || working.history.length) throw new AppError('已确认路径不能原地改写，请建立新版本。', 409, 'STORY_CURVE_NOT_DRAFT')
   const revised = await reviseStoryPreparation(curve, request.decision, request.candidateId, request.authorAction)
   assertStorySessionRevision(current, request.revision)
-  const next = structuredClone(current)
+  const next = structuredClone(working)
   next.provisionalCurve = revised
   next.pendingCurveRegeneration = undefined
   const saved = commitClarificationSessionChanges(current, next)
   return createCurveMutationResponse(saved, { curve: revised, affectedBeatIds: [] })
+}
+
+function createPreparationDraftVersion(session: StorySessionRecord, curveId: string): StorySessionRecord {
+  const source = session.provisionalCurve
+  if (session.confirmedCurve) requireConfirmedCurve(session, curveId)
+  else if (!source || source.id !== curveId) requireDraftCurve(session, curveId)
+  if (!source?.preparation) throw new AppError('当前没有可重新选择的故事方向。', 409, 'STORY_PREPARATION_NOT_PENDING')
+
+  const next = structuredClone(session)
+  syncActiveCurveVersion(next)
+  const currentCurve = next.provisionalCurve!
+  const now = Date.now()
+  const draft: ProvisionalCurve = {
+    ...structuredClone(currentCurve),
+    id: `curve-${randomUUID()}`,
+    status: 'draft',
+    beats: [],
+    createdAt: now,
+    updatedAt: now,
+    preparation: {
+      ...structuredClone(currentCurve.preparation!),
+      status: 'needs-review',
+      acceptedCandidateIds: [],
+      authorReview: undefined,
+      executed: false,
+    },
+  }
+  next.provisionalCurve = draft
+  next.confirmedCurve = undefined
+  clearCoCreationStoryPath(next)
+  const version = createCurveVersion(draft, getNextCurveVersionLabel(next.curveVersions))
+  next.curveVersions = [...(next.curveVersions ?? []), version]
+  next.activeCurveVersionId = version.id
+  return next
 }
 
 export function parseStoryPreparationSuggestionRequest(body: unknown): StorySessionVersion & { curveId: string } {
@@ -3330,19 +3398,19 @@ export async function applySessionAuthorInstruction(
   request: StoryAuthorInstructionRequest,
 ): Promise<StoryCurveMutationResponse> {
   const session = getStorySession(request.storyId, request.revision)
-  if (session.workflow !== 'co-creation' || !session.provisionalCurve || !session.confirmedCurve) {
-    throw new AppError('作者调整需要从已确认的主线开始。', 409, 'STORY_CURVE_NOT_CONFIRMED')
+  if (session.workflow !== 'co-creation' || !session.provisionalCurve) {
+    throw new AppError('作者调整需要从故事设计开始。', 409, 'STORY_CURVE_NOT_CONFIRMED')
   }
   const originalCurve = session.provisionalCurve
   const target = originalCurve.beats.find((beat) => beat.id === request.targetBeatId && beat.status !== 'rejected')
   if (!target) throw new AppError('要调整的主线节点不存在，请刷新后重试。', 409, 'STORY_SESSION_CONFLICT')
 
-  // Generate before changing any session state. Failed or stale requests must
-  // leave the confirmed version and its existing prose available.
+  // Generate before changing session state so a failed or stale request leaves
+  // the current design version untouched.
   const revisedDetail = await generateAuthorRevisedBeat(session.idea, originalCurve, target, request.text)
   assertStorySessionRevision(session, request.revision)
 
-  // Preserve the confirmed path as a version before returning to author mode.
+  // Preserve the current version before publishing the adjusted draft.
   syncActiveCurveVersion(session)
   const now = Date.now()
   const draftCurve: ProvisionalCurve = {
@@ -3579,6 +3647,36 @@ function createAuthorDetailRequiredError(): AppError {
     422,
     'STORY_IDEA_NEEDS_AUTHOR_DETAIL',
   )
+}
+
+/** Returning to a design is read-only. Fork only when an author changes it. */
+function createEditableStoryDesignSession(current: StorySessionRecord, curveId: string): StorySessionRecord {
+  if (!current.confirmedCurve) {
+    requireDraftCurve(current, curveId)
+    return structuredClone(current)
+  }
+  requireConfirmedCurve(current, curveId)
+  const next = structuredClone(current)
+  syncActiveCurveVersion(next)
+  const now = Date.now()
+  const draft: ProvisionalCurve = {
+    ...structuredClone(next.provisionalCurve!),
+    id: `curve-${randomUUID()}`,
+    status: 'draft',
+    beats: next.provisionalCurve!.beats.map(beat => ({ ...structuredClone(beat),
+      status: beat.status === 'rejected' ? 'rejected'
+        : beat.source === 'user-input' ? 'confirmed' : beat.source === 'user-edit' ? 'edited' : 'proposed',
+    })),
+    createdAt: now,
+    updatedAt: now,
+  }
+  next.provisionalCurve = draft
+  next.confirmedCurve = undefined
+  clearCoCreationStoryPath(next)
+  const version = createCurveVersion(draft, getNextCurveVersionLabel(next.curveVersions))
+  next.curveVersions = [...(next.curveVersions ?? []), version]
+  next.activeCurveVersionId = version.id
+  return next
 }
 
 function requireDraftCurve(session: StorySessionRecord, curveId: string): ProvisionalCurve {

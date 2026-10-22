@@ -27,6 +27,7 @@ import type {
 } from './types'
 
 export interface StorySession extends StorySessionActions {
+  directionBuildProgress: number
   view: StoryView
   idea: string
   trimmedIdea: string
@@ -82,6 +83,7 @@ export function useStorySession(): StorySession {
   }, [])
 
   return {
+    directionBuildProgress: state.directionBuildProgress,
     view: state.view,
     idea: state.idea,
     trimmedIdea: state.trimmedIdea,

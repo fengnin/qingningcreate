@@ -2767,7 +2767,10 @@ function findRepeatedCurveBeatDetail(
   const normalized = normalizeCausalText(detail)
   if (normalized.length < 18) return undefined
   return previousBeats
-    .filter((beat) => beat.kind !== 'current-state' && beat.status !== 'rejected')
+    // The opening state is also an upstream node. A trigger that copies the
+    // entire opening is still a duplicate, even though the opening itself is
+    // author supplied.
+    .filter((beat) => beat.status !== 'rejected')
     .map((beat) => normalizeCausalText(beat.detail))
     .filter((upstream) => upstream.length >= 18)
     .find((upstream) => normalized.includes(upstream) || upstream.includes(normalized))
@@ -3285,7 +3288,7 @@ function hasUnboundGenericCausalPhrase(detail: string): boolean {
 
 function normalizeCausalText(value: string): string {
   return value
-    .replace(/^暂定[：:]/u, '')
+    .replace(/^(?:暂定|提案)[：:]/u, '')
     .replace(/[“”"']/gu, '')
     .replace(/\s+/gu, '')
     .trim()

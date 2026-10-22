@@ -90,7 +90,7 @@ export function PreparationExplanation({ candidate, wording, explanation, disabl
     {!!value.issues.length && <div className="preparation-explanation-issues"><strong>待作者判断</strong>{value.issues.map((issue, i) => <p key={i}>{issue}</p>)}</div>}
   </>
   return <div className="preparation-explanation">
-    <p className="preparation-explanation-status" role="status">{!current ? generating ? '正在展开推进过程…' : '推进过程尚未生成' : stale ? '内容已修改，推进过程待核对' : current.source === 'author' ? '推进过程 · 你的调整' : '推进过程 · 系统提案'}</p>
+    <p className={`preparation-explanation-status${generating ? ' is-generating' : ''}`} role="status">{generating && <span className="generation-spinner" aria-hidden="true" />}{!current ? generating ? '正在展开推进过程…' : '推进过程尚未生成' : stale ? '内容已修改，推进过程待核对' : current.source === 'author' ? '推进过程 · 你的调整' : '推进过程 · 系统提案'}</p>
     {stale && current && <p>重新推演会根据最新内容生成推进过程。也可手动调整，或核对后沿用原安排。</p>}
     <p className="preparation-evidence-note">确认进入故事设计时，将一并采用这份推进过程。</p>
     {current && <div className={stale ? 'is-stale' : undefined}>{stale && <small>此前的推进过程 · 尚未核对当前内容</small>}{show(current)}</div>}

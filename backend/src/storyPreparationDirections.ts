@@ -8,13 +8,25 @@ export const storyDirectionSelectionGuidance = 'futureDesign.selectedStoryDirect
 
 export async function suggestPreparationStoryDirections(curve: ProvisionalCurve, preparation: StoryPreparation): Promise<{ directions: StoryPreparationStoryDirection[] }> {
   const candidate = preparation.candidates.find(c => preparation.acceptedCandidateIds.includes(c.id))!
+  // Current cards already encode both action/consequence pairs using the
+  // compiler's delimiters. Preserve them verbatim rather than asking a model
+  // to choose, merge or invent branches a second time.
+  const choiceMarker = '\n眼前的选择：'
+  const choiceStart = candidate.action.indexOf(choiceMarker)
+  const choices = choiceStart < 0 ? [] : candidate.action.slice(choiceStart + choiceMarker.length).split('；还是')
+  const results = candidate.possibleResult.startsWith('选择一：')
+    ? candidate.possibleResult.slice('选择一：'.length).split('；选择二：') : []
+  if (choices.length === 2 && results.length === 2 && [...choices, ...results].every(text => text.trim())) {
+    return { directions: choices.map((choice, index) => ({ id: `path-${index + 1}`, title: `走向${index + 1}`,
+      choice: choice.trim(), consequence: results[index]!.trim() })) }
+  }
   const context = { ...preparationExplanationContext(preparation, candidate), brief: curve.brief }
   let failure: unknown
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const raw = await requestQwenJson({
-        systemPrompt: '将作者选中的困境整理为待作者选择的故事走向，不生成完整骨架。严格输出 JSON {directions:[{id,title,choice,consequence}]}，1至2项，id为path-1、path-2，title最多24字，choice和consequence各最多120字。读最新action、futureChoice、possibleResult和采用的解释，围绕最影响故事意义的同一个关键取舍整理分支；choice写人物会倾向怎么选，consequence写可能承担的代价或变化，不保证成功失败，不提前设计全篇结局，不把普通手段细节列成关键方向。卡片已有两条分支时忠实整理，不擅自新增第三种方案。作者已明确选择时只返回该方向，不能为了凑两项重新开放已定选择。保留已有行动与后续关键取舍的因果，不把“眼前的选择”和“故事将推向”混成不相干的选项。不得改变作者已定条件或决定明确保留的未知。不给新人物起具体名字。所有选项尚未采用，不得默认替作者选择。\n' + preparationMaterialAuthorityGuidance,
-        userPrompt: JSON.stringify({ ...context, ...(failure ? { repair: '上次格式不合法，请返回完整且简洁的走向选项。' } : {}) }),
+        systemPrompt: '将作者选中的困境里已有的分支整理为待作者选择的故事走向，不重新构思分支、不生成完整骨架。严格输出 JSON {directions:[{id,title,choice,consequence}]}，1至2项，id依次为path-1、path-2，title最多24字，choice和consequence各最多120字。读最新action、futureChoice、possibleResult和采用的解释，忠实保留卡片已有的关键取舍及各自后果；choice写人物会倾向怎么选，consequence写可能承担的代价或变化，不保证成功失败，不提前设计全篇结局。卡片已有两条分支时必须两条都保留，不能擅自合并、遗漏或新增分支。选中困境卡片不等于已经选定其中一条走向；只有作者明确只保留一条时才返回一项。保留已有行动与后续关键取舍的因果，不得改变作者已定条件或决定明确保留的未知。不给新人物起具体名字。所有选项尚未采用，不得默认替作者选择。\n' + preparationMaterialAuthorityGuidance,
+        userPrompt: JSON.stringify({ ...context, ...(failure ? { repair: '上次格式不合法，请忠实整理卡片已有分支，返回完整且简洁的走向选项。' } : {}) }),
         temperature: 0.2, maxTokens: 1000, diagnosticStage: 'preparation-story-directions',
         outputSchema: preparationOutputSchemas.storyDirections,
       }) as { directions?: StoryPreparationStoryDirection[] }

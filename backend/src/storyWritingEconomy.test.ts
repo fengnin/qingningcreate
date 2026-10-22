@@ -72,14 +72,15 @@ test('request compaction preserves full text, all evidence roles, order and poin
 test('final retry reuses only the passed stage while the rejected draft stays unchanged', async () => {
   const { curve, draft } = fixture(), before = structuredClone(draft)
   await stubModel(async (requests, replies) => {
-    replies.push(supported(), { verdict: 'conflict', issues: [{ kind: 'time-order', reason: '需重试核对。', evidenceIds: ['complete-text:0', 'complete-text:1'] }] }, consistent())
+    const conflict = { verdict: 'conflict', issues: [{ kind: 'time-order', reason: '需重试核对。', evidenceIds: ['complete-text:0', 'complete-text:1'] }] }
+    replies.push(supported(), conflict, conflict, consistent())
     const request = { storyId: 's', revision: 1, action: 'accept' as const, segmentId: 's2' }
     await assert.rejects(reviseWritingDraft('核对书单', curve, draft, request), { code: 'STORY_WRITING_COMPLETE_CONSISTENCY_CONFLICT' })
     assert.deepEqual(draft, before)
     const complete = await reviseWritingDraft('核对书单', curve, draft, request)
     assert.equal(complete.complete, true)
     assert.deepEqual(requests.map(r => r.response_format.json_schema.name), [
-      'story-writing-mainline-review', 'story-writing-consistency-review', 'story-writing-consistency-review',
+      'story-writing-mainline-review', 'story-writing-consistency-review', 'story-writing-consistency-confirmation', 'story-writing-consistency-review',
     ])
   })
 })
@@ -141,6 +142,66 @@ test('consistency passes are reusable, uncertain and unavailable results are not
     await reviewCompleteWritingConsistency(context(), '第五句。第六句。')
     assert.equal(requests.length, 6)
   })
+})
+
+test('factual review receives prose only and independently checks candidate conflicts in full context', async () => {
+  for (const text of [
+    '她准备上台。她走上舞台，演唱到一半停了下来。',
+    '他把钥匙装进口袋。到门口后，他把钥匙交给同伴。离开时，他的口袋空了。',
+    '画稿被卷好。第二天，画稿平铺在工作台上。',
+  ]) {
+    const { curve, context } = fixture()
+    curve.designContract!.nodes = [{ beatId: 'old-plan', detail: '旧设计不能成为正文时间线中的事件。' }] as any
+    await stubModel(async (requests, replies) => {
+      replies.push({ verdict: 'conflict', issues: [{ kind: 'state-reversal', evidenceIds: ['complete-text:0', 'complete-text:1'],
+        reason: '最初审阅的未经核实结论，不得传给复核员。' }] }, consistent())
+      const result = await reviewCompleteWritingConsistency(context(), text)
+      assert.equal(result.verdict, 'supported')
+      assert.equal(requests.length, 2)
+      for (const request of requests) {
+        const input = expandInput(JSON.parse(request.messages[1].content))
+        assert.equal(input.completeText, text, 'all intervening and adjacent prose must remain available')
+        assert.equal(input.designContract, undefined)
+        assert.ok(input.evidenceCatalog.length >= 2)
+      }
+      const confirmation = expandInput(JSON.parse(requests[1].messages[1].content))
+      assert.deepEqual(confirmation.candidateConflicts, [{ kind: 'state-reversal', evidenceIds: ['complete-text:0', 'complete-text:1'] }])
+      assert.ok(!JSON.stringify(confirmation).includes('最初审阅的未经核实结论'))
+      await reviewCompleteWritingConsistency(context(), text)
+      assert.equal(requests.length, 2, 'a confirmed compatible verdict can reuse the existing final cache')
+    })
+  }
+})
+
+test('confirmed contradictions still block completion; incompatible evidence and inconclusive confirmation never become passes', async () => {
+  const text = '封闭仪式期间，唯一的钥匙始终锁在无人能打开的柜子里。仪式尚未结束，他已用同一把钥匙打开外门。第三句用于检查复核范围。'
+  const conflict = { verdict: 'conflict', issues: [{ kind: 'possession-reversal', evidenceIds: ['complete-text:0', 'complete-text:1'], reason: '同一时段的唯一钥匙处于互斥位置。' }] }
+  await stubModel(async (requests, replies) => {
+    const { context } = fixture()
+    replies.push(conflict, conflict)
+    assert.equal((await reviewCompleteWritingConsistency(context(), text)).verdict, 'conflict')
+    replies.push(conflict, { verdict: 'uncertain', issues: [] })
+    assert.equal((await reviewCompleteWritingConsistency(context(), text)).verdict, 'uncertain')
+    replies.push(conflict, new Error('offline'), new Error('offline'))
+    assert.equal((await reviewCompleteWritingConsistency(context(), text)).verdict, 'uncertain')
+    replies.push(conflict, { verdict: 'conflict', issues: [{ ...conflict.issues[0], evidenceIds: ['complete-text:1', 'complete-text:2'] }] })
+    await assert.rejects(reviewCompleteWritingConsistency(context(), text), { code: 'STORY_WRITING_CONSISTENCY_REVIEW_INVALID' })
+    assert.equal(requests.length, 9)
+  })
+})
+
+test('a contradiction requires distinct prose evidence on both sides and a coherent verdict', async () => {
+  for (const invalid of [
+    { verdict: 'conflict', issues: [] },
+    { verdict: 'supported', issues: [{ kind: 'causal-break', evidenceIds: ['complete-text:0', 'complete-text:1'], reason: '矛盾结论不一致。' }] },
+    ...[[], ['complete-text:0'], ['complete-text:0', 'complete-text:0'], ['complete-text:0', 'beat-current-state']].map(evidenceIds =>
+      ({ verdict: 'conflict', issues: [{ kind: 'causal-break', evidenceIds, reason: '待核实。' }] })),
+  ]) {
+    await stubModel(async (_requests, replies) => {
+      replies.push(invalid)
+      await assert.rejects(reviewCompleteWritingConsistency(fixture().context(), '第一句。第二句。'), { code: 'STORY_WRITING_CONSISTENCY_REVIEW_INVALID' })
+    })
+  }
 })
 
 test('segment reviews stay fresh and final passes expire', async () => {

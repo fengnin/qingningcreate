@@ -171,13 +171,26 @@ export async function reviewCompleteWritingConsistency(context: Context, text: s
   if (!context.designContract) return { verdict: 'supported', issues: [] }
   const catalog = excerpts('complete-text', 'text', text)
   const allowed = new Set(catalog.map(entry => entry.id))
+  let confirmingConflict = false
+  const validateReview = (review: WritingConsistencyReview) => {
+    if (!['supported', 'conflict', 'uncertain'].includes(review.verdict) || !Array.isArray(review.issues)
+      || review.verdict === 'conflict' && !review.issues.length
+      || review.verdict === 'supported' && review.issues.length
+      || review.issues.some(issue => !issue.reason.trim() || !Array.isArray(issue.evidenceIds)
+        || issue.evidenceIds.length < 2 || issue.evidenceIds.length > 4
+        || new Set(issue.evidenceIds).size !== issue.evidenceIds.length
+        || issue.evidenceIds.some(id => typeof id !== 'string' || !allowed.has(id)))) {
+      throw new AppError('完整故事事实审阅返回了无效证据，请重试。', 502, 'STORY_WRITING_CONSISTENCY_INVALID')
+    }
+  }
   try {
     const options = {
       systemPrompt: `你是完整故事的事实连续性审阅员。严格输出JSON {verdict,issues}。只找有明确正文证据的前后矛盾，不审文风、不审主线、不要求目标成功。\n` +
         `conflict仅用于：已明确完成的动作又被当作未完成；明确否定后直接肯定同一事实；人物位置、物品持有状态或时间顺序直接反转；同一阶段的同一动作重复完成且没有新阶段或重新尝试；前后事件缺少必要的因果承接；时间已经跨过但后文仍直接处于不可能的时间窗口；没有场景转换却突然出现在另一地点；同一材料、凭证或物品的用途前后被当成不同用途，导致后续结果无法由前文推出。\n` +
-        `causal-break、time-gap、scene-transition、material-purpose都必须引用造成断裂的前后原句。不要把合理的新动作、重新确认、回忆、设想、尝试、开放结尾、已说明的场景切换或有阶段变化的重复判为矛盾。无法确认时用uncertain。每个issue最多引用4个目录编号，必须来自同一正文目录。没有明确矛盾时verdict=supported且issues为空。` + writingInputEncodingGuidance,
+        `只按正文顺序和实际时间核对同一主体、对象与事实范围。区分意图、准备、开始、进行、暂停与完成：前一阶段可以发展到后一阶段，开始不等于完成，局部动作不等于整个任务完成。先前状态不是全文结束时必须保持的状态；不同时间的状态不同不自动矛盾。\n` +
+        `必须通读两处证据之间及相邻的正文，查找已写出的行动、位置变化和状态转换，包括一句话已蕴含的必要子动作。同一场景内不同位置不自动等于不同场景。跨句、跨段或时间推进中的普通动作可以自然省略；仅缺少逐动作描写不能判causal-break或scene-transition。若需要新增关键能力、资源、例外或推翻明确限制才能连接，才是实质因果缺口；不能靠想象补齐这些关键事实，也不能自行添加时间、位置、持有或动作不变的限制来制造冲突。\n` +
+        `causal-break、time-gap、scene-transition、material-purpose都必须引用造成断裂的前后原句。不要把合理的新动作、重新确认、回忆、设想、尝试、开放结尾、已说明的场景切换或有阶段变化的重复判为矛盾。无法确认时用uncertain。每个issue引用2至4个不同的正文目录编号。没有明确矛盾时verdict=supported且issues为空。` + writingInputEncodingGuidance,
       userPrompt: serializeWritingInput({
-        designContract: context.designContract,
         evidenceCatalog: catalog,
         completeText: text,
       }),
@@ -187,17 +200,29 @@ export async function reviewCompleteWritingConsistency(context: Context, text: s
     const key = finalReviewKey(context, options)
     const cached = cachedFinalReview<WritingConsistencyReview>(key)
     if (cached) return cached
-    const output = await requestQwenJson(options) as WritingConsistencyReview
-    if (!['supported', 'conflict', 'uncertain'].includes(output.verdict) || !Array.isArray(output.issues)
-      || output.issues.some(issue => !Array.isArray(issue.evidenceIds) || issue.evidenceIds.length > 4
-        || issue.evidenceIds.some(id => typeof id !== 'string' || !allowed.has(id)))) {
-      throw new AppError('完整故事事实审阅返回了无效证据，请重试。', 502, 'STORY_WRITING_CONSISTENCY_INVALID')
+    let output = await requestQwenJson(options) as WritingConsistencyReview
+    validateReview(output)
+    if (output.verdict === 'conflict') {
+      confirmingConflict = true
+      // A valid quote ID proves provenance, not a contradiction. Recheck the
+      // whole prose without forwarding the first reviewer's interpretation.
+      const candidates = output.issues.map(({ kind, evidenceIds }) => ({ kind, evidenceIds }))
+      output = await requestQwenJson({ ...options,
+        systemPrompt: `${options.systemPrompt}\n你现在是独立复核员。candidateConflicts仅是待核对的证据组合，不代表矛盾成立。逐项结合完整正文，核对是否确为同一时间范围内互斥的事实；尤其查找中间已有的状态转换，区分普通省略与关键因果缺失。不能因两端状态不同就判冲突。不新增问题，只保留正文确实证明的原候选矛盾；全部不成立则supported，不能确定则uncertain。reason写你独立核实的具体依据。`,
+        userPrompt: serializeWritingInput({ evidenceCatalog: catalog, completeText: text, candidateConflicts: candidates }),
+        diagnosticStage: 'story-writing-consistency-confirmation',
+      }) as WritingConsistencyReview
+      validateReview(output)
+      if (output.issues.some(issue => !candidates.some(candidate =>
+        candidate.kind === issue.kind && candidate.evidenceIds.every(id => issue.evidenceIds.includes(id))))) {
+        throw new AppError('完整故事事实复核改换了原候选证据，请重试。', 502, 'STORY_WRITING_CONSISTENCY_INVALID')
+      }
     }
     rememberFinalReview(key, output)
     return output
   } catch (error) {
     const unavailableCodes = new Set(['QWEN_NOT_CONFIGURED', 'QWEN_TIMEOUT', 'QWEN_NETWORK_ERROR', 'QWEN_UPSTREAM_ERROR', 'QWEN_RATE_LIMITED', 'QWEN_REQUEST_BUDGET_EXHAUSTED'])
-    if (error instanceof AppError && unavailableCodes.has(error.code)) return { verdict: 'supported', issues: [] }
+    if (error instanceof AppError && unavailableCodes.has(error.code)) return { verdict: confirmingConflict ? 'uncertain' : 'supported', issues: [] }
     if (error instanceof AppError) throw new AppError('完整故事事实审阅暂不可用，请重试最终审阅。已采用正文仍保留。', 502, 'STORY_WRITING_CONSISTENCY_REVIEW_INVALID')
     throw error
   }

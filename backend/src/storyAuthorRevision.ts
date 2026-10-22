@@ -1,4 +1,5 @@
 import { AppError, requestQwenJson } from './qwen.js'
+import { repeatsStoryBeatText } from './storyBeatText.js'
 import { shape as s } from './modelOutputSchema.js'
 import type { CurveBeat, ProvisionalCurve } from '../../shared/story-contract.js'
 
@@ -35,6 +36,9 @@ detail必须是可供作者审阅的具体故事情节，写清人物采取的�
     throw new AppError('这次未能将调整要求整理成故事提案，请重新提交；原设计仍保留。', 502, 'STORY_AUTHOR_REVISION_INVALID_OUTPUT')
   }
   unmetRequirements = await reviewAuthorRevisionRequirements(instruction, requirements, detail)
+  if (repeatsStoryBeatText(detail, curve.beats.filter(b => b.id !== target.id && b.status !== 'rejected').map(b => b.detail))) {
+    unmetRequirements.push('新节点重复了其他节点；请落实调整要求并提出该节点独立的发展，不要复制相邻节点。')
+  }
   if (!unmetRequirements.length) return detail
   }
   throw new AppError('新提案仍未完整落实你的调整要求，请重试或调整要求；原设计仍保留。', 502, 'STORY_AUTHOR_REVISION_REQUIREMENTS_UNMET')

@@ -21,7 +21,7 @@ test.after(()=>{globalThis.fetch=fetchBefore;for(const key of ['STORY_SESSION_ST
 const idea='温晴想整理船模图纸；没有期限；按编号分类与不丢弃图纸可以同时做到。'
 const seed={subject:'温晴',activeSituation:idea,lockedGoal:null,lockedFacts:[],worldMode:'realistic-default' as const,expansionScope:'keep-scale' as const,unknowns:[]}
 const brief={tones:['growth' as const],dramaticForces:['cost' as const],allowSystemNamedCharacters:false}
-let malformed=false, ask=false, hold:((r:Response)=>void)|undefined, entered:(()=>void)|undefined, requests:Record<string,any>[]=[]
+let malformed=false, ask=false, duplicateText:string|undefined, hold:((r:Response)=>void)|undefined, entered:(()=>void)|undefined, requests:Record<string,any>[]=[]
 function payload(context:StoryReasoningValidationContext,prefix='initial',targets=['beat-current-state','beat-trigger','beat-escalation','beat-climax-choice','beat-resolution']):StoryReasoningProposal{
  const evidence=context.sources.filter(s=>s.authority!=='unknown').map(s=>({sourceId:s.id,quote:s.text}))
  const basis={kind:'design-proposal' as const,evidence,unknownIds:[]}
@@ -29,7 +29,7 @@ function payload(context:StoryReasoningValidationContext,prefix='initial',target
  if(ask)return {protocol:1,stage:context.stage,status:'needs-review',outcome:'questions',goal,actions:[],constraints:[],relations:[],unknowns:[{id:`${prefix}-unknown`,question:'编号重复时是否保留？',sourceIds:[],dependentIds:[]}],questions:[{unknownId:`${prefix}-unknown`,dependentIds:[]}]}
  return {protocol:1,stage:context.stage as 'initial-design'|'edit-preview',status:'needs-review',outcome:'proposal',goal,constraints:[],relations:[],unknowns:[],
  actions:[{id:`${prefix}-action`,text:'提案：记录编号，保留全部图纸。',basis,constraintIds:[],relationIds:[],unknownIds:[],respondsToEditIds:context.requiredEditIds}],
- steps:targets.map((id,i)=>({id,kind:id.replace('beat-','') as 'trigger',title:'待审设计',text:`提案${i}：记录编号并保留全部图纸。`,basis,actionIds:[`${prefix}-action`],relationIds:[],respondsToEditIds:context.requiredEditIds,
+ steps:targets.map((id,i)=>({id,kind:id.replace('beat-','') as 'trigger',title:'待审设计',text:duplicateText??`提案${i}：${id}记录编号并保留全部图纸。`,basis,actionIds:[`${prefix}-action`],relationIds:[],respondsToEditIds:context.requiredEditIds,
  dependsOn:i?[targets[i-1]!]:context.protectedSteps.filter(s=>context.requiredEditIds.includes(s.id)).map(s=>s.id)}))}
 }
 function model(){process.env.STORY_DISABLE_MODEL='false';process.env.DASHSCOPE_API_KEY='contract-stub';process.env.DASHSCOPE_BASE_URL='https://stub.invalid'
@@ -40,6 +40,49 @@ function model(){process.env.STORY_DISABLE_MODEL='false';process.env.DASHSCOPE_A
 const response=(p:unknown)=>new Response(JSON.stringify({choices:[{message:{content:JSON.stringify(p)}}]}),{status:200})
 const code=(name:string)=>(e:unknown)=>e instanceof AppError&&e.code===name
 function curve():ProvisionalCurve{const design=createStoryDesignRecord(idea,seed);return mapInitialReasoningProposal(payload({stage:'initial-design',sources:design.sourceFacts.map(s=>({...s,authority:'author-material'})),protectedSteps:[],requiredEditIds:[]}),design,brief)}
+
+test('regeneration rejects a copy of the retained opening before publishing a preview', async () => {
+ model(); const initial=curve(), before=structuredClone(initial), count=requests.length
+ duplicateText=`提案：${initial.beats[0]!.detail}`
+ try {
+   await assert.rejects(previewReasoningRecovery(idea,seed,initial,['beat-trigger']),code('STORY_REASONING_PREVIEW_FAILED'))
+   assert.equal(requests.length-count,3,'the existing retry budget remains bounded')
+   assert.deepEqual(initial,before)
+ } finally { duplicateText=undefined }
+})
+
+for (const action of ['edit', 'regenerate', 'reject', 'failed-regeneration'] as const) {
+ test(`returning from a confirmed design supports ${action} without changing its saved version`, async () => {
+  model()
+  const started = await service.startStoryCoCreation({idea,brief})
+  const confirmed = await service.confirmSessionCurve({storyId:started.storyId,revision:started.revision,curveId:started.curve.id,
+    acceptedDesignProposalIds:requiredDesignProposalIds(started.curve.reasoning!)})
+  const before = structuredClone(service.getStorySessionSnapshot(started.storyId))
+  const reference = {storyId:started.storyId,revision:confirmed.revision,curveId:confirmed.curve.id,beatId:'beat-resolution'}
+  if (action === 'failed-regeneration') {
+   malformed=true
+   try { await assert.rejects(service.regenerateSessionCurveBeat(reference),code('QWEN_OUTPUT_SCHEMA_FAILED')) }
+   finally { malformed=false }
+   assert.deepEqual(service.getStorySessionSnapshot(started.storyId),before)
+   return
+  }
+  const result = action === 'edit'
+   ? await service.updateSessionCurveBeat({...reference,detail:'温晴把核对后的图纸装袋，交还给姐姐。'})
+   : action === 'reject' ? await service.rejectSessionCurveBeat(reference)
+   : await service.regenerateSessionCurveBeat(reference)
+  assert.notEqual(result.curve.id,before.curve!.id)
+  assert.equal(result.curve.status,'draft')
+  assert.equal(result.curveVersions!.length,before.curveVersions!.length+1)
+  const retained = result.curveVersions!.find(v=>v.id===before.activeCurveVersionId)!
+  assert.deepEqual(retained.curve,before.curve)
+  assert.deepEqual(retained.confirmedCurve,before.confirmedCurve)
+  assert.deepEqual(retained.path,before.curveVersions!.find(v=>v.id===before.activeCurveVersionId)!.path)
+  assert.equal(service.getStorySessionSnapshot(started.storyId).confirmedCurve,undefined)
+  const restored = await service.selectSessionCurveVersion({storyId:started.storyId,revision:result.revision,versionId:before.activeCurveVersionId!})
+  assert.deepEqual(restored.curve,before.curve)
+  assert.deepEqual(restored.confirmedCurve,before.confirmedCurve)
+ })
+}
 test('simple prepared story locally regenerates after an author edit and carries its selected direction',async()=>{
  model();const design=createStoryDesignRecord(idea,seed)
  const p=payload({stage:'initial-design',sources:design.sourceFacts.map(s=>({...s,authority:'author-material'})),protectedSteps:[],requiredEditIds:[]},'simple',['beat-current-state','beat-trigger','beat-resolution'])

@@ -63,16 +63,19 @@ async function withModel(reply: (stage: string, input: any) => unknown, run: () 
 for (const idea of ['小雨想亲自把画送到学校。', '阿禾想参加合唱排练。', '林舟想证明自己完成过登山。']) {
   test(`per-card drift cannot be cancelled by passing aggregate checks: ${idea}`, async () => {
     let generations = 0, reviews = 0
+    const progress: number[] = []
     await withModel((stage, input) => {
       if (stage === 'preparation-extraction') return { material: input.material.map((m: any) => ({ id: m.id, role: 'goal' })) }
       if (stage === 'preparation-character-intent') return { characterGoalIds: ['m0'], appealMaterialIds: [],
         mainlineGoals: [{ id: 'g0', materialIds: ['m0'] }], mainlineAnchors: [{ id: 'a0', kind: 'action', materialIds: ['m0'] }] }
       if (stage === 'preparation-directions') {
+        assert.deepEqual(progress, generations === 0 ? [1] : [1, 2], 'generation starts after understanding; repairs remain in comparison')
         generations++
         if (generations === 2) assert.match(input.validationFailure, /d1 主线/)
         return directionPlans()
       }
       assert.equal(stage, 'preparation-quality-review', 'initial cards must not invoke deep projection')
+      assert.deepEqual(progress, [1, 2], 'comparison starts only after candidates have been generated')
       reviews++
       return { ...pass, issues: reviews === 1 && idea.startsWith('小雨') ? ['d1 把另一任务冒充原目标。'] : [],
         candidateChecks: input.proposal.candidates.map((c: any) => ({ id: c.id,
@@ -80,9 +83,10 @@ for (const idea of ['小雨想亲自把画送到学校。', '阿禾想参加合�
         pursuedGoal: idea, relation: reviews === 1 && c.id === 'd1' ? 'substituted' : 'pursues-goal',
         reason: reviews === 1 && c.id === 'd1' ? '此候选用另一任务冒充原目标。' : '仍服务作者原本的目标。' })) }
     }, async () => {
-      const result = await generateStoryPreparation(idea, brief)
+      const result = await generateStoryPreparation(idea, brief, completedNodes => progress.push(completedNodes))
       assert.equal(generations, 2)
       assert.equal(reviews, 2)
+      assert.deepEqual(progress, [1, 2, 3])
       assert.ok(result.preparation!.candidates.every(c => !c.causalBridge))
     })
   })

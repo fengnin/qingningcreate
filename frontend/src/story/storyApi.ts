@@ -42,7 +42,6 @@ import type {
   StoryCurveBeatRejectRequest,
   StoryCurveDependenciesRegenerationRequest,
   StoryCurveBeatRetentionRequest,
-  StorySourceFactDispositionRequest,
   StoryCurveBeatUpdateRequest,
   StoryCurveConfirmationResponse,
   StoryCurveConfirmRequest,
@@ -85,8 +84,38 @@ export function requestConflictCores(request: StoryDirectionsRequest): Promise<S
   return postJson('/api/story-directions', request, parseConflictCoresResponse)
 }
 
-export function requestStoryCoCreationStart(request: StoryCoCreationStartRequest): Promise<StoryCoCreationResponse> {
-  return postJson('/api/story/co-create/start', request, parseStoryCoCreationResponse)
+export async function requestStoryCoCreationStart(request: StoryCoCreationStartRequest, onProgress?: (completedNodes: number) => void): Promise<StoryCoCreationResponse> {
+  if (!request.operationId || !onProgress) return postJson('/api/story/co-create/start', request, parseStoryCoCreationResponse)
+
+  let polling = true
+  const progressController = new AbortController()
+  const pollProgress = async () => {
+    while (polling) {
+      try {
+        const response = await fetch(`/api/story/co-create/progress/${encodeURIComponent(request.operationId!)}`, { cache: 'no-store', signal: progressController.signal })
+        if (response.ok && polling) {
+          const payload: unknown = await response.json()
+          if (typeof payload === 'object' && payload !== null && 'completedNodes' in payload && typeof payload.completedNodes === 'number') {
+            if (polling && Number.isInteger(payload.completedNodes)) onProgress(Math.max(0, Math.min(3, payload.completedNodes)))
+          }
+        }
+      } catch {
+        // The start request remains authoritative if progress polling is unavailable.
+      }
+      if (polling) await new Promise(resolve => window.setTimeout(resolve, 300))
+    }
+  }
+
+  const progressTask = pollProgress()
+  try {
+    const result = await postJson('/api/story/co-create/start', request, parseStoryCoCreationResponse)
+    onProgress(3)
+    return result
+  } finally {
+    polling = false
+    progressController.abort()
+    await progressTask
+  }
 }
 
 export function requestPreparationAcceptance(request: import('../../../shared/story-preparation-request.js').StoryPreparationAcceptanceRequest): Promise<StoryCurveMutationResponse> {
@@ -177,12 +206,6 @@ export function requestCurveRegenerationResolution(
 
 export function requestCurveBeatRetention(request: StoryCurveBeatRetentionRequest): Promise<StoryCurveMutationResponse> {
   return postJson('/api/story/curve/retain-affected', request, parseStoryCurveMutationResponse)
-}
-
-export function requestSourceFactDisposition(
-  request: StorySourceFactDispositionRequest,
-): Promise<StoryCurveMutationResponse> {
-  return postJson('/api/story/curve/source-fact', request, parseStoryCurveMutationResponse)
 }
 
 export function requestCurveClarification(

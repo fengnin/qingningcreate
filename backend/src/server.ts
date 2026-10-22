@@ -17,6 +17,7 @@ import {
   generateSessionStoryTurn,
   generateSessionStoryTurnOptionRefinement,
   startStoryCoCreation,
+  getStoryCoCreationProgress,
   acceptSessionPreparation,
   retrySessionDesignMainline,
   suggestSessionStoryDirections,
@@ -99,6 +100,15 @@ app.get('/api/story/session/:storyId', (request, response: Response<StorySession
   try {
     response.setHeader('Cache-Control', 'no-store')
     response.json(getStorySessionSnapshot(request.params.storyId))
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.get('/api/story/co-create/progress/:operationId', (request, response, next) => {
+  try {
+    response.setHeader('Cache-Control', 'no-store')
+    response.json(getStoryCoCreationProgress(request.params.operationId))
   } catch (error) {
     next(error)
   }

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { repeatsStoryBeatText } from './storyBeatText.js'
 import { AppError, requestQwenJson, withModelDiagnostic, withQwenRequestBudget } from './qwen.js'
 import { activePreparationMaterial, preparationExplanationContext, preparationMaterialAuthorityGuidance, authorRequirementsGuidance } from './storyPreparationContext.js'
 import { storyCreativeIntentGuidance, preparationCreativeFocus } from './storyCreativeIntent.js'
@@ -62,7 +63,7 @@ function parseSteps(raw: unknown, knownIds: Set<string>, strictContract = false)
   })
   if (steps[0]?.kind !== 'current-state' || steps[1]?.kind !== 'trigger' || steps.at(-1)?.kind !== 'resolution'
     || steps.some((s, i) => i > 0 && kinds.indexOf(s.kind) <= kinds.indexOf(steps[i - 1]!.kind))) invalid('故事节点缺少起点、尝试、结局，或顺序重复。')
-  if (new Set(steps.map(s => s.text.replace(/\s/gu, ''))).size !== steps.length) invalid('每个节点需要独立的发展，不能用重复卡片文字填充。')
+  if (steps.some((step, index) => repeatsStoryBeatText(step.text, steps.slice(0, index).map(s => s.text)))) invalid('每个节点需要独立的发展，不能用重复卡片文字填充。')
   return steps
 }
 

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import type {
   GeneratedStory,
   StoryHeadTailOption,
@@ -40,6 +40,8 @@ export interface PendingActionConfirmation {
 }
 
 export interface StorySessionState {
+  directionBuildProgress: number
+  setDirectionBuildProgress: (completedNodes: number) => void
   view: StoryView
   setView: (view: StoryView) => void
   idea: string
@@ -86,6 +88,7 @@ export interface StorySessionState {
   setWritingDraft: (draft: StoryWritingDraft | undefined) => void
   storyId: string | undefined
   revision: number
+  getRevision: () => number
   trimmedIdea: string
   selectedHeadTail: StoryHeadTailOption | undefined
   selectedTurnOption: StoryTurnOption | undefined
@@ -126,6 +129,7 @@ export function clearLegacyStoryPersistence(): void {
 }
 
 export function useStorySessionState(): StorySessionState {
+  const [directionBuildProgress, setDirectionBuildProgress] = useState(0)
   const [view, setView] = useState<StoryView>('opening')
   const [idea, setIdea] = useState('')
   const [seed, setSeed] = useState<StorySeed>()
@@ -149,6 +153,11 @@ export function useStorySessionState(): StorySessionState {
   const [writingDraft, setWritingDraft] = useState<StoryWritingDraft>()
   const [storyId, setStoryId] = useState<string>()
   const [revision, setRevision] = useState(0)
+  const revisionRef = useRef(0)
+  const updateRevision = (nextRevision: number) => {
+    revisionRef.current = nextRevision
+    setRevision(nextRevision)
+  }
   const [curveVersions, setCurveVersions] = useState<StoryCurveVersion[]>([])
   const [activeCurveVersionId, setActiveCurveVersionId] = useState<string>()
   const [pendingActionProposal, setPendingActionProposal] = useState<StoryActionProposal>()
@@ -226,9 +235,10 @@ export function useStorySessionState(): StorySessionState {
   }
 
   const resetStoryFoundation = () => {
+    setDirectionBuildProgress(0)
     clearLegacyStoryPersistence()
     setStoryId(undefined)
-    setRevision(0)
+    updateRevision(0)
     setSeed(undefined)
     setConflictCoreContext({})
     setCurveVersions([])
@@ -241,13 +251,13 @@ export function useStorySessionState(): StorySessionState {
 
   const applySessionVersion = (result: StorySessionVersion) => {
     setStoryId(result.storyId)
-    setRevision(result.revision)
+    updateRevision(result.revision)
   }
 
   const applySessionSnapshot = (snapshot: StorySessionSnapshot) => {
     setPendingActionConfirmation(undefined)
     setStoryId(snapshot.storyId)
-    setRevision(snapshot.revision)
+    updateRevision(snapshot.revision)
     setIdea(snapshot.idea)
     setSeed(snapshot.seed)
     setCreativeBrief(snapshot.brief)
@@ -272,6 +282,8 @@ export function useStorySessionState(): StorySessionState {
   }
 
   return {
+    directionBuildProgress,
+    setDirectionBuildProgress,
     view,
     setView,
     idea,
@@ -318,6 +330,7 @@ export function useStorySessionState(): StorySessionState {
     setWritingDraft,
     storyId,
     revision,
+    getRevision: () => revisionRef.current,
     trimmedIdea,
     selectedHeadTail,
     selectedTurnOption,

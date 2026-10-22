@@ -3,6 +3,7 @@ export interface StoryPreparationAcceptanceRequest {
   revision: number
   curveId: string
   acceptedCandidateIds: string[]
+  versionMode?: 'new-version'
   /** Optional only for compatibility with existing ID-only clients. */
   authorReview?: import('./story-preparation.js').StoryPreparationReview
 }
@@ -21,6 +22,7 @@ export interface StoryPreparationRevisionRequest {
   decision: 'reject' | 'regenerate' | 'revise'
   candidateId?: string
   authorAction?: string
+  versionMode?: 'new-version'
 }
 export interface StoryPreparationExplanationRequest {
   storyId: string

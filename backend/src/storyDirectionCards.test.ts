@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { generateDirectionCards, parseDirectionCardReview, directionCardReviewSchema } from './storyDirectionCards.js'
+import { generateDirectionCards, parseDirectionCardReview, directionCardReviewSchema, directionCardNamingGuidance } from './storyDirectionCards.js'
 import { parsePreparationCandidates } from './storyPreparation.js'
 import { outputShapeErrors } from './modelOutputSchema.js'
 
@@ -14,6 +14,42 @@ const pass = (ids: string[]) => ({ cards: ids.map(id => ({ id, branches: [0, 1].
   scope: { verdict: 'supported', reason: '相容' },
 })), diversity: { passed: true, repairIds: [] as string[], reason: '不同阻碍' } })
 const material = [{ id: 'm0', sourceId: 'author-input', role: 'goal' as const, quote: '青柠想看电影。' }]
+
+test('naming permission is explicit even without tone preferences', () => {
+  assert.match(directionCardNamingGuidance({ allowSystemNamedCharacters: false }), /当前未允许/)
+  assert.match(directionCardNamingGuidance(), /当前未允许/)
+  assert.match(directionCardNamingGuidance({ allowSystemNamedCharacters: true }), /允许为新增人物提出具体名字/)
+})
+
+test('a naming violation repairs only its card and both generation and review receive the permission', async () => {
+  const original = plans()
+  original[1]!.difficulty = '青柠的好友小满临出发前发烧。'
+  let generations = 0, reviews = 0
+  const result = await generateDirectionCards({
+    input: { material, sources: [{ id: 'author-input', text: material[0]!.quote }], brief: { allowSystemNamedCharacters: false } },
+    prompt: '测试', compress: async raw => raw, parse: raw => parsePreparationCandidates(raw, material),
+    request: async (options, parse) => {
+      assert.match(options.systemPrompt, /当前未允许系统提出具名人物/)
+      assert.match(options.systemPrompt, /必须保留作者原文已提供的名字/)
+      const input = JSON.parse(options.userPrompt)
+      if (options.diagnosticStage === 'preparation-directions') {
+        if (++generations === 1) return parse({ plans: original })
+        assert.deepEqual(input.repairIds, ['d1'])
+        assert.match(input.validationFailure, /小满/)
+        assert.deepEqual(input.unchangedPlans, [original[0], original[2]])
+        return parse({ plans: [{ ...original[1], difficulty: '青柠的好友临出发前发烧。' }] })
+      }
+      assert.match(options.systemPrompt, /boundaries判为unsupported/)
+      const audit = pass(input.reviewPlans.map((p: any) => p.id))
+      if (++reviews === 1) audit.cards[1]!.boundaries = { verdict: 'unsupported', reason: '小满是作者原文未提供的新增姓名，命名开关关闭。' }
+      return parse(audit)
+    },
+  })
+  assert.equal(generations, 2)
+  assert.equal(reviews, 2)
+  assert.doesNotMatch(result.candidates[1]!.action, /小满/)
+  assert.match(result.candidates[1]!.action, /青柠的好友/)
+})
 
 test('review has exactly one causal verdict per branch and no duplicated prose/checks', () => {
   const schema = directionCardReviewSchema(['d0'])

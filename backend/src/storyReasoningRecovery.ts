@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { repeatsStoryBeatText } from './storyBeatText.js'
 import { AppError, requestQwenJson, withModelDiagnostic } from './qwen.js'
 import { reasoningOutputSchema } from './storyOutputSchemas.js'
 import { mapInitialReasoningProposal } from './storyInitialReasoning.js'
@@ -106,6 +107,8 @@ export async function previewReasoningRecovery(idea:string,seed:StorySeed,curve:
         if(p.steps.length!==targets.length||targets.some(id=>!p.steps.some(s=>s.id===id)))invalid('重推必须覆盖指定节点，不得修改范围外节点。')
         if(p.steps.some(s=>s.id!==`beat-${s.kind}`))invalid('节点类型和 ID 不一致。')
         if(p.steps.some(s=>s.basis.kind!=='design-proposal'))invalid('替代节点必须提出具体待审场景，不能用原目标或作者材料的逐字引用充当后续情节。')
+        const retainedTexts = curve.beats.filter(b=>!targets.includes(b.id)&&b.status!=='rejected').map(b=>b.detail)
+        if(p.steps.some(s=>repeatsStoryBeatText(s.text,retainedTexts)))invalid('重推节点重复了保留节点，没有提出独立的发展。')
         if([...statements(p).filter(s=>!targets.includes(s.id)),...p.unknowns].some(s=>!s.id.startsWith(prefix)))invalid('新结构必须使用独立 ID，不能改写未审阅的原设计。')
         // An ID acknowledgement alone is insufficient even for provenance.
         for(const id of context.requiredEditIds) if(!statements(p).some(s=>s.basis.kind!=='unknown'&&s.basis.evidence.some(e=>e.sourceId===`edit-${id}`&&e.quote===context.protectedSteps.find(s=>s.id===id)!.text)))invalid('重推没有逐字承接作者编辑来源。')

@@ -16,7 +16,6 @@ import {
   requestAffectedCurveRegeneration,
   requestCurveBeatRetention,
   requestCurveRegenerationResolution,
-  requestSourceFactDisposition,
   requestCurveClarification,
   requestCurveConfirmation,
   requestCurveStorySpine,
@@ -84,11 +83,10 @@ export interface StorySessionActions {
   regenerateAffectedCurveBeats: (feedback?: string) => Promise<void>
   retainAffectedCurveBeats: (beatIds: string[]) => Promise<void>
   resolveAffectedCurveBeats: (decisions: Record<string, StoryCurveRegenerationDecision>, independentUnknownIds?: string[], acceptedDesignProposalIds?: string[]) => Promise<void>
-  setSourceFactDisposition: (factId: string, disposition: 'parked' | 'integrated') => Promise<void>
   changeCurveClarification: (action: StoryAuthorClarificationAction, fields?: {
     clarificationId?: string; targetBeatId?: string; prompt?: string; causalGap?: string; answerText?: string
   }) => Promise<boolean>
-  confirmProvisionalCurve: (acceptedDesignProposalIds?: string[]) => Promise<void>
+  confirmProvisionalCurve: (acceptedDesignProposalIds?: string[]) => Promise<boolean>
   openStoryWriting: () => void
   resumeStoryDesign: () => void
   reviewStoryPredicament: () => void
@@ -118,7 +116,7 @@ export interface StorySessionActions {
   goBackToOpening: () => void
   restartStory: () => void
   selectCurveVersion: (versionId: string) => Promise<void>
-  applyAuthorInstruction: (targetBeatId: string, text: string) => Promise<void>
+  applyAuthorInstruction: (targetBeatId: string, text: string) => Promise<boolean>
   proposeStoryAction: (action: string) => Promise<void>
   confirmStoryActionProposal: (mode: Extract<StoryTurnMode, 'continue' | 'conclude'>, authorConfirmation?: { actionText: string; resultText: string }) => Promise<void>
 }
@@ -149,13 +147,14 @@ export function createStorySessionActions(
     openStoryWriting: () => state.setView('story-spine'),
     resumeStoryDesign: () => {
       if (!state.provisionalCurve || stage.stageStatus === 'loading') return
+      if (state.provisionalCurve.preparation?.status === 'needs-review') return
       stage.clearStageFeedback()
       state.setView('provisional-curve')
     },
     reviewStoryPredicament: () => {
       if (!state.provisionalCurve?.preparation || stage.stageStatus === 'loading') return
       stage.clearStageFeedback()
-      state.setView(state.provisionalCurve.preparation.status === 'needs-review' ? 'provisional-curve' : 'preparation-review')
+      state.setView('preparation-review')
     },
     openCompletedStory: () => {
       if (!state.generatedStory || stage.stageStatus === 'loading') return
@@ -181,7 +180,7 @@ function createStoryWritingActions({ state, stage }: StorySessionActionContext):
   return { writeStory: async request => {
     if (!state.storyId) return
     await runStorySessionStageRequest(state, stage,
-      () => requestStoryWriting({ ...request, storyId: state.storyId!, revision: state.revision }),
+      () => requestStoryWriting({ ...request, storyId: state.storyId!, revision: state.getRevision() }),
       result => {
         state.setWritingDraft(result.draft)
         state.setGeneratedStory(result.story)
@@ -207,7 +206,6 @@ function createCoCreationActions(
   | 'regenerateAffectedCurveBeats'
   | 'retainAffectedCurveBeats'
   | 'resolveAffectedCurveBeats'
-  | 'setSourceFactDisposition'
   | 'changeCurveClarification'
   | 'confirmProvisionalCurve'
   | 'startStorySpineFromCurve'
@@ -219,7 +217,6 @@ function createCoCreationActions(
     // its version history.
     if (!state.storyId && !state.provisionalCurve) {
       state.resetStoryFoundation()
-      state.setCreativeBrief(state.creativeBrief)
     }
     state.setView('creative-brief')
   }
@@ -230,10 +227,11 @@ function createCoCreationActions(
   ) => {
     if (!state.trimmedIdea) return
     const brief = briefOverride ?? state.creativeBrief
-    const existingSession = state.storyId ? { storyId: state.storyId, revision: state.revision } : undefined
+    const existingSession = state.storyId ? { storyId: state.storyId, revision: state.getRevision() } : undefined
     if (!existingSession) state.resetStoryFoundation()
     else state.resetPlanAfter('conflict-core')
     state.setCreativeBrief(brief)
+    state.setDirectionBuildProgress(0)
     state.setView('provisional-curve')
     await runStorySessionStageRequest(
       state,
@@ -244,7 +242,7 @@ function createCoCreationActions(
         brief,
         operationId: createClientOperationId(),
         ...(existingSession ? { ...existingSession, versionMode } : {}),
-      }),
+      }, state.setDirectionBuildProgress),
       (result) => {
         state.setSeed(result.seed)
         state.setCreativeBrief(result.brief)
@@ -264,7 +262,8 @@ function createCoCreationActions(
   }
 
   const acceptPreparation = async (candidateIds: string[], authorReview?: import('../../../shared/story-preparation.js').StoryPreparationReview) => {
-    await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => requestPreparationAcceptance({ storyId, revision, curveId, acceptedCandidateIds: candidateIds, ...(authorReview ? { authorReview } : {}) }))
+    const createNewVersion = needsNewPreparationVersion(state)
+    await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => requestPreparationAcceptance({ storyId, revision, curveId, acceptedCandidateIds: candidateIds, ...(createNewVersion ? { versionMode: 'new-version' as const } : {}), ...(authorReview ? { authorReview } : {}) }))
   }
   const retryDesignMainline = async () => {
     await runCurveMutationRequest(state, stage, requestDesignMainlineRetry)
@@ -273,7 +272,8 @@ function createCoCreationActions(
     await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => requestPreparationSupplement({ storyId, revision, curveId, supplementId, decision, authorText }))
   }
   const revisePreparation = async (decision: 'reject' | 'regenerate' | 'revise', candidateId?: string, authorAction?: string) => {
-    await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => requestPreparationRevision({ storyId, revision, curveId, decision, candidateId, authorAction }))
+    const createNewVersion = needsNewPreparationVersion(state)
+    await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => requestPreparationRevision({ storyId, revision, curveId, decision, candidateId, authorAction, ...(createNewVersion ? { versionMode: 'new-version' as const } : {}) }))
   }
 
   const regenerateCurveBeat = async (beatId: string, feedback?: string, replaceRejected = false) => {
@@ -301,7 +301,7 @@ function createCoCreationActions(
     await runStorySessionStageRequest(
       state,
       stage,
-      () => requestAffectedCurveRegeneration({ storyId: state.storyId!, revision: state.revision, curveId: curve.id, feedback }),
+      () => requestAffectedCurveRegeneration({ storyId: state.storyId!, revision: state.getRevision(), curveId: curve.id, feedback }),
       (result) => {
         applyCurveMutationState(state, result)
         state.setPendingCurveRegeneration(result.pendingCurveRegeneration)
@@ -318,7 +318,7 @@ function createCoCreationActions(
       stage,
       () => requestCurveRegenerationResolution({
         storyId: state.storyId!,
-        revision: state.revision,
+        revision: state.getRevision(),
         curveId: curve.id,
         previewId: preview.id,
         decisions,
@@ -336,12 +336,6 @@ function createCoCreationActions(
     await runCurveMutationRequest(state, stage, reference => requestCurveBeatRetention({ ...reference, beatIds }))
   }
 
-  const setSourceFactDisposition = async (factId: string, disposition: 'parked' | 'integrated') => {
-    await runCurveMutationRequest(state, stage, ({ storyId, revision, curveId }) => (
-      requestSourceFactDisposition({ storyId, revision, curveId, factId, disposition })
-    ))
-  }
-
   const changeCurveClarification: StorySessionActions['changeCurveClarification'] = async (action, fields = {}) => {
     const confirmed = Boolean(state.confirmedCurve)
     const curve = state.provisionalCurve
@@ -349,7 +343,7 @@ function createCoCreationActions(
     let saved = false
     await runStorySessionStageRequest(state, stage,
       () => requestCurveClarification({
-        storyId: state.storyId!, revision: state.revision, curveId: curve.id, action, ...fields,
+        storyId: state.storyId!, revision: state.getRevision(), curveId: curve.id, action, ...fields,
         ...(confirmed ? { versionMode: 'new-version' as const } : {}),
       }),
       (result) => {
@@ -367,13 +361,14 @@ function createCoCreationActions(
 
   const confirmProvisionalCurve = async (acceptedDesignProposalIds?: string[]) => {
     const curve = state.provisionalCurve
-    if (!curve || !state.storyId || state.confirmedCurve) return
+    if (!curve || !state.storyId || state.confirmedCurve) return false
+    let confirmed = false
     await runStorySessionStageRequest(
       state,
       stage,
       () => requestCurveConfirmation({
         storyId: state.storyId!,
-        revision: state.revision,
+        revision: state.getRevision(),
         curveId: curve.id,
         ...(acceptedDesignProposalIds ? { acceptedDesignProposalIds } : {}),
       }),
@@ -382,8 +377,10 @@ function createCoCreationActions(
         state.setConfirmedCurve(result.confirmedCurve)
         state.setCurveVersions(result.curveVersions ?? [])
         state.setActiveCurveVersionId(result.activeCurveVersionId)
+        confirmed = true
       },
     )
+    return confirmed
   }
 
   const startStorySpineFromCurve = async () => {
@@ -394,7 +391,7 @@ function createCoCreationActions(
       stage,
       () => requestCurveStorySpine({
         storyId: state.storyId!,
-        revision: state.revision,
+        revision: state.getRevision(),
         curveId: curve.id,
       }),
       (result) => {
@@ -425,7 +422,6 @@ function createCoCreationActions(
     regenerateAffectedCurveBeats,
     retainAffectedCurveBeats,
     resolveAffectedCurveBeats,
-    setSourceFactDisposition,
     changeCurveClarification,
     confirmProvisionalCurve,
     startStorySpineFromCurve,
@@ -451,7 +447,6 @@ function createStoryFoundationActions(
   const updateIdea = (idea: string) => {
     if (idea.trim() !== state.trimmedIdea && (state.conflictCores.length || state.provisionalCurve || state.storyId)) {
       state.resetStoryFoundation()
-      state.setCreativeBrief(state.creativeBrief)
     }
     state.setIdea(idea)
   }
@@ -602,7 +597,7 @@ function createStoryProgressActions(
       stage,
       () => requestStoryTurnOptionRefinement({
         storyId,
-        revision: state.revision,
+        revision: state.getRevision(),
         turnId: currentTurn.id,
         optionId: optionToRefine.id,
         focus,
@@ -632,7 +627,7 @@ function createStoryProgressActions(
     await runStorySessionStageRequest(
       state,
       stage,
-      () => requestFullStory({ storyId: state.storyId!, revision: state.revision }),
+      () => requestFullStory({ storyId: state.storyId!, revision: state.getRevision() }),
       (result) => {
         state.setGeneratedStory(result.story)
         state.setView('complete')
@@ -663,7 +658,7 @@ function createNavigationActions(
     const confirmation = state.pendingActionConfirmation
     if (state.view === 'story-spine' && confirmation && confirmation.proposalId === state.pendingActionProposal?.id && state.storyId) {
       await runStorySessionStageRequest(state, stage,
-        () => requestStoryActionProposalConfirmation({ storyId: state.storyId!, revision: state.revision, ...confirmation }),
+        () => requestStoryActionProposalConfirmation({ storyId: state.storyId!, revision: state.getRevision(), ...confirmation }),
         result => { applyStoryTurnState(state, result); state.setPendingActionConfirmation(undefined) })
       return
     }
@@ -712,7 +707,7 @@ function createNavigationActions(
     }
 
     stage.clearStageFeedback()
-    const previousView = state.view === 'provisional-curve' && state.provisionalCurve?.preparation
+    const previousView = state.view === 'provisional-curve' && state.provisionalCurve?.preparation && state.provisionalCurve.preparation.status !== 'needs-review'
       ? 'preparation-review'
       : state.view === 'story-spine' && state.confirmedCurve
       ? 'provisional-curve'
@@ -760,6 +755,10 @@ function createStorySessionLoaders(
   }
 }
 
+function needsNewPreparationVersion(state: StorySessionState): boolean {
+  return Boolean(state.confirmedCurve || state.provisionalCurve?.status !== 'draft')
+}
+
 function applyStoryTurnState(state: StorySessionState, result: StoryTurnResponse) {
   state.setTurnHistory(result.history)
   state.setCurrentTurn(result.turn)
@@ -776,11 +775,20 @@ function applyCurveMutationState(
     activeCurveVersionId?: string
   },
 ) {
+  const startsNewVersion = Boolean(state.provisionalCurve && state.provisionalCurve.id !== result.curve.id)
   state.setProvisionalCurve(result.curve)
   if ('pendingCurveRegeneration' in result) state.setPendingCurveRegeneration(result.pendingCurveRegeneration)
   else state.setPendingCurveRegeneration(undefined)
   if (result.curveVersions) state.setCurveVersions(result.curveVersions)
   state.setActiveCurveVersionId(result.activeCurveVersionId)
+  if (startsNewVersion) {
+    state.setConfirmedCurve(undefined)
+    state.resetPlanAfter('conflict-core')
+  }
+  // Accepting a direction from its dedicated page opens the newly built design.
+  if (state.view === 'preparation-review' && result.curve.preparation?.status === 'accepted-design') {
+    state.setView('provisional-curve')
+  }
 }
 
 function createCurveVersionActions(
@@ -791,7 +799,7 @@ function createCurveVersionActions(
     await runStorySessionStageRequest(
       state,
       stage,
-      () => requestCurveVersionSelection({ storyId: state.storyId!, revision: state.revision, versionId }),
+      () => requestCurveVersionSelection({ storyId: state.storyId!, revision: state.getRevision(), versionId }),
       (snapshot) => {
         state.applySessionSnapshot(snapshot)
         // Selecting a design version should display that design.
@@ -807,13 +815,14 @@ function createAuthorControlActions(
   { state, stage }: StorySessionActionContext,
 ): Pick<StorySessionActions, 'applyAuthorInstruction' | 'proposeStoryAction' | 'confirmStoryActionProposal'> {
   const applyAuthorInstruction = async (targetBeatId: string, text: string) => {
-    if (!state.storyId || !state.confirmedCurve || !text.trim()) return
+    if (!state.storyId || !state.provisionalCurve || !text.trim()) return false
+    let applied = false
     await runStorySessionStageRequest(
       state,
       stage,
       () => requestAuthorInstruction({
         storyId: state.storyId!,
-        revision: state.revision,
+        revision: state.getRevision(),
         targetBeatId,
         text: text.trim(),
       }),
@@ -825,8 +834,10 @@ function createAuthorControlActions(
         // at the same boundary so it cannot offer a stale "current turn".
         state.resetPlanAfter('conflict-core')
         state.setView('provisional-curve')
+        applied = true
       },
     )
+    return applied
   }
 
   const proposeStoryAction = async (action: string) => {
@@ -836,7 +847,7 @@ function createAuthorControlActions(
       stage,
       () => requestStoryActionProposal({
         storyId: state.storyId!,
-        revision: state.revision,
+        revision: state.getRevision(),
         turnId: state.currentTurn!.id,
         action: action.trim(),
       }),
@@ -853,7 +864,7 @@ function createAuthorControlActions(
       stage,
       () => requestStoryActionProposalConfirmation({
         storyId: state.storyId!,
-        revision: state.revision,
+        revision: state.getRevision(),
         proposalId: proposal.id,
         mode,
         ...(authorConfirmation ? { authorConfirmation } : {}),
@@ -895,7 +906,7 @@ async function runCurveMutationRequest(
   await runStorySessionStageRequest(
     state,
     stage,
-    () => request({ storyId, revision: state.revision, curveId: curve.id }),
+    () => request({ storyId, revision: state.getRevision(), curveId: curve.id }),
     (result) => applyCurveMutationState(state, result),
   )
 }
@@ -925,7 +936,7 @@ async function loadConflictCoresFromApi(
       context: confirmedContext,
       generateSystemDraft: generateSystemDraft || undefined,
       storyId,
-      revision: storyId ? state.revision : undefined,
+      revision: storyId ? state.getRevision() : undefined,
       preference: normalizedPreference,
       excludedTitles: excludedTitles.length ? excludedTitles : undefined,
     }),
@@ -952,7 +963,7 @@ async function loadPredicamentFromApi(
     stage,
     () => requestStoryPredicament({
       storyId: state.storyId!,
-      revision: state.revision,
+      revision: state.getRevision(),
       conflictCoreId: core.id,
     }),
     (result) => {
@@ -977,7 +988,7 @@ async function loadHeadTailFromApi(
     stage,
     () => requestHeadTailOptions({
       storyId: state.storyId!,
-      revision: state.revision,
+      revision: state.getRevision(),
       predicamentId: predicament.id,
       approachId: approach.id,
     }),
@@ -1000,7 +1011,7 @@ async function loadStoryTurnFromApi(
   await runStorySessionStageRequest(
     state,
     stage,
-    () => requestStoryTurn({ storyId: state.storyId!, revision: state.revision, ...request }),
+    () => requestStoryTurn({ storyId: state.storyId!, revision: state.getRevision(), ...request }),
     (result) => {
       applyStoryTurnState(state, result)
       if (request.headTailId) state.setCommittedHeadTailId(request.headTailId)

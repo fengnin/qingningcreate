@@ -20,6 +20,7 @@ import { ConflictCoreContextChoice } from './ConflictCoreContextChoice'
 import { ConflictCoreContextForm } from './ConflictCoreContextForm'
 import { StoryTurnOptionRefinementControl } from './StoryTurnOptionRefinementControl'
 import { mergeConflictCoreContext } from '../story/conflictCoreContext'
+import { getNextStoryIdeaExample } from '../story/storyIdeaExamples'
 import type {
   StoryHeadTailOption,
   StoryConflictCore,
@@ -71,6 +72,8 @@ const goalStateLabel: Record<StoryNode['goalState'], string> = {
 type ConflictCoreContextRouteView = 'choice' | 'manual'
 
 export function OpeningScreen({ session }: { session: StorySession }) {
+  const [ideaExample] = useState(() => getNextStoryIdeaExample())
+
   return (
     <main className="app-shell opening-shell">
       <div className="opening-image" aria-hidden="true" />
@@ -88,7 +91,7 @@ export function OpeningScreen({ session }: { session: StorySession }) {
             <textarea
               value={session.idea}
               onChange={(event) => session.updateIdea(event.target.value)}
-              placeholder="例如：青柠想在家里给朋友准备一场寻宝生日惊喜。"
+              placeholder={`例如：${ideaExample}`}
               maxLength={maximumStoryIdeaLength}
             />
           <span className="field-footer">
@@ -494,9 +497,16 @@ function WritingWorkspace({ session }: { session: StorySession }) {
     setFeedback('')
   }, [activeSegment?.id, activeSegment?.text])
 
-  const run = (request: Parameters<StorySession['writeStory']>[0]) => {
+  const run = async (request: Parameters<StorySession['writeStory']>[0]) => {
     setRetryRequest(request)
-    void session.writeStory(request)
+    await session.writeStory(request)
+    const acceptedSegment = request.action === 'accept' && request.segmentId === activeSegment?.id ? activeSegment : undefined
+    if (acceptedSegment) {
+      const beatIndex = beats.findIndex(beat => beat.id === acceptedSegment.beatId)
+      if (beatIndex >= 0 && beatIndex < beats.length - 1) {
+        await session.writeStory({ action: 'next' })
+      }
+    }
   }
 
   return (
@@ -522,20 +532,13 @@ function WritingWorkspace({ session }: { session: StorySession }) {
       )}
     >
       <section className="writing-workspace" aria-label="故事正文写作">
-        {busy && <GenerationNotice label="正在处理当前段落" detail="已有正文会保留，完成后可继续审阅。" />}
-        {session.stageError && (
-          <div className="generation-error" role="alert">
-            <CircleAlert size={17} /><p>{session.stageError}</p>
-            {retryRequest && <button className="text-action" type="button" disabled={busy} onClick={() => void session.writeStory(retryRequest)}><RefreshCcw size={15} /> 重试本次操作</button>}
-          </div>
-        )}
         {segments.map((segment, index) => segment.id !== activeSegment?.id ? (
           <article className="writing-segment is-accepted" key={segment.id}>
             <header><span>第 {segments.indexOf(segment) + 1} 段 · {segment.status === 'accepted' ? '已采用' : '待审阅'}</span><strong>{segment.label}</strong></header>
             <div className="writing-prose">{segment.text.split(/\n\s*\n/).map((paragraph, paragraphIndex) => <p key={paragraphIndex}>{paragraph}</p>)}</div>
             <div className="writing-segment-actions">
               <button type="button" className="text-action" disabled={busy} onClick={() => { setSelectedSegmentId(segment.id); setEditMode('edit') }}><PencilLine size={15} /> 直接修改正文</button>
-              <button type="button" className="text-action" disabled={busy} onClick={() => { setSelectedSegmentId(segment.id); setEditMode('rewrite') }}><RefreshCcw size={15} /> 让系统重写</button>
+              <button type="button" className="text-action" disabled={busy} onClick={() => { setSelectedSegmentId(segment.id); setEditMode('rewrite') }}><PencilLine size={15} /> 调整故事情节</button>
             </div>
           </article>
         ) : activeSegment ? (
@@ -554,16 +557,19 @@ function WritingWorkspace({ session }: { session: StorySession }) {
             <div className="writing-segment-actions">
               {!editMode && <>
                 <button type="button" className="text-action" disabled={busy} onClick={() => setEditMode('edit')}><PencilLine size={15} /> 直接修改正文</button>
-                <button type="button" className="text-action" disabled={busy} onClick={() => setEditMode('rewrite')}><RefreshCcw size={15} /> 让系统重写</button>
+                <button type="button" className="text-action" disabled={busy} onClick={() => setEditMode('rewrite')}><PencilLine size={15} /> 调整故事情节</button>
                 {activeSegment.status === 'pending' && <button type="button" className="primary-action" disabled={busy} onClick={() => run({ action: 'accept', segmentId: activeSegment.id })}><Check size={16} /> 采用这段</button>}
               </>}
               {editMode === 'edit' && <button type="button" className="primary-action" disabled={busy || !text.trim() || text === activeSegment.text} onClick={() => run({ action: 'edit', segmentId: activeSegment.id, text })}><Check size={16} /> 保存正文修改</button>}
               {editMode === 'rewrite' && <button type="button" className="primary-action" disabled={busy} onClick={() => run({ action: 'regenerate', segmentId: activeSegment.id, ...(feedback.trim() ? { feedback: feedback.trim() } : {}) })}><RefreshCcw size={15} /> 按意见重写这段</button>}
               {(editMode || selectedSegmentId) && <button type="button" className="text-action" disabled={busy} onClick={() => { setSelectedSegmentId(undefined); setEditMode(undefined); setText(activeSegment.text); setFeedback('') }}>取消</button>}
             </div>
+            {session.stageError && <div className="generation-error" role="alert"><CircleAlert size={17} /><p>{session.stageError}</p>{retryRequest && <button className="text-action" type="button" disabled={busy} onClick={() => void session.writeStory(retryRequest)}><RefreshCcw size={15} /> 重试本次操作</button>}</div>}
+            {busy && <GenerationNotice label="正在处理当前段落" detail="已有正文会保留，完成后可继续审阅。" />}
             {editMode && <p className="writing-edit-note">修改或重写本段会移除后续正文，之后按新版本继续生成。</p>}
           </article>
         ) : null)}
+        {!activeSegment && session.stageError && <div className="generation-error" role="alert"><CircleAlert size={17} /><p>{session.stageError}</p>{retryRequest && <button className="text-action" type="button" disabled={busy} onClick={() => void session.writeStory(retryRequest)}><RefreshCcw size={15} /> 重试本次操作</button>}</div>}
         {!activeSegment && (draft?.complete ? (
           <p className="writing-complete-note"><Check size={17} /> 所有段落已采用，完整故事已经整理完成。</p>
         ) : segments.length === 0 ? (
@@ -577,6 +583,7 @@ function WritingWorkspace({ session }: { session: StorySession }) {
             <button type="button" className="primary-action" disabled={busy} onClick={() => run({ action: 'next' })}>{busy ? '正在写下一段…' : '继续生成下一段'} <ArrowRight size={17} /></button>
           </div>
         ))}
+        {busy && !activeSegment && <GenerationNotice label="正在处理当前段落" detail="已有正文会保留，完成后可继续审阅。" />}
       </section>
     </StoryWorkspace>
   )
@@ -592,7 +599,7 @@ export function CompletedStory({ session }: { session: StorySession }) {
     <main className="app-shell setup-shell stage-shell complete-shell">
       <header className="setup-header complete-header">
         <button className="opening-back" type="button" onClick={session.goBack}><ArrowLeft size={18} /> 上一步 · 写成故事</button>
-        <StoryJourney current={5} />
+        <StoryJourney current={5} loading={session.stageStatus === 'loading'} />
         <div className="stage-header-actions complete-header-actions">
           <button className="toolbar-action restart-action" type="button" onClick={session.restartStory} aria-label="新建故事" title="新建故事">
             <RefreshCcw size={15} /> 新建故事
@@ -645,9 +652,8 @@ function StoryWorkspace({
     <main className="app-shell setup-shell stage-shell">
       <header className="setup-header">
         <button className="opening-back" type="button" onClick={handleBack} disabled={session.stageStatus === 'loading'}><ArrowLeft size={18} /> {backLabel ?? (isRecoveringStoryPath ? '回到当前故事路径' : step === 4 && session.confirmedCurve ? '上一步 · 故事设计' : '返回上一步')}</button>
-        <StoryJourney current={step} />
+        <StoryJourney current={step} loading={session.stageStatus === 'loading'} />
         <div className="stage-header-actions">
-          {session.generatedStory && <button className="toolbar-action restart-action" type="button" onClick={session.restartStory}><RefreshCcw size={15} /> 新建故事</button>}
           {step === 4 && session.generatedStory && <button className="text-action" type="button" onClick={session.openCompletedStory} disabled={session.stageStatus === 'loading'}>下一步 · 完整故事 <ArrowRight size={16} /></button>}
         </div>
       </header>
@@ -1046,8 +1052,8 @@ function StoryControlPanel({ session, currentTurn }: {
 
   const submitAuthorInstruction = async () => {
     if (!authorBeatId || !authorText.trim()) return
-    await session.applyAuthorInstruction(authorBeatId, authorText.trim())
-    setAuthorText('')
+    const applied = await session.applyAuthorInstruction(authorBeatId, authorText.trim())
+    if (applied) setAuthorText('')
   }
 
   const submitRoleAction = async () => {
@@ -1257,8 +1263,8 @@ function GenerationError({ message, onRetry, retryLabel = '再试一次' }: {
   )
 }
 
-export function StoryJourney({ current, compact = false }: { current: number; compact?: boolean }) {
-  return <nav className={`story-journey ${compact ? 'is-compact' : ''}`} aria-label="创作进度"><ol>{journeyStages.map((stage) => { const isComplete = stage.step < current; const isCurrent = stage.step === current; return <li className={`${isComplete ? 'is-complete' : ''} ${isCurrent ? 'is-current' : ''}`} key={stage.label} aria-current={isCurrent ? 'step' : undefined}><span className="journey-marker">{isComplete ? <Check size={14} /> : String(stage.step).padStart(2, '0')}</span><span className="journey-copy"><strong>{stage.label}</strong><small>{stage.detail}</small></span></li> })}</ol></nav>
+export function StoryJourney({ current, compact = false, loading = false }: { current: number; compact?: boolean; loading?: boolean }) {
+  return <nav className={`story-journey ${compact ? 'is-compact' : ''}`} aria-label="创作进度"><ol>{journeyStages.map((stage) => { const isComplete = stage.step < current; const isCurrent = stage.step === current; return <li className={`${isComplete ? 'is-complete' : ''} ${isCurrent ? 'is-current' : ''}`} key={stage.label} aria-current={isCurrent ? 'step' : undefined}><span className={`journey-marker ${isCurrent && loading ? 'is-loading' : ''}`}>{isComplete ? <Check size={14} /> : String(stage.step).padStart(2, '0')}</span><span className="journey-copy"><strong>{stage.label}</strong><small>{stage.detail}</small></span></li> })}</ol></nav>
 }
 
 function StageIcon({ step, size }: { step: StoryStep; size: number }) {

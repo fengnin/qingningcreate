@@ -763,7 +763,7 @@ export async function reviewPreparationUncertainty(sources: StoryPreparation['so
   }
 }
 
-export async function generateStoryPreparation(idea: string, brief: CreativeBrief): Promise<ProvisionalCurve> {
+export async function generateStoryPreparation(idea: string, brief: CreativeBrief, onProgress?: (completedNodes: number) => void): Promise<ProvisionalCurve> {
   const sources = preparationSources(idea, brief)
   const frames = framePreparationSources(sources)
   let extracted = await requestQwenJson({ systemPrompt: preparationExtractionPrompt, userPrompt: JSON.stringify({ sources, material: frames }), temperature: 0.1, maxTokens: 2400, diagnosticStage: 'preparation-extraction', outputSchema: schemas.classification })
@@ -817,7 +817,9 @@ export async function generateStoryPreparation(idea: string, brief: CreativeBrie
       console.warn('[preparation] extracted mainline goals', JSON.stringify(mainlineGoals))
     }
   }
-  const candidates = await generatePreparationCandidates(sources, material, brief, mainlineAnchors, [], undefined, mainlineGoals, appealMaterialIds)
+  onProgress?.(1)
+  const candidates = await generatePreparationCandidates(sources, material, brief, mainlineAnchors, [], undefined, mainlineGoals, appealMaterialIds, () => onProgress?.(2))
+  onProgress?.(3)
   const now = Date.now()
   return { id: `curve-${randomUUID()}`, title: '一起选择故事方向', status: 'draft', brief, beats: [], instructions: [],
     preparation: { protocol: 1, status: 'needs-review', sources, material, mainlineAnchors, mainlineGoals, appealMaterialIds, ...candidates, acceptedCandidateIds: [], executed: false }, createdAt: now, updatedAt: now,
@@ -826,7 +828,7 @@ export async function generateStoryPreparation(idea: string, brief: CreativeBrie
 
 async function generatePreparationCandidates(sources: StoryPreparation['sources'], material: StoryPreparationItem[], brief: CreativeBrief,
   mainlineAnchors: StoryMainlineAnchor[] = [], rejectedCandidates: StoryPreparationCandidate[] = [], authorAction?: string,
-  mainlineGoals: StoryMainlineGoal[] = [], appealMaterialIds: string[] = []): Promise<Pick<StoryPreparation, 'candidates' | 'questions'>> {
+  mainlineGoals: StoryMainlineGoal[] = [], appealMaterialIds: string[] = [], onCandidatesGenerated?: () => void): Promise<Pick<StoryPreparation, 'candidates' | 'questions'>> {
   const creativeFocus = preparationCreativeFocus({ sources, material, appealMaterialIds })
   const input = { sources, material,
     creativeFocus,
@@ -837,6 +839,7 @@ async function generatePreparationCandidates(sources: StoryPreparation['sources'
       authorRequirements: sceneAuthorRequirements({ sources, material, brief, rejectedCandidates }) },
     prompt: `${directionCardGenerationPrompt}\n${storyCreativeIntentGuidance(brief, 'directions')}\n${openIdeaDirectionsGuidance}`,
     request: requestPreparationResponse,
+    onCandidatesGenerated,
     compress: raw => repairGeneratedTextLengths(raw, sources, 'preparation-directions-text-length'),
     parse: raw => {
       const result = parsePreparationCandidates(raw, material)
