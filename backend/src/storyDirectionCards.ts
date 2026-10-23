@@ -43,8 +43,8 @@ id用d0/d1/d2；引用只选referenceContract对应允许的材料ID，materialI
 // Exactly one causal judgment per branch. No repeated mechanism/general
 // causality verdict, copied action/outcome, or free-form aggregate issue list.
 export const directionCardReviewPrompt = `审查故事提案质量，只审当前三张方向卡，不扩写故事。reviewPlans是本轮需要判断的卡；unchangedPlans是此前通过且文字未变的卡，只用于比较差异，不重新审阅或修改。
-先逐卡提取characterNames，再逐分支判断因果，随后判断每卡主线、边界和范围，最后比较全组三卡差异。输出简洁JSON，cards每个输入id恰好一次，branches按optionIndex=0、1覆盖两种选择。
-characterNames必须逐一列出该卡difficulty、两个options.action和options.consequence中出现的全部人物具体姓名、昵称、英文名或人物代号，包括对白中提到和只在后果中出现的名字。只逐字摘录名字，去重；不能只列主角，也不能因为名字是提案或boundaries判为supported而省略。朋友、同学、老师等身份称呼不是姓名；作品名、地点名、物品名不是人物姓名。无人名时返回空数组。程序会独立核对名字是否来自作者sources，不接受卡片或rejectedCandidates作为命名授权，不要自行省略或改写姓名以通过检查。
+未允许系统命名时先逐卡提取characterNames；允许命名时不输出此字段。再逐分支判断因果，随后判断每卡主线、边界和范围，最后比较全组三卡差异。输出简洁JSON，cards每个输入id恰好一次，branches按optionIndex=0、1覆盖两种选择。
+需要characterNames时，逐一列出该卡difficulty、两个options.action和options.consequence中出现的全部人物具体姓名、昵称、英文名或人物代号，包括对白中提到和只在后果中出现的名字。只逐字摘录名字，去重；不能只列主角，也不能因为名字是提案或boundaries判为supported而省略。朋友、同学、老师等身份称呼不是姓名；作品名、地点名、物品名不是人物姓名。无人名时返回空数组。程序会独立核对名字是否来自作者sources，不接受卡片或rejectedCandidates作为命名授权，不要自行省略或改写姓名以通过检查。
 branches只负责因果：假设实际执行action，按本卡difficulty与完整consequence核对全部关键断言。analysis先核算明示的时间、金额、数量，再简述行动实际改变和未改变什么，最多100字；不把其他卡条件混入本卡，尤其不能把另一卡时刻、距离、资源或场次当成本卡已给条件。evidenceFields从difficulty/action/consequence选择依据所在字段，程序保留原文，不重抄引用。
 判断对象是consequence实际声称的变化，不是人物是否最终成功。主动暂缓→目标延后、放弃→失去机会、失败→仍有困难，都可以是因果成立的设计；不得以“没有完成目标、未解决阻碍、尚未推进”拒绝如实写出这些后果的分支。仅当后果冒称完成、进展或其他无依据变化时才拒绝。
 consequence是待核对的声称，不是证明它成立的证据。严格保留原句断言强度：原句直接写“获得许可、完成归还、责任结束”等结果时，不得在analysis自行加“若对方同意、如果成功、可能”来判通过。未来设计本身不等于所有断言都有隐含条件；需要他人决定才能获得的状态，须在action中实际写出回应或在consequence中明确保留条件。仅提出请求、预约或约定，不证明后续必要事件已经完成。
@@ -56,9 +56,9 @@ mainline/boundaries/scope各给verdict和reason，通过时reason简写为“相
 diversity比较reviewPlans与unchangedPlans的整体：互斥备选，不比较成前后时间线；只有实质重复才拒绝。repairIds只从本轮reviewPlans选最少需修改的卡，保留其他卡。通过时repairIds=[]、reason="不同阻碍"；失败须有非空repairIds和具体重复理由。ignoreDiversity=true是固定对照样本，跳过差异要求。不要输出独立issues或再次给总评因果。
 ${storySettingScopeGuidance}`
 
-export function directionCardReviewSchema(ids: string[]): OutputSchema {
+export function directionCardReviewSchema(ids: string[], checkNames = true): OutputSchema {
   return s.object({ cards: s.array(s.object({ id: s.enum(...ids),
-    characterNames: s.array(s.text, 0, 16),
+    ...(checkNames ? { characterNames: s.array(s.text, 0, 16) } : {}),
     branches: s.array(s.object({ optionIndex: s.enum(0, 1), analysis: s.text,
       evidenceFields: s.array(s.enum('difficulty', 'action', 'consequence'), 1, 3), verdict }), 2, 2),
     mainline: judgment, boundaries: judgment, scope: judgment,
@@ -66,7 +66,15 @@ export function directionCardReviewSchema(ids: string[]): OutputSchema {
 }
 
 export function parseDirectionCardReview(raw: unknown, plans: DirectionLogicPlan[], policy?: NamingPolicy): Issue[] {
-  if (outputShapeErrors(raw, directionCardReviewSchema(plans.map(p => p.id))).length) return invalid()
+  const checkNames = policy?.allowSystemNamedCharacters !== true
+  // Ignore unused legacy inventories when the author has authorized naming.
+  const reviewed = !checkNames && raw && typeof raw === 'object' && Array.isArray((raw as { cards?: unknown }).cards)
+    ? { ...raw, cards: (raw as { cards: unknown[] }).cards.map(card => {
+      if (!card || typeof card !== 'object' || Array.isArray(card)) return card
+      const { characterNames: _unused, ...rest } = card as Record<string, unknown>
+      return rest
+    }) } : raw
+  if (outputShapeErrors(reviewed, directionCardReviewSchema(plans.map(p => p.id), checkNames)).length) return invalid()
   const audit = raw as { cards: { id: string; characterNames: string[]; branches: { optionIndex: number; analysis: string; evidenceFields: string[]; verdict: string }[];
     mainline: { verdict: string; reason: string }; boundaries: { verdict: string; reason: string }; scope: { verdict: string; reason: string } }[];
     diversity: { passed: boolean; repairIds: string[]; reason: string } }
@@ -75,13 +83,15 @@ export function parseDirectionCardReview(raw: unknown, plans: DirectionLogicPlan
   const bounded = (text: string) => !!text.trim() && text.length <= 300
   for (const card of audit.cards) {
     const plan = plans.find(p => p.id === card.id)!
+    const names = checkNames ? [...new Set(card.characterNames.map(name => name.trim()).filter(Boolean))] : []
     const text = [plan.difficulty, ...plan.options.flatMap(option => [option.action, option.consequence])]
-    if (new Set(card.characterNames).size !== card.characterNames.length
-      || card.characterNames.some(name => !name.trim() || name !== name.trim() || name.length > 80 || !text.some(part => part.includes(name)))) return invalid()
+    if (names.some(name => name.length > 80 || !text.some(part => part.includes(name)))) {
+      throw new AppError('姓名提取与当前卡片原文不符，请只纠正 characterNames，逐字提取当前卡片中的人物名字，不修改卡片或其他判断。', 502, 'STORY_PREPARATION_INVALID_OUTPUT')
+    }
     // Entity recognition stays with the existing semantic review; permission
     // and source provenance are enforced independently of its overall verdict.
     if (policy && !policy.allowSystemNamedCharacters) {
-      const unapproved = card.characterNames.filter(name => !policy.authorTexts.some(source => source.includes(name)))
+      const unapproved = names.filter(name => !policy.authorTexts.some(source => source.includes(name)))
       if (unapproved.length) issues.push({ id: card.id, reason: `作者边界：未允许系统提出具名人物，作者原文未提供姓名“${unapproved.join('、')}”；请保留未具名人物，仅改用关系或身份称呼。` })
     }
     for (const [i, branch] of card.branches.entries()) {
@@ -172,7 +182,7 @@ export async function generateDirectionCards(options: {
     issues = await options.request({ systemPrompt: `${directionCardReviewPrompt}\n${namingGuidance}\n命名审阅必须对照sources识别人名来源，卡片自己生成的名字不是作者授权；未经允许给新人物起名时，将该卡boundaries判为unsupported，reason指出新增名字及命名权限冲突。允许增加未具名的人物，不因人物未出现在原文就拒绝；作品名和场所名不当作人物姓名。`,
       userPrompt: JSON.stringify({ ...options.input, reviewPlans, unchangedPlans: plans.filter(p => !changedIds.includes(p.id)) }),
       temperature: 0.1, maxTokens: 400 + reviewPlans.length * 600,
-      diagnosticStage: 'preparation-direction-card-review', outputSchema: directionCardReviewSchema(changedIds),
+      diagnosticStage: 'preparation-direction-card-review', outputSchema: directionCardReviewSchema(changedIds, !policy.allowSystemNamedCharacters),
     }, raw => parseDirectionCardReview(raw, reviewPlans, policy))
     if (process.env.STORY_PREPARATION_DIAGNOSTICS === 'true') console.warn('[preparation] direction-card-review', JSON.stringify({ attempt: attempt + 1, reviewedIds: changedIds, issues }))
     if (!issues.length) return { candidates, questions: [] }

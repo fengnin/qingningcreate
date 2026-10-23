@@ -111,14 +111,51 @@ test('name provenance preserves author names, allowed new names and ordinary tit
   assert.doesNotMatch(issues[0]!.reason, /夏日回声|售票员/)
 })
 
-test('name inventory must be present, unique and copied from the actual reviewed card', () => {
-  for (const characterNames of [undefined, ['不在卡片中的名字'], ['小满', '小满'], ['']]) {
+test('unauthorized naming still requires an inventory grounded in the reviewed card', () => {
+  for (const characterNames of [undefined, ['不在卡片中的名字']]) {
     const current = plans()
     current[0]!.difficulty = '朋友小满发烧。'
     const audit: any = pass(['d0', 'd1', 'd2'])
     audit.cards[0].characterNames = characterNames
     assert.throws(() => parseDirectionCardReview(audit, current))
   }
+})
+
+test('inventory formatting does not reject valid cards or conceal unapproved names', () => {
+  const current = plans(), audit = pass(['d0', 'd1', 'd2'])
+  current[0]!.difficulty = '青柠和朋友小满一起等候。'
+  audit.cards[0]!.characterNames = [' 青柠 ', '青柠', '', ' 小满 ', '小满']
+  const policy = { allowSystemNamedCharacters: false, authorTexts: ['青柠想看电影。'] }
+  const issues = parseDirectionCardReview(audit, current, policy)
+  assert.equal(issues.length, 1)
+  assert.match(issues[0]!.reason, /小满/)
+  assert.doesNotMatch(issues[0]!.reason, /青柠/)
+  audit.cards[0]!.characterNames = [' 青柠 ', '青柠', '']
+  assert.deepEqual(parseDirectionCardReview(audit, current, policy), [])
+})
+
+test('authorized naming needs no inventory and retains other quality checks', async () => {
+  let calls = 0
+  const result = await generateDirectionCards({ input: { material, brief: { allowSystemNamedCharacters: true } },
+    prompt: '测试', compress: async raw => raw, parse: raw => parsePreparationCandidates(raw, material),
+    request: async (options, parse) => {
+      calls++
+      if (options.diagnosticStage === 'preparation-directions') return parse({ plans: plans() })
+      assert.equal(options.outputSchema!.properties!.cards!.items!.properties!.characterNames, undefined)
+      const audit: any = pass(['d0', 'd1', 'd2'])
+      audit.cards.forEach((card: any) => { delete card.characterNames })
+      assert.deepEqual(outputShapeErrors(audit, options.outputSchema!), [])
+      return parse(audit)
+    },
+  })
+  assert.equal(calls, 2)
+  assert.equal(result.candidates.length, 3)
+  const audit: any = pass(['d0', 'd1', 'd2'])
+  audit.cards[0].characterNames = 'unused legacy metadata'
+  const policy = { allowSystemNamedCharacters: true, authorTexts: [] }
+  assert.deepEqual(parseDirectionCardReview(audit, plans(), policy), [])
+  audit.cards[0].branches[0].verdict = 'unsupported'
+  assert.equal(parseDirectionCardReview(audit, plans(), policy).length, 1)
 })
 
 test('a remaining unapproved name cannot escape the bounded repair loop', async () => {
