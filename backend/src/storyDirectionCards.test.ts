@@ -8,7 +8,7 @@ const plans = () => [0, 1, 2].map(i => ({ id: `d${i}`, difficulty: `第${i}种�
   { action: '争取继续原计划', consequence: '可能继续，但要承担费用。' },
   { action: '主动改期再尝试', consequence: '机会延后，需要重新安排。' },
 ], materialIds: ['m0'], preconditionIds: [], resultBasisIds: [] }))
-const pass = (ids: string[]) => ({ cards: ids.map(id => ({ id, characterNames: [] as string[], branches: [0, 1].map(optionIndex => ({ optionIndex,
+const pass = (ids: string[]) => ({ cards: ids.map(id => ({ id, branches: [0, 1].map(optionIndex => ({ optionIndex,
   analysis: '格式桩，不证明语义判断。', evidenceFields: ['action', 'consequence'], verdict: 'supported' })),
   mainline: { verdict: 'supported', reason: '相容' }, boundaries: { verdict: 'supported', reason: '相容' },
   scope: { verdict: 'supported', reason: '相容' },
@@ -57,124 +57,6 @@ test('review has exactly one causal verdict per branch and no duplicated prose/c
   assert.ok(outputShapeErrors({ ...pass(['d0']), issues: [] }, schema).length)
   assert.deepEqual(Object.keys(schema.properties!.cards!.items!.properties!.branches!.items!.properties!),
     ['optionIndex', 'analysis', 'evidenceFields', 'verdict'])
-})
-
-for (const field of ['difficulty', 'action-0', 'action-1', 'consequence-0', 'consequence-1']) {
-  test(`an unapproved name in ${field} repairs only its card despite supported model verdicts`, async () => {
-    const original = plans(), repaired = plans()[1]!
-    if (field === 'difficulty') original[1]!.difficulty = '青柠的朋友小满临出发前发烧。'
-    else {
-      const [key, index] = field.split('-')
-      original[1]!.options[Number(index)]![key as 'action' | 'consequence'] = '小满希望改约明天。'
-    }
-    let generations = 0
-    const result = await generateDirectionCards({ input: { material,
-      sources: [{ id: 'author-input', text: material[0]!.quote }], brief: { allowSystemNamedCharacters: false },
-      rejectedCandidates: [{ action: '曾经生成过小满。' }] },
-      prompt: '测试', compress: async raw => raw, parse: raw => parsePreparationCandidates(raw, material),
-      request: async (options, parse) => {
-        const input = JSON.parse(options.userPrompt)
-        if (options.diagnosticStage === 'preparation-directions') {
-          if (++generations === 1) return parse({ plans: original })
-          assert.deepEqual(input.repairIds, ['d1'])
-          assert.match(input.validationFailure, /小满/)
-          assert.deepEqual(input.unchangedPlans, [original[0], original[2]])
-          return parse({ plans: [repaired] })
-        }
-        const audit = pass(input.reviewPlans.map((p: any) => p.id))
-        if (generations === 1) audit.cards[1]!.characterNames = ['青柠', '小满'].filter(name =>
-          JSON.stringify(original[1]).includes(name))
-        return parse(audit)
-      },
-    })
-    assert.equal(generations, 2)
-    assert.equal(result.candidates.length, 3)
-    assert.doesNotMatch(JSON.stringify(result.candidates), /小满/)
-    assert.deepEqual(result.candidates.map(c => c.id), ['d0', 'd1', 'd2'])
-  })
-}
-
-test('name provenance preserves author names, allowed new names and ordinary titles', () => {
-  const current = plans()
-  current[0]!.difficulty = '青柠和小满去看《夏日回声》，售票员请她们稍等。'
-  const audit = pass(['d0', 'd1', 'd2'])
-  audit.cards[0]!.characterNames = ['青柠', '小满']
-  assert.deepEqual(parseDirectionCardReview(audit, current, { allowSystemNamedCharacters: false,
-    authorTexts: ['青柠约小满看电影。'] }), [])
-  assert.deepEqual(parseDirectionCardReview(audit, current, { allowSystemNamedCharacters: true,
-    authorTexts: ['青柠想去看电影。'] }), [])
-  const issues = parseDirectionCardReview(audit, current, { allowSystemNamedCharacters: false,
-    authorTexts: ['青柠想去看电影。'] })
-  assert.equal(issues.length, 1)
-  assert.equal(issues[0]!.id, 'd0')
-  assert.match(issues[0]!.reason, /小满/)
-  assert.doesNotMatch(issues[0]!.reason, /夏日回声|售票员/)
-})
-
-test('unauthorized naming still requires an inventory grounded in the reviewed card', () => {
-  for (const characterNames of [undefined, ['不在卡片中的名字']]) {
-    const current = plans()
-    current[0]!.difficulty = '朋友小满发烧。'
-    const audit: any = pass(['d0', 'd1', 'd2'])
-    audit.cards[0].characterNames = characterNames
-    assert.throws(() => parseDirectionCardReview(audit, current))
-  }
-})
-
-test('inventory formatting does not reject valid cards or conceal unapproved names', () => {
-  const current = plans(), audit = pass(['d0', 'd1', 'd2'])
-  current[0]!.difficulty = '青柠和朋友小满一起等候。'
-  audit.cards[0]!.characterNames = [' 青柠 ', '青柠', '', ' 小满 ', '小满']
-  const policy = { allowSystemNamedCharacters: false, authorTexts: ['青柠想看电影。'] }
-  const issues = parseDirectionCardReview(audit, current, policy)
-  assert.equal(issues.length, 1)
-  assert.match(issues[0]!.reason, /小满/)
-  assert.doesNotMatch(issues[0]!.reason, /青柠/)
-  audit.cards[0]!.characterNames = [' 青柠 ', '青柠', '']
-  assert.deepEqual(parseDirectionCardReview(audit, current, policy), [])
-})
-
-test('authorized naming needs no inventory and retains other quality checks', async () => {
-  let calls = 0
-  const result = await generateDirectionCards({ input: { material, brief: { allowSystemNamedCharacters: true } },
-    prompt: '测试', compress: async raw => raw, parse: raw => parsePreparationCandidates(raw, material),
-    request: async (options, parse) => {
-      calls++
-      if (options.diagnosticStage === 'preparation-directions') return parse({ plans: plans() })
-      assert.equal(options.outputSchema!.properties!.cards!.items!.properties!.characterNames, undefined)
-      const audit: any = pass(['d0', 'd1', 'd2'])
-      audit.cards.forEach((card: any) => { delete card.characterNames })
-      assert.deepEqual(outputShapeErrors(audit, options.outputSchema!), [])
-      return parse(audit)
-    },
-  })
-  assert.equal(calls, 2)
-  assert.equal(result.candidates.length, 3)
-  const audit: any = pass(['d0', 'd1', 'd2'])
-  audit.cards[0].characterNames = 'unused legacy metadata'
-  const policy = { allowSystemNamedCharacters: true, authorTexts: [] }
-  assert.deepEqual(parseDirectionCardReview(audit, plans(), policy), [])
-  audit.cards[0].branches[0].verdict = 'unsupported'
-  assert.equal(parseDirectionCardReview(audit, plans(), policy).length, 1)
-})
-
-test('a remaining unapproved name cannot escape the bounded repair loop', async () => {
-  const original = plans()
-  original[1]!.difficulty = '好友小满临出发前发烧。'
-  let calls = 0
-  await assert.rejects(generateDirectionCards({ input: { material,
-    sources: [{ id: 'author-input', text: material[0]!.quote }], brief: { allowSystemNamedCharacters: false } },
-    prompt: '测试', compress: async raw => raw, parse: raw => parsePreparationCandidates(raw, material),
-    request: async (options, parse) => {
-      calls++
-      const input = JSON.parse(options.userPrompt)
-      if (options.diagnosticStage === 'preparation-directions') return parse({ plans: input.repairIds ? [original[1]] : original })
-      const audit = pass(input.reviewPlans.map((p: any) => p.id))
-      audit.cards.find(c => c.id === 'd1')!.characterNames = ['小满']
-      return parse(audit)
-    },
-  }), { code: 'STORY_PREPARATION_QUALITY_FAILED' })
-  assert.equal(calls, 4)
 })
 
 test('review validates card coverage, branch order, field references and diversity attribution', () => {

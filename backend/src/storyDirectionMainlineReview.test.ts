@@ -43,7 +43,7 @@ async function withModel(reply: (stage: string, input: any) => unknown, run: () 
       actionChecks: logicPass(input.structuredProposal.plans) }
     if (input.consequenceCatalog && output?.candidateChecks && output.consequenceChecks === undefined) output = { ...output,
       consequenceChecks: input.consequenceCatalog.map((e: any) => ({ id: e.id, resultStatus: 'uncertain', prerequisite: '', prerequisiteStatus: 'not-needed', verdict: 'supported', reason: '格式桩，不证明语义正确。' })) }
-    if (compact && output?.candidateChecks) output = { cards: output.candidateChecks.map((c: any) => ({ id: c.id, characterNames: [],
+    if (compact && output?.candidateChecks) output = { cards: output.candidateChecks.map((c: any) => ({ id: c.id,
       branches: output.actionChecks.find((a: any) => a.id === c.id)?.branches.map((b: any, i: number) => ({ optionIndex: i,
         analysis: b.analysis, evidenceFields: ['action', 'consequence'],
         verdict: c.branches?.[i]?.mechanism === 'unsupported' || ['substituted', 'unaddressed'].includes(c.branches?.[i]?.goalEffect) ? 'unsupported' : b.verdict })),

@@ -474,8 +474,12 @@ developments 必须恰好 ${pending.length} 项，id 只能为 ${pending.map(can
       const factChecks = reviewableCandidates.length ? await requestPreparationResponse({
         systemPrompt: `核对因果桥是否违背作者已定事实。只做来源与事实冲突核对，不评价新设定是否可信、人物办法是否有效或故事是否精彩。返回紧凑JSON {checks:[{id,verdict,conflictMaterialIds,proposalEvidenceIds,reason}]}，每个id恰好一项。verdict只能为compatible或contradictory，是唯一判定；引用只是冲突证据，不能代替判定。不输出valid、materialIds、sourceId或quote。
 没有直接冲突时verdict="compatible"，conflictMaterialIds=[]、proposalEvidenceIds=[]，reason简写为“无冲突”。不要引用相容或支持提案的材料。只有提案明确否定、替换或越过作者已经写明的事实、限制或保留的未知时，才给contradictory；此时conflictMaterialIds从material选择至少一条被违背的作者原条件，proposalEvidenceIds从evidenceCatalog选择至少一条当前方向中与其冲突的提案原文，reason具体说明双方哪里矛盾。理由、判定与冲突依据须一致。不重新抄写引文。新规则、服务、设备或人物首次出现在提案中，本身绝不是事实冲突；不得因作者没写过而拒绝，也不把数量上限扩大成使用者资格或操控方式限制。若输入有validationFailure，只改正当前审阅，不重写故事，不为保留旧结论编造冲突。
+人物愿望不等于作者要求必须成功：想、打算、希望完成某事，不能自动解释为禁止改期、失败、接受代价或有动机地放弃。selectedStoryDirection若存在，是作者选定的本版取舍；与生成展开使用同一走向核对。原愿望因困难而调整、损失或放弃，且仍影响人物选择和代价，不构成对愿望本身的事实否定。不要为让人物继续原计划而拒绝作者已选分支，也不要把放弃原计划说成原目标已完成。
+选定方向只授权该分支内的未来设计，不覆盖作者明确的必须、禁止、既定结局、已定事实或保留未知；有这些硬性冲突仍须引用双方原文并拒绝。不同分支是互斥备选，不把未选分支的行动、结果当成当前分支必须实现的事实。
 ${storySemanticReviewGuidance}`,
-        userPrompt: JSON.stringify({ sources, material: factMaterial, candidates: input.candidates.filter(candidate => reviewableCandidates.some(item => item.id === candidate.id)),
+        userPrompt: JSON.stringify({ sources, material: factMaterial,
+          ...(selectedStoryDirection ? { selectedStoryDirection } : {}),
+          candidates: input.candidates.filter(candidate => reviewableCandidates.some(item => item.id === candidate.id)),
           bridges: bridges.filter(bridge => reviewableCandidates.some(item => item.id === bridge.id)),
           futureChoices: choices.filter(choice => reviewableCandidates.some(item => item.id === choice.id)).map(choice => ({ id: choice.id, text: choice.value })),
           evidenceCatalog: factEvidence }),
