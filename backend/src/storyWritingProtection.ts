@@ -104,6 +104,10 @@ export function writingContext(idea: string, curve: ConfirmedCurve, draft: Story
   const authority = writingAuthority(idea, curve)
   const followingBeats = beats.slice(index + 1).map(({ id, kind, title, detail }) => ({ id, kind, title, detail }))
   const acceptedProse = draft.segments.slice(0, index).filter(s => s.status === 'accepted').map(({ id, label, text, authorship }) => ({ id, label, text, authorship: authorship ?? 'model' }))
+  const lastAccepted = acceptedProse.at(-1)
+  const continuationPoint = lastAccepted ? { afterSegmentId: lastAccepted.id,
+    ending: lastAccepted.text.trim().split(/\n\s*\n/u).at(-1)!,
+    rule: '本段从已采用正文的实际结尾向前接写，不能退回前段中间重新表演已完成的动作或回应。' } : null
   return {
     reviewIdentity: hash({ idea, curve }),
     brief: curve.brief, ...authority,
@@ -120,7 +124,7 @@ export function writingContext(idea: string, curve: ConfirmedCurve, draft: Story
     currentBeat: { id: beat.id, kind: beat.kind, title: beat.title, detail: beat.detail },
     nextBeatBoundary: followingBeats[0] ?? null,
     followingBeats, futureDesign: { executed: false, beats: followingBeats },
-    isLast: index === beats.length - 1, acceptedProse,
+    isLast: index === beats.length - 1, acceptedProse, continuationPoint,
     continuity: draft.continuity?.snapshots.filter(s => acceptedProse.some(p => p.id === s.segmentId)) ?? [],
     expansionNeeds: selectedExpansionNeeds(curve.preparation),
     ...(draft.segments[index] ? { previousText: draft.segments[index]!.text, previousAuthorship: draft.segments[index]!.authorship ?? 'model',
@@ -141,6 +145,7 @@ export function writingGenerationInput(context: Context) {
     storyIntent: context.designContract ? { goal: context.designContract.goal.text,
       selectedDirection: context.designContract.selectedDirection ?? null } : null,
     acceptedProse: context.acceptedProse,
+    continuationPoint: context.continuationPoint,
     currentBeat: context.currentBeat,
     followingBeats: context.followingBeats,
     isLast: context.isLast,

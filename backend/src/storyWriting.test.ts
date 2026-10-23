@@ -83,10 +83,13 @@ test('segments generate with context and assemble after ordered acceptance witho
   await withModelReplies([{ text: '第一段。' }, { text: '第二段。' }], async requests => {
     let draft = await reviseWritingDraft('想法', titled, undefined, req('start'))
     assert.equal(draft.segments[0]!.status, 'pending')
+    assert.equal(JSON.parse(requests[0].messages[1].content).continuationPoint, null)
     draft = await reviseWritingDraft('想法', titled, draft, req('accept', { segmentId: draft.segments[0]!.id }))
     draft = await reviseWritingDraft('想法', titled, draft, req('next'))
     const context = JSON.parse(requests[1].messages[1].content)
     assert.equal(context.acceptedProse[0].text, '第一段。')
+    assert.equal(context.continuationPoint.afterSegmentId, draft.segments[0]!.id)
+    assert.equal(context.continuationPoint.ending, '第一段。')
     assert.equal(context.followingBeats.length, 0)
     draft = await reviseWritingDraft('想法', titled, draft, req('accept', { segmentId: draft.segments[1]!.id }))
     assert.equal(draft.complete, true)
@@ -111,6 +114,8 @@ test('structured design reviews a generated segment before it becomes pending', 
 
 test('generation preserves author requirements and full prose but ignores hidden plans and previous verdicts', async () => {
   const c = structuredClone(contractedCurve), draft = prefix()
+  draft.segments[0]!.text = '她站在窗边。\n\n她向朋友确认后，收好球票。'
+  draft.segments[0]!.authorship = 'author'
   c.designContract!.nodes[1]!.text = '过时节点描述。'
   c.designContract!.nodes[1]!.action = '隐藏行动：她飞去另一座城市。'
   c.designContract!.nodes[1]!.expectedChange = '隐藏结果：她再也不看球。'
@@ -122,6 +127,8 @@ test('generation preserves author requirements and full prose but ignores hidden
     const input = JSON.parse(requests[0].messages[1].content)
     assert.equal(input.currentBeat.detail, c.beats[1]!.detail)
     assert.equal(input.acceptedProse[0].text, draft.segments[0]!.text)
+    assert.equal(input.continuationPoint.afterSegmentId, draft.segments[0]!.id)
+    assert.equal(input.continuationPoint.ending, '她向朋友确认后，收好球票。')
     assert.equal(input.authorRequirements[0].quote, '先向朋友确认再出发。')
     for (const field of ['designContract', 'designMainlineReview', 'evidence', 'continuity', 'futureDesign', 'nextBeatBoundary']) assert.equal(input[field], undefined)
     assert.ok(!requests[0].messages[1].content.includes('$textRef'))
