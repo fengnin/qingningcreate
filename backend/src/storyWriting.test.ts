@@ -138,16 +138,16 @@ test('generation preserves author requirements and full prose but ignores hidden
   })
 })
 
-test('inconclusive final reviews allow completion with notices, without changing accepted text', async () => {
+test('an inconclusive final mainline review allows completion with a notice', async () => {
   const draft = prefix()
   draft.segments.push({ id: 's2', beatId: 'b2', label: '回应', text: '她赶往球场。', status: 'pending' })
   const before = structuredClone(draft)
-  await withModelReplies([{ verdict: 'uncertain', reason: '无法确认。', evidenceIds: [] }, { verdict: 'uncertain', issues: [] }], async () => {
+  await withModelReplies([{ verdict: 'uncertain', reason: '无法确认。', evidenceIds: [] }], async () => {
     const result = await reviseWritingDraft('去看球赛', contractedCurve, draft, req('accept', { segmentId: 's2' }))
     assert.equal(result.complete, true)
-    assert.equal(result.review?.length, 2)
+    assert.equal(result.review?.length, 1)
     assert.ok(result.review?.every(item => item.tone === 'warn'))
-    assert.equal(assembleWrittenStory(contractedCurve, result)?.review.length, 2)
+    assert.equal(assembleWrittenStory(contractedCurve, result)?.review.length, 1)
     assert.deepEqual(result.segments.map(s => s.text), before.segments.map(s => s.text))
     assert.deepEqual(draft, before)
     const edited = await reviseWritingDraft('去看球赛', contractedCurve, result, req('edit', { segmentId: 's2', text: '她赶到了球场。' }))
@@ -202,14 +202,13 @@ test('the final accepted story is checked against the whole design contract befo
     { text: '她赶往球场并做出最后决定。' },
     { verdict: 'supported', reason: '当前段继续推进看球赛。', evidenceIds: ['design-contract:goal'] },
     { verdict: 'supported', reason: '完整正文从准备到赶往球场都服务看球赛目标。', evidenceIds: ['design-contract:goal', 'design-contract:selected-direction'] },
-    { verdict: 'supported', issues: [] },
   ], async requests => {
     let draft = await reviseWritingDraft('她想去看球赛。', contractedCurve, undefined, req('start'))
     draft = await reviseWritingDraft('她想去看球赛。', contractedCurve, draft, req('accept', { segmentId: draft.segments[0]!.id }))
     draft = await reviseWritingDraft('她想去看球赛。', contractedCurve, draft, req('next'))
     draft = await reviseWritingDraft('她想去看球赛。', contractedCurve, draft, req('accept', { segmentId: draft.segments[1]!.id }))
     assert.equal(draft.complete, true)
-    assert.equal(requests.length, 6)
+    assert.equal(requests.length, 5)
     assert.equal(requests[4].messages[0].content.includes('已经拼接完成的完整正文'), true)
     assert.equal(assembleWrittenStory(contractedCurve, draft)?.body, '她整理好出门要带的东西。\n\n她赶往球场并做出最后决定。')
   })

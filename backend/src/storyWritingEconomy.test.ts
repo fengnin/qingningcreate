@@ -69,18 +69,17 @@ test('request compaction preserves full text, all evidence roles, order and poin
   assert.equal(serializeWritingInput({ text: '很短。', copy: '很短。' }), JSON.stringify({ text: '很短。', copy: '很短。' }))
 })
 
-test('final retry reuses only the passed stage while the rejected draft stays unchanged', async () => {
+test('final acceptance checks the mainline once without running a second factual audit', async () => {
   const { curve, draft } = fixture(), before = structuredClone(draft)
   await stubModel(async (requests, replies) => {
-    const conflict = { verdict: 'conflict', issues: [{ kind: 'time-order', reason: '需重试核对。', evidenceIds: ['complete-text:0', 'complete-text:1'] }] }
-    replies.push(supported(), conflict, conflict, consistent())
+    replies.push(supported())
     const request = { storyId: 's', revision: 1, action: 'accept' as const, segmentId: 's2' }
-    await assert.rejects(reviseWritingDraft('核对书单', curve, draft, request), { code: 'STORY_WRITING_COMPLETE_CONSISTENCY_CONFLICT' })
-    assert.deepEqual(draft, before)
     const complete = await reviseWritingDraft('核对书单', curve, draft, request)
     assert.equal(complete.complete, true)
+    assert.deepEqual(draft, before)
+    assert.equal(requests.length, 1)
     assert.deepEqual(requests.map(r => r.response_format.json_schema.name), [
-      'story-writing-mainline-review', 'story-writing-consistency-review', 'story-writing-consistency-confirmation', 'story-writing-consistency-review',
+      'story-writing-mainline-review',
     ])
   })
 })

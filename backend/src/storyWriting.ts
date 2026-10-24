@@ -3,7 +3,7 @@ import { AppError, requestQwenJson } from './qwen.js'
 import { shape as s } from './modelOutputSchema.js'
 import { storyCreativeIntentGuidance } from './storyCreativeIntent.js'
 import { authorRequirementsGuidance } from './storyPreparationContext.js'
-import { reviewCompleteWritingConsistency, reviewWritingMainline, writingContext, writingGenerationInput, writingAuthorityGuidance, storyExpansionGuidance } from './storyWritingProtection.js'
+import { reviewWritingMainline, writingContext, writingGenerationInput, writingAuthorityGuidance, storyExpansionGuidance } from './storyWritingProtection.js'
 import { observeAdjacentRepeat } from './storyAdjacentRepeatShadow.js'
 import type { ConfirmedCurve, GeneratedStory, StoryWritingDraft, StoryWritingRequest } from '../../shared/story-contract.js'
 
@@ -64,13 +64,10 @@ export async function reviseWritingDraft(
         acceptedProse: candidate.segments.map(({ id, label, text, authorship }) => ({ id, label, text, authorship: authorship ?? 'model' })) }
       const review = await reviewWritingMainline(finalContext, candidate.segments.map(item => item.text).join('\n\n'), 'complete')
       if (review.verdict === 'drift') throw new AppError(`完整故事偏离已确认主线：${review.reason} 请重写或修改最后一段。已采用正文仍保留。`, 502, 'STORY_WRITING_COMPLETE_MAINLINE_DRIFT')
-      const consistency = await reviewCompleteWritingConsistency(finalContext, candidate.segments.map(item => item.text).join('\n\n'))
-      if (consistency.verdict === 'conflict') throw new AppError(`完整故事存在前后事实矛盾：${consistency.issues.map(issue => issue.reason).join('；')} 请修改相关段落。已采用正文仍保留。`, 502, 'STORY_WRITING_COMPLETE_CONSISTENCY_CONFLICT')
       // Inconclusive model opinions are retained, not promoted to passes or
       // treated as evidence that accepted prose is invalid.
       candidate.review = [
         ...(review.verdict === 'uncertain' ? [{ label: '故事设计核对', value: '尚未确认', detail: '系统暂未确认关键行动是否完整兑现。', tone: 'warn' as const }] : []),
-        ...(consistency.verdict === 'uncertain' ? [{ label: '事实连续性核对', value: '尚未确认', detail: '系统暂未确认全文事实关系，未据此判定正文有误。', tone: 'warn' as const }] : []),
       ]
     }
     candidate.complete = isComplete
